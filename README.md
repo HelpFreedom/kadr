@@ -2,7 +2,7 @@
 
 **ИИ-нативный видеоредактор с GPU-ускорением — и с Claude Code прямо в таймлайне.**
 
-[English version →](README.en.md) · [Полное руководство по функциям →](FEATURES.md)
+[English version →](README.en.md) · [Полное руководство по функциям →](FEATURES.md) · [Video →](https://www.youtube.com/watch?v=1RKRtRgzE24)
 
 ![Демо Kadr](demo.gif)
 

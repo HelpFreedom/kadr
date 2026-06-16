@@ -30,10 +30,13 @@ if (process.platform === 'linux') {
   // through MailboxVideoFrameConverter, which needs a platform-GMB-backed
   // BGRA_8888 SharedImage that SwiftShader has no factory for, so the GPU
   // process crashes ("Could not find SharedImageBackingFactory") and playback
-  // dies with PIPELINE_ERROR_DISCONNECTED — leaving a black preview. So only
-  // fall back to it with an explicit KADR_SOFTWARE_GL, or when there is no
-  // display server at all (genuinely headless CI). When a display is present
-  // (incl. e2e runs with --remote-debugging-port) use the real GPU.
+  // dies with PIPELINE_ERROR_DISCONNECTED — leaving a black preview. This is an
+  // upstream Chromium limitation that cannot be worked around in-app (the crash
+  // happens in the decode->compositor pipeline, before our texture upload), so
+  // headless CI must provide a real/virtual GPU (e.g. xvfb-run with a GL driver)
+  // to exercise video preview. We only fall back to SwiftShader with an explicit
+  // KADR_SOFTWARE_GL, or when there is no display server at all. When a display
+  // is present (incl. e2e runs with --remote-debugging-port) use the real GPU.
   const headless = !process.env.WAYLAND_DISPLAY && !process.env.DISPLAY
   if (process.env.KADR_SOFTWARE_GL || headless) {
     app.commandLine.appendSwitch('use-gl', 'angle')
@@ -85,9 +88,7 @@ function createWindow() {
   win.webContents.on('did-fail-load', (_e, errorCode, errorDescription) => {
     console.error(`[kadr] Page failed to load: ${errorCode} ${errorDescription}`)
   })
-  win.webContents.on('crashed', () => {
-    console.error('[kadr] Renderer crashed!')
-  })
+  // ('crashed' was removed in Electron 42 — 'render-process-gone' above covers it)
 
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -164,6 +165,14 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   if (m && (m[1] || m[2])) {
     const start = m[1] ? parseInt(m[1], 10) : Math.max(0, size - parseInt(m[2], 10))
     const end = m[1] && m[2] ? Math.min(parseInt(m[2], 10), size - 1) : size - 1
+    // A range whose start sits at/after EOF (or past the end) is unsatisfiable —
+    // createReadStream would throw ERR_OUT_OF_RANGE. Answer 416 per RFC 7233.
+    if (start > end || start >= size) {
+      return new Response(null, {
+        status: 416,
+        headers: { 'Content-Range': `bytes */${size}`, 'Access-Control-Allow-Origin': '*' }
+      })
+    }
     return new Response(streamBody(createReadStream(filePath, { start, end })), {
       status: 206,
       headers: {
@@ -190,7 +199,6 @@ app.whenReady().then(() => {
   protocol.handle('kadr', (request) => {
     const url = new URL(request.url)
     const filePath = decodeURIComponent(url.pathname)
-    console.log('[kadr] protocol request:', request.url, '-> file:', filePath, 'range:', request.headers.get('range'))
     try {
       return mediaResponse(filePath, request.headers.get('range'))
     } catch (err) {

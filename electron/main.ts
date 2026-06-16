@@ -14,15 +14,31 @@ import type { ExportJob, Project } from '@shared/types'
 protocol.registerSchemesAsPrivileged([
   { scheme: 'kadr', privileges: { secure: true, stream: true, supportFetchAPI: true, bypassCSP: true } }
 ])
+// GPU configuration for Linux:
+// Electron 38+ defaults to native Wayland in Wayland sessions, which provides
+// better GPU compatibility than the XWayland bridge (which segfaults the GPU
+// process on hybrid Intel/NVIDIA setups). We let Electron auto-detect the
+// platform. SwiftShader (software WebGL2) is available via KADR_SOFTWARE_GL=1.
+if (process.platform === 'linux') {
+  if (process.env.KADR_SOFTWARE_GL) {
+    // Pure software WebGL2 — slow but guaranteed to work everywhere
+    app.commandLine.appendSwitch('use-gl', 'angle')
+    app.commandLine.appendSwitch('use-angle', 'swiftshader')
+    app.commandLine.appendSwitch('enable-unsafe-swiftshader')
+    console.log('[kadr] Using SwiftShader (software GL)')
+  }
 
-// Let Chromium use VAAPI for hardware video encode/decode where the driver
-// allows it (Intel iGPU on this machine); WebCodecs then picks it up via
-// hardwareAcceleration: 'prefer-hardware'.
-app.commandLine.appendSwitch('ignore-gpu-blocklist')
-app.commandLine.appendSwitch(
-  'enable-features',
-  'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
-)
+  // Opt in to VAAPI hardware video decode (Intel/AMD with working drivers)
+  if (process.env.ENABLE_VAAPI) {
+    app.commandLine.appendSwitch('ignore-gpu-blocklist')
+    app.commandLine.appendSwitch(
+      'enable-features',
+      'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
+    )
+    app.commandLine.appendSwitch('disable-vulkan')
+    console.log('[kadr] VAAPI hardware video decode enabled (opt-in)')
+  }
+}
 
 // Last line of defense: a stray async error (e.g. a stream racing a request
 // abort) must be logged, not shown as a modal error dialog over the editor.
@@ -47,6 +63,18 @@ function createWindow() {
     }
   })
   win.setMenuBarVisibility(false)
+
+  // Diagnostic: log renderer crashes and errors
+  win.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[kadr] Renderer process gone!', details)
+  })
+  win.webContents.on('did-fail-load', (_e, errorCode, errorDescription) => {
+    console.error(`[kadr] Page failed to load: ${errorCode} ${errorDescription}`)
+  })
+  win.webContents.on('crashed', () => {
+    console.error('[kadr] Renderer crashed!')
+  })
+
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {

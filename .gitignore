@@ -3,4 +3,6 @@ out/
 dist/
 *.log
 .claude/
+.antigravity/
+grok_answer.md
 *.autosave.kadr

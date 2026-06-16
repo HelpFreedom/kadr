@@ -124,9 +124,27 @@ function streamBody(stream: ReturnType<typeof createReadStream>): ReadableStream
   })
 }
 
+// Chromium picks a media decoder from the response Content-Type; without it a
+// <video>/<audio> element on the kadr:// stream fails with MEDIA_ERR_SRC_NOT_-
+// SUPPORTED ("Format error"). Map the file extension to a sensible MIME type.
+const MIME_TYPES: Record<string, string> = {
+  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska',
+  webm: 'video/webm', avi: 'video/x-msvideo', mts: 'video/mp2t', ts: 'video/mp2t',
+  mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac', ogg: 'audio/ogg',
+  opus: 'audio/ogg', aac: 'audio/aac', m4a: 'audio/mp4',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
+  bmp: 'image/bmp', gif: 'image/gif'
+}
+
+function mimeFor(filePath: string): string {
+  const ext = filePath.slice(filePath.lastIndexOf('.') + 1).toLowerCase()
+  return MIME_TYPES[ext] || 'application/octet-stream'
+}
+
 function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   const stat = statSync(filePath)
   const size = stat.size
+  const contentType = mimeFor(filePath)
   const m = rangeHeader?.match(/bytes=(\d*)-(\d*)/)
   // CORS header keeps WebAudio (MediaElementSource) from silencing the stream
   if (m && (m[1] || m[2])) {
@@ -135,6 +153,7 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
     return new Response(streamBody(createReadStream(filePath, { start, end })), {
       status: 206,
       headers: {
+        'Content-Type': contentType,
         'Content-Range': `bytes ${start}-${end}/${size}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': String(end - start + 1),
@@ -145,6 +164,7 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   return new Response(streamBody(createReadStream(filePath)), {
     status: 200,
     headers: {
+      'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
       'Content-Length': String(size),
       'Access-Control-Allow-Origin': '*'

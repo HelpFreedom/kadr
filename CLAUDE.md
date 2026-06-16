@@ -88,3 +88,4 @@ non-empty live project before reloading the page, and back up/restore
 - Mutations never auto-push history; see the store convention above.
 - `electron-vite dev` does NOT hot-restart the main process — main/preload
   edits need a full app restart.
+- React 19 + Zustand 5 optimization: avoid calling object-constructing functions like `findClip` inside `useEditor` selectors to prevent infinite rendering loops. Extract primitive keys/IDs, and execute lookups during component render.

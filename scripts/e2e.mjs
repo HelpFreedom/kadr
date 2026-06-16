@@ -54,6 +54,16 @@ const url = await getPageWs()
 ws = new WebSocket(url)
 await new Promise((r, j) => { ws.on('open', r); ws.on('error', j) })
 
+// fresh page so state from previous runs doesn't leak in
+try { await evalJs('setTimeout(() => location.reload(), 50); 0') } catch { /* reloading */ }
+await new Promise((r) => setTimeout(r, 1800))
+for (let i = 0; i < 30; i++) {
+  try {
+    if (await evalJs(`!!window.kadrEditor && !!window.kadr`)) break
+  } catch { /* page mid-reload */ }
+  await new Promise((r) => setTimeout(r, 1000))
+}
+
 // 1. scripting surface present
 const hasApi = await evalJs(`!!window.kadr && !!window.kadrEditor`)
 check('scripting API exposed', hasApi)
@@ -66,7 +76,7 @@ const assets = await evalJs(`(async () => {
     const id = window.kadrEditor.uid()
     window.kadrEditor.useEditor.getState().addAsset({ id, ...asset })
     out.push({ id, kind: asset.kind, duration: asset.duration, w: asset.width, h: asset.height,
-               hasAudio: asset.hasAudio, peaks: (asset.peaks || []).length, thumb: !!asset.thumbnail })
+               hasAudio: asset.hasAudio, peaks: asset.waveform ? atob(asset.waveform.max).length : 0, thumb: !!asset.thumbnail })
   }
   return out
 })()`)
@@ -89,8 +99,8 @@ const timeline = await evalJs(`(() => {
   const st = window.kadrEditor.useEditor.getState()
   // trim first clip to 4s, music to 7s
   const clips = st.project.tracks.flatMap(t => t.clips.map(c => ({...c, track: t.name, kind2: t.kind})))
-  const c0 = clips.find(c => c.start === 0 && c.kind2 === 'video')
-  const cm = clips.find(c => c.kind2 === 'audio')
+  const c0 = clips.find(c => c.assetId === '${assets[0].id}' && c.kind2 === 'video')
+  const cm = clips.find(c => c.assetId === '${assets[2].id}')
   st.trimClip(c0.id, 'out', 4)
   st.trimClip(cm.id, 'out', 7)
   const fin = window.kadrEditor.useEditor.getState()
@@ -99,7 +109,7 @@ const timeline = await evalJs(`(() => {
     clipCount: fin.project.tracks.reduce((n, t) => n + t.clips.length, 0)
   }
 })()`)
-check('timeline built: 4 clips, duration 7s', timeline.clipCount === 4 && Math.abs(timeline.duration - 7) < 0.01,
+check('timeline built: 5 clips, duration 7s', timeline.clipCount === 5 && Math.abs(timeline.duration - 7) < 0.01,
   JSON.stringify(timeline))
 
 // 4. split at playhead
@@ -111,7 +121,7 @@ const split = await evalJs(`(() => {
   const fin = window.kadrEditor.useEditor.getState()
   return fin.project.tracks.reduce((n, t) => n + t.clips.length, 0)
 })()`)
-check('split at 2s adds clips (4 -> 7: video+text+audio cross 2s)', split === 7, 'clips=' + split)
+check('split at 2s adds clips (5 -> 9: video+text+audio cross 2s)', split === 9, 'clips=' + split)
 
 // 5. undo restores
 const undone = await evalJs(`(() => {
@@ -119,7 +129,7 @@ const undone = await evalJs(`(() => {
   const fin = window.kadrEditor.useEditor.getState()
   return fin.project.tracks.reduce((n, t) => n + t.clips.length, 0)
 })()`)
-check('undo restores 4 clips', undone === 4, 'clips=' + undone)
+check('undo restores 5 clips', undone === 5, 'clips=' + undone)
 
 // 6. preview actually composites pixels (seek to 1s, canvas not black)
 const pixels = await evalJs(`(async () => {

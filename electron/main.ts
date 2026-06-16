@@ -20,7 +20,7 @@ protocol.registerSchemesAsPrivileged([
 // process on hybrid Intel/NVIDIA setups). We let Electron auto-detect the
 // platform. SwiftShader (software WebGL2) is available via KADR_SOFTWARE_GL=1.
 if (process.platform === 'linux') {
-  if (process.env.KADR_SOFTWARE_GL) {
+  if (process.env.KADR_SOFTWARE_GL || app.commandLine.hasSwitch('remote-debugging-port')) {
     // Pure software WebGL2 — slow but guaranteed to work everywhere
     app.commandLine.appendSwitch('use-gl', 'angle')
     app.commandLine.appendSwitch('use-angle', 'swiftshader')

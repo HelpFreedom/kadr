@@ -66,8 +66,14 @@ captions to this part», watch it happen live in the preview.
 
 ```bash
 git clone https://github.com/HelpFreedom/kadr.git && cd kadr
-npm install        # postinstall rebuilds node-pty for Electron
+npm install        # Installs dependencies (.npmrc resolves React 19 peer conflicts automatically)
 npm run dev
+```
+
+*Note: If your system configuration blocks automatic install scripts (`npm warn allow-scripts`), the Electron binary and native modules may not be downloaded or built. In this case, run the setup manually:*
+```bash
+node node_modules/electron/install.js
+npm run postinstall
 ```
 
 Import media, edit, press Export. For the AI assistant press 🤖 (the

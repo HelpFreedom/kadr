@@ -12,7 +12,12 @@ import type { ExportJob, Project } from '@shared/types'
 // Streamed local media under a privileged scheme so the renderer can play
 // file content regardless of its own origin (http in dev, file in prod).
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'kadr', privileges: { secure: true, stream: true, supportFetchAPI: true, bypassCSP: true } }
+  // `standard` + `corsEnabled` are both required (Electron 42+ / modern
+  // Chromium). In dev the renderer is served from http://localhost:5173, so a
+  // kadr:// media request is cross-origin; without `corsEnabled` Chromium
+  // blocks it *before* it reaches the protocol handler (fetch -> "Failed to
+  // fetch", <video> -> MEDIA_ERR_SRC_NOT_SUPPORTED), and the preview goes black.
+  { scheme: 'kadr', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true, bypassCSP: true } }
 ])
 // GPU configuration for Linux:
 // Electron 38+ defaults to native Wayland in Wayland sessions, which provides
@@ -20,8 +25,17 @@ protocol.registerSchemesAsPrivileged([
 // process on hybrid Intel/NVIDIA setups). We let Electron auto-detect the
 // platform. SwiftShader (software WebGL2) is available via KADR_SOFTWARE_GL=1.
 if (process.platform === 'linux') {
-  if (process.env.KADR_SOFTWARE_GL || app.commandLine.hasSwitch('remote-debugging-port')) {
-    // Pure software WebGL2 — slow but guaranteed to work everywhere
+  // SwiftShader (pure software WebGL2) is a last resort: it cannot composite
+  // decoded video frames — uploading a <video> frame to a GL texture goes
+  // through MailboxVideoFrameConverter, which needs a platform-GMB-backed
+  // BGRA_8888 SharedImage that SwiftShader has no factory for, so the GPU
+  // process crashes ("Could not find SharedImageBackingFactory") and playback
+  // dies with PIPELINE_ERROR_DISCONNECTED — leaving a black preview. So only
+  // fall back to it with an explicit KADR_SOFTWARE_GL, or when there is no
+  // display server at all (genuinely headless CI). When a display is present
+  // (incl. e2e runs with --remote-debugging-port) use the real GPU.
+  const headless = !process.env.WAYLAND_DISPLAY && !process.env.DISPLAY
+  if (process.env.KADR_SOFTWARE_GL || headless) {
     app.commandLine.appendSwitch('use-gl', 'angle')
     app.commandLine.appendSwitch('use-angle', 'swiftshader')
     app.commandLine.appendSwitch('enable-unsafe-swiftshader')
@@ -176,9 +190,11 @@ app.whenReady().then(() => {
   protocol.handle('kadr', (request) => {
     const url = new URL(request.url)
     const filePath = decodeURIComponent(url.pathname)
+    console.log('[kadr] protocol request:', request.url, '-> file:', filePath, 'range:', request.headers.get('range'))
     try {
       return mediaResponse(filePath, request.headers.get('range'))
-    } catch {
+    } catch (err) {
+      console.error('[kadr] protocol handler error for', filePath, ':', err)
       return new Response('not found', { status: 404 })
     }
   })

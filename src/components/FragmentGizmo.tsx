@@ -8,7 +8,7 @@ import { evalAnim } from '@/engine/anim'
  * scale. Writes through clip.transform — works in both the iframe overlay
  * and the pixel-capture mode, and matches the final render exactly.
  */
-export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasElement> }) {
+export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasElement | null> }) {
   const selId = useEditor((s) => s.selection[0])
   const project = useEditor((s) => s.project)
   const playhead = useEditor((s) => s.playhead)

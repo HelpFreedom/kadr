@@ -69,8 +69,14 @@ Kadr — многодорожечный видеоредактор (Electron + R
 
 ```bash
 git clone https://github.com/HelpFreedom/kadr.git && cd kadr
-npm install        # postinstall пересоберёт node-pty под Electron
+npm install        # Установит зависимости (конфликты React 19 автоматически разрешаются через .npmrc)
 npm run dev
+```
+
+*Примечание: Если ваша система блокирует автоматический запуск скриптов при установке (`npm warn allow-scripts`), исполняемый файл Electron и нативные модули могут не скачаться/не собраться. В этом случае выполните сборку вручную:*
+```bash
+node node_modules/electron/install.js
+npm run postinstall
 ```
 
 Импортируйте медиа, монтируйте, жмите «Экспорт». Для ИИ-ассистента

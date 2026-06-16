@@ -4,10 +4,12 @@ import { useProxyProgress } from '@/engine/proxy'
 import { useTextUi } from './TextTools'
 import { useT } from '@/i18n'
 
+const EMPTY_TEXTS: never[] = []
+
 export function MediaBin() {
   const t = useT()
   const assets = useEditor((s) => s.project.assets)
-  const texts = useEditor((s) => s.project.texts ?? [])
+  const texts = useEditor((s) => s.project.texts ?? EMPTY_TEXTS)
   const proxyJobs = useProxyProgress((s) => s.jobs)
   const [busy, setBusy] = useState(false)
   const [textsOpen, setTextsOpen] = useState(() => localStorage.getItem('kadr.textsOpen') !== '0')

@@ -12,7 +12,7 @@ import { fragmentNeedsCapture } from '@/engine/fragmentCapture'
  * with the clip's transform and synced to the editor clock via postMessage.
  * No rendering happens — the dev server hot-reloads Claude's edits live.
  */
-export function FragmentOverlays({ canvas }: { canvas: React.RefObject<HTMLCanvasElement> }) {
+export function FragmentOverlays({ canvas }: { canvas: React.RefObject<HTMLCanvasElement | null> }) {
   const project = useEditor((s) => s.project)
   const playhead = useEditor((s) => s.playhead)
   const url = useFragmentServer((s) => s.url)

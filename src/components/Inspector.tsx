@@ -37,7 +37,8 @@ function Num({
 export function Inspector() {
   const t = useT()
   const clipId = useEditor((s) => s.selection[0])
-  const found = useEditor((s) => (clipId ? findClip(s.project, clipId) : null))
+  const project = useEditor((s) => s.project)
+  const found = clipId ? findClip(project, clipId) : null
 
   return (
     <div className="inspector">

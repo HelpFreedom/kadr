@@ -12,17 +12,50 @@ import type { ExportJob, Project } from '@shared/types'
 // Streamed local media under a privileged scheme so the renderer can play
 // file content regardless of its own origin (http in dev, file in prod).
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'kadr', privileges: { secure: true, stream: true, supportFetchAPI: true, bypassCSP: true } }
+  // `standard` + `corsEnabled` are both required (Electron 42+ / modern
+  // Chromium). In dev the renderer is served from http://localhost:5173, so a
+  // kadr:// media request is cross-origin; without `corsEnabled` Chromium
+  // blocks it *before* it reaches the protocol handler (fetch -> "Failed to
+  // fetch", <video> -> MEDIA_ERR_SRC_NOT_SUPPORTED), and the preview goes black.
+  { scheme: 'kadr', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true, bypassCSP: true } }
 ])
+// GPU configuration for Linux:
+// Electron 38+ defaults to native Wayland in Wayland sessions, which provides
+// better GPU compatibility than the XWayland bridge (which segfaults the GPU
+// process on hybrid Intel/NVIDIA setups). We let Electron auto-detect the
+// platform. SwiftShader (software WebGL2) is available via KADR_SOFTWARE_GL=1.
+if (process.platform === 'linux') {
+  // SwiftShader (pure software WebGL2) is a last resort: it cannot composite
+  // decoded video frames — uploading a <video> frame to a GL texture goes
+  // through MailboxVideoFrameConverter, which needs a platform-GMB-backed
+  // BGRA_8888 SharedImage that SwiftShader has no factory for, so the GPU
+  // process crashes ("Could not find SharedImageBackingFactory") and playback
+  // dies with PIPELINE_ERROR_DISCONNECTED — leaving a black preview. This is an
+  // upstream Chromium limitation that cannot be worked around in-app (the crash
+  // happens in the decode->compositor pipeline, before our texture upload), so
+  // headless CI must provide a real/virtual GPU (e.g. xvfb-run with a GL driver)
+  // to exercise video preview. We only fall back to SwiftShader with an explicit
+  // KADR_SOFTWARE_GL, or when there is no display server at all. When a display
+  // is present (incl. e2e runs with --remote-debugging-port) use the real GPU.
+  const headless = !process.env.WAYLAND_DISPLAY && !process.env.DISPLAY
+  if (process.env.KADR_SOFTWARE_GL || headless) {
+    app.commandLine.appendSwitch('use-gl', 'angle')
+    app.commandLine.appendSwitch('use-angle', 'swiftshader')
+    app.commandLine.appendSwitch('enable-unsafe-swiftshader')
+    console.log('[kadr] Using SwiftShader (software GL)')
+  }
 
-// Let Chromium use VAAPI for hardware video encode/decode where the driver
-// allows it (Intel iGPU on this machine); WebCodecs then picks it up via
-// hardwareAcceleration: 'prefer-hardware'.
-app.commandLine.appendSwitch('ignore-gpu-blocklist')
-app.commandLine.appendSwitch(
-  'enable-features',
-  'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
-)
+  // Opt in to VAAPI hardware video decode (Intel/AMD with working drivers)
+  if (process.env.ENABLE_VAAPI) {
+    app.commandLine.appendSwitch('ignore-gpu-blocklist')
+    app.commandLine.appendSwitch(
+      'enable-features',
+      'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
+    )
+    app.commandLine.appendSwitch('disable-vulkan')
+    console.log('[kadr] VAAPI hardware video decode enabled (opt-in)')
+  }
+}
 
 // Last line of defense: a stray async error (e.g. a stream racing a request
 // abort) must be logged, not shown as a modal error dialog over the editor.
@@ -47,6 +80,16 @@ function createWindow() {
     }
   })
   win.setMenuBarVisibility(false)
+
+  // Diagnostic: log renderer crashes and errors
+  win.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[kadr] Renderer process gone!', details)
+  })
+  win.webContents.on('did-fail-load', (_e, errorCode, errorDescription) => {
+    console.error(`[kadr] Page failed to load: ${errorCode} ${errorDescription}`)
+  })
+  // ('crashed' was removed in Electron 42 — 'render-process-gone' above covers it)
+
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -96,17 +139,44 @@ function streamBody(stream: ReturnType<typeof createReadStream>): ReadableStream
   })
 }
 
+// Chromium picks a media decoder from the response Content-Type; without it a
+// <video>/<audio> element on the kadr:// stream fails with MEDIA_ERR_SRC_NOT_-
+// SUPPORTED ("Format error"). Map the file extension to a sensible MIME type.
+const MIME_TYPES: Record<string, string> = {
+  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska',
+  webm: 'video/webm', avi: 'video/x-msvideo', mts: 'video/mp2t', ts: 'video/mp2t',
+  mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac', ogg: 'audio/ogg',
+  opus: 'audio/ogg', aac: 'audio/aac', m4a: 'audio/mp4',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
+  bmp: 'image/bmp', gif: 'image/gif'
+}
+
+function mimeFor(filePath: string): string {
+  const ext = filePath.slice(filePath.lastIndexOf('.') + 1).toLowerCase()
+  return MIME_TYPES[ext] || 'application/octet-stream'
+}
+
 function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   const stat = statSync(filePath)
   const size = stat.size
+  const contentType = mimeFor(filePath)
   const m = rangeHeader?.match(/bytes=(\d*)-(\d*)/)
   // CORS header keeps WebAudio (MediaElementSource) from silencing the stream
   if (m && (m[1] || m[2])) {
     const start = m[1] ? parseInt(m[1], 10) : Math.max(0, size - parseInt(m[2], 10))
     const end = m[1] && m[2] ? Math.min(parseInt(m[2], 10), size - 1) : size - 1
+    // A range whose start sits at/after EOF (or past the end) is unsatisfiable —
+    // createReadStream would throw ERR_OUT_OF_RANGE. Answer 416 per RFC 7233.
+    if (start > end || start >= size) {
+      return new Response(null, {
+        status: 416,
+        headers: { 'Content-Range': `bytes */${size}`, 'Access-Control-Allow-Origin': '*' }
+      })
+    }
     return new Response(streamBody(createReadStream(filePath, { start, end })), {
       status: 206,
       headers: {
+        'Content-Type': contentType,
         'Content-Range': `bytes ${start}-${end}/${size}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': String(end - start + 1),
@@ -117,6 +187,7 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   return new Response(streamBody(createReadStream(filePath)), {
     status: 200,
     headers: {
+      'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
       'Content-Length': String(size),
       'Access-Control-Allow-Origin': '*'
@@ -130,7 +201,8 @@ app.whenReady().then(() => {
     const filePath = decodeURIComponent(url.pathname)
     try {
       return mediaResponse(filePath, request.headers.get('range'))
-    } catch {
+    } catch (err) {
+      console.error('[kadr] protocol handler error for', filePath, ':', err)
       return new Response('not found', { status: 404 })
     }
   })

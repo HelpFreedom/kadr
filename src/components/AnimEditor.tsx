@@ -132,15 +132,14 @@ const DEFAULT_STAGE_ZOOM = 0.85
 
 export function AnimEditor({ width }: { width: number }) {
   const t = useT()
-  const found = useEditor((s) => (s.animClipId ? findClip(s.project, s.animClipId) : null))
+  const animClipId = useEditor((s) => s.animClipId)
+  const project = useEditor((s) => s.project)
+  const found = animClipId ? findClip(project, animClipId) : null
   const playhead = useEditor((s) => s.playhead)
   const projW = useEditor((s) => s.project.width)
   const projH = useEditor((s) => s.project.height)
   const fps = useEditor((s) => s.project.fps)
-  const asset = useEditor((s) => {
-    const f = s.animClipId ? findClip(s.project, s.animClipId) : null
-    return f?.clip.assetId ? s.project.assets.find((a) => a.id === f.clip.assetId) : undefined
-  })
+  const asset = found?.clip.assetId ? project.assets.find((a) => a.id === found.clip.assetId) : undefined
   const [mode, setMode] = useState<'transform' | 'mask'>('transform')
   const [tool, setTool] = useState<Tool>('edges')
   const [linked, setLinked] = useState(false)

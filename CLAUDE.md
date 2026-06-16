@@ -19,6 +19,14 @@ mixes audio and muxes/transcodes per preset.
 - Optional: `python3` + `faster-whisper` (speech-to-text), the `claude`
   CLI (embedded AI assistant), network access for the one-time Remotion
   workspace install
+- **MCP (Claude Code):** When working with Claude Code, ensure `context7` MCP
+  server is configured in `~/.claude/settings.json` with `CONTEXT7_API_KEY` env
+  var set (get key from context7.com). This enables library/API lookups for
+  dependencies used in the project. **You must consult the actual documentation
+  for each library version used in this project** — do not rely on training data
+  or assumptions about APIs. Always fetch current docs for: Electron, React, Zustand,
+  TypeScript, WebGL, WebCodecs, mp4box.js, and any other dependencies before
+  coding or debugging.
 
 ## Architecture
 - `shared/types.ts` — the entire project model (Project/Track/Clip/Anim/
@@ -88,3 +96,4 @@ non-empty live project before reloading the page, and back up/restore
 - Mutations never auto-push history; see the store convention above.
 - `electron-vite dev` does NOT hot-restart the main process — main/preload
   edits need a full app restart.
+- React 19 + Zustand 5 optimization: avoid calling object-constructing functions like `findClip` inside `useEditor` selectors to prevent infinite rendering loops. Extract primitive keys/IDs, and execute lookups during component render.

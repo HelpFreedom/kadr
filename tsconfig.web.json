@@ -10,11 +10,9 @@
     "skipLibCheck": true,
     "noEmit": true,
     "isolatedModules": true,
-    "ignoreDeprecations": "6.0",
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"],
-      "@shared/*": ["shared/*"]
+      "@/*": ["./src/*"],
+      "@shared/*": ["./shared/*"]
     }
   },
   "include": ["src", "shared", "src/env.d.ts"]

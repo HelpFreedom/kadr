@@ -165,6 +165,11 @@ const api: KadrApi = {
     const handler = (_e: unknown, code: number) => cb(code)
     ipcRenderer.on('claude:exit', handler)
     return () => ipcRenderer.removeListener('claude:exit', handler)
+  },
+  onMenuCommand: (cb) => {
+    const handler = (_e: unknown, cmd: string) => cb(cmd)
+    ipcRenderer.on('menu:command', handler)
+    return () => ipcRenderer.removeListener('menu:command', handler)
   }
 }
 

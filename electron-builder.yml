@@ -1,0 +1,40 @@
+appId: com.blacktriangle.kadr
+productName: Kadr
+copyright: Copyright © Black Triangle (GPL-3.0)
+
+# asar is intentionally OFF: the app spawns auxiliary processes by absolute
+# path — `node electron/mcp-bridge.cjs` (claude.ts) and `python3
+# scripts/transcribe.py` (transcribe.ts), both resolved from app.getAppPath().
+# Keeping the app unpacked lets those spawns and their require()s resolve
+# from node_modules with zero path rewriting.
+asar: false
+
+# node-pty is already rebuilt for Electron 31 (arm64) by the postinstall
+# electron-rebuild step, so skip electron-builder's own rebuild (and its
+# network round-trip for headers).
+npmRebuild: false
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - out/**/*
+  - electron/mcp-bridge.cjs
+  - scripts/transcribe.py
+  - package.json
+
+mac:
+  category: public.app-category.video
+  icon: build/icon.icns
+  # Local, unsigned distribution: no Developer ID. electron-builder applies
+  # an ad-hoc signature so the arm64 bundle is runnable on this machine.
+  identity: null
+  target:
+    - target: dmg
+      arch: arm64
+    - target: zip
+      arch: arm64
+
+dmg:
+  title: Kadr ${version}

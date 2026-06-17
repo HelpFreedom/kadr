@@ -63,21 +63,11 @@ export default function App() {
         e.preventDefault()
         s.setPlaying(!s.playing)
       } else if (e.code === 'KeyS') {
-        if (e.ctrlKey) {
-          e.preventDefault()
-          if (e.shiftKey) saveProjectAs()
-          else saveProject()
-        } else s.splitAtPlayhead()
+        // Save (⌘/Ctrl+S) is owned by the application menu; bare S splits.
+        if (!e.ctrlKey && !e.metaKey) s.splitAtPlayhead()
       } else if (e.code === 'KeyD' || e.code === 'Delete' || e.code === 'Backspace') {
         if (s.selection.length) s.deleteSelection()
         else if (s.range) s.deleteRange()
-      } else if (e.code === 'KeyZ' && e.ctrlKey) {
-        e.preventDefault()
-        if (e.shiftKey) s.redo()
-        else s.undo()
-      } else if (e.code === 'KeyY' && e.ctrlKey) {
-        e.preventDefault()
-        s.redo()
       } else if (e.code === 'KeyC' && e.ctrlKey) {
         if (s.selection.length) s.copySelection()
         else if (s.range) s.copyRange()
@@ -102,6 +92,29 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // Native application menu (File/Edit) → reuse the toolbar handlers.
+  useEffect(() => {
+    return window.kadr.onMenuCommand((cmd) => {
+      const s = useEditor.getState()
+      switch (cmd) {
+        case 'new': s.setProject(newProject()); break
+        case 'open': openProject(); break
+        case 'save': saveProject(); break
+        case 'saveAs': saveProjectAs(); break
+        case 'export': s.setExportOpen(true); break
+        case 'undo':
+        case 'redo': {
+          // Defer to native text undo/redo while editing in a field.
+          const tag = (document.activeElement as HTMLElement)?.tagName
+          if (tag === 'INPUT' || tag === 'TEXTAREA') document.execCommand(cmd)
+          else if (cmd === 'undo') s.undo()
+          else s.redo()
+          break
+        }
+      }
+    })
   }, [])
 
   const startSideResize = (e: React.PointerEvent<HTMLDivElement>) => {

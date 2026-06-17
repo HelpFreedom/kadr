@@ -1,7 +1,9 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, Menu } from 'electron'
 import { join, dirname, basename } from 'path'
+import { buildMenu } from './menu'
 import { promises as fs, createReadStream, statSync } from 'fs'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
+import { execFileSync } from 'child_process'
 import { createHash } from 'crypto'
 import { probeMedia, makeProxy, ExportMuxer } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
@@ -15,14 +17,48 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'kadr', privileges: { secure: true, stream: true, supportFetchAPI: true, bypassCSP: true } }
 ])
 
-// Let Chromium use VAAPI for hardware video encode/decode where the driver
-// allows it (Intel iGPU on this machine); WebCodecs then picks it up via
-// hardwareAcceleration: 'prefer-hardware'.
-app.commandLine.appendSwitch('ignore-gpu-blocklist')
-app.commandLine.appendSwitch(
-  'enable-features',
-  'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
-)
+// A GUI app launched from Finder/LaunchServices inherits only a minimal PATH
+// (/usr/bin:/bin:/usr/sbin:/sbin) — none of Homebrew, ~/.local/bin, nvm, etc.
+// That silently breaks every external tool the editor shells out to: the
+// `claude` CLI (its PTY just exits → "session ended"), `node` for the MCP
+// bridge, and ffmpeg/ffprobe/python3. So adopt the user's real login-shell
+// PATH before anything spawns. Only needed for packaged macOS launches; a
+// dev run already inherits the terminal's environment.
+function fixUserPath() {
+  if (process.platform !== 'darwin' || !app.isPackaged) return
+  const fallback = [
+    '/opt/homebrew/bin', '/opt/homebrew/sbin',
+    '/usr/local/bin', '/usr/local/sbin',
+    join(homedir(), '.local/bin'),
+    '/usr/bin', '/bin', '/usr/sbin', '/sbin'
+  ]
+  let shellPath = ''
+  try {
+    const shell = process.env.SHELL || '/bin/zsh'
+    // login+interactive so ~/.zprofile / ~/.zshrc (nvm, pyenv, custom dirs)
+    // are sourced; markers isolate $PATH from any shell-startup banner noise.
+    const out = execFileSync(shell, ['-ilc', 'printf "_KP_<%s>_KP_" "$PATH"'], {
+      encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore']
+    })
+    shellPath = out.match(/_KP_<(.*)>_KP_/)?.[1] ?? ''
+  } catch { /* shell unavailable — fall back to the known dirs */ }
+  const parts = [...shellPath.split(':'), ...fallback].filter(Boolean)
+  process.env.PATH = [...new Set(parts)].join(':')
+}
+fixUserPath()
+
+// Hardware video encode/decode. On Linux this means VAAPI (Intel/AMD iGPU);
+// macOS and Windows already expose their native accelerators (VideoToolbox /
+// Media Foundation) to Chromium + WebCodecs without these Linux-only flags,
+// and forcing them off-platform only risks the GPU sandbox. WebCodecs then
+// picks the hardware path up via hardwareAcceleration: 'prefer-hardware'.
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('ignore-gpu-blocklist')
+  app.commandLine.appendSwitch(
+    'enable-features',
+    'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
+  )
+}
 
 // Last line of defense: a stray async error (e.g. a stream racing a request
 // abort) must be logged, not shown as a modal error dialog over the editor.
@@ -46,7 +82,6 @@ function createWindow() {
       sandbox: false
     }
   })
-  win.setMenuBarVisibility(false)
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -134,6 +169,7 @@ app.whenReady().then(() => {
       return new Response('not found', { status: 404 })
     }
   })
+  Menu.setApplicationMenu(buildMenu(() => win))
   registerIpc()
   registerClaudeIpc(() => win)
   registerTranscribeIpc(() => win)

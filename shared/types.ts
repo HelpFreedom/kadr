@@ -419,4 +419,7 @@ export interface KadrApi {
   claudeClose(): Promise<void>
   onClaudeData(cb: (data: string) => void): () => void
   onClaudeExit(cb: (code: number) => void): () => void
+
+  /** Native menu commands (File/Edit) forwarded from the main process. */
+  onMenuCommand(cb: (cmd: string) => void): () => void
 }

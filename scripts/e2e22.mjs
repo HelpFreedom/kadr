@@ -9,6 +9,8 @@ import http from 'http'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
 const ENV_FILE = `${process.env.HOME}/.config/kadr/claude-env.json`
+const MCP_FILE = `${process.env.HOME}/.config/kadr/claude-mcp.json`
+const GEN_FILE = `${process.env.HOME}/.config/kadr/kadr-mcp.json`
 
 async function getPageWs() {
   for (let i = 0; i < 30; i++) {
@@ -73,6 +75,12 @@ await new Promise((r, j) => { ws.on('open', r); ws.on('error', j) })
 let envBackup = null
 try { envBackup = readFileSync(ENV_FILE, 'utf8') } catch { /* none */ }
 writeFileSync(ENV_FILE, JSON.stringify({ command: 'bash', args: [] }))
+// user MCP servers from claude-mcp.json must merge into the generated config
+let mcpBackup = null
+try { mcpBackup = readFileSync(MCP_FILE, 'utf8') } catch { /* none */ }
+writeFileSync(MCP_FILE, JSON.stringify({
+  mcpServers: { 'e2e-extra': { command: 'true', args: [] } }
+}))
 
 try {
   // give the page a name marker to read back through the bridges
@@ -91,6 +99,13 @@ try {
   })()`)
   check('terminal session opens (bash override)', opened.ok === true && opened.port > 0,
     JSON.stringify(opened))
+
+  // generated --mcp-config = user's extra servers + kadr (kadr wins clashes)
+  const gen = JSON.parse(readFileSync(GEN_FILE, 'utf8'))
+  check('claude-mcp.json servers merge into the generated mcp-config',
+    !!gen.mcpServers['e2e-extra'] && !!gen.mcpServers.kadr &&
+    gen.mcpServers.kadr.args?.[1] === String(opened.port),
+    Object.keys(gen.mcpServers).join(','))
 
   const echoed = await evalJs(`(async () => {
     window.kadr.claudeInput('echo KADR_$((40+2))\\n')
@@ -210,6 +225,8 @@ try {
 } finally {
   if (envBackup !== null) writeFileSync(ENV_FILE, envBackup)
   else try { unlinkSync(ENV_FILE) } catch { /* absent */ }
+  if (mcpBackup !== null) writeFileSync(MCP_FILE, mcpBackup)
+  else try { unlinkSync(MCP_FILE) } catch { /* absent */ }
 }
 
 ws.close()

@@ -28,6 +28,8 @@ export interface MediaAsset {
   waveform?: WaveformData
   /** light 540p copy used by the preview; export always reads `path` */
   proxyPath?: string
+  /** this asset is a reversed render of a source range of another asset */
+  reverseOf?: { assetId: string; start: number; duration: number }
 }
 
 export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'hold'
@@ -376,6 +378,17 @@ export interface KadrApi {
   readUserStore(name: string): Promise<unknown>
   writeUserStore(name: string, data: unknown): Promise<void>
 
+  /** Render (or reuse) a reversed copy of a source range; resolves with the file path. */
+  reverseMedia(
+    path: string,
+    start: number,
+    duration: number,
+    info: { kind: AssetKind; hasAudio: boolean; width: number; height: number; fps: number }
+  ): Promise<string>
+  onReverseProgress(
+    cb: (p: { path: string; start: number; duration: number; progress: number }) => void
+  ): () => void
+
   /** Build (or reuse) a preview proxy; resolves with the proxy file path. */
   requestProxy(path: string, duration: number): Promise<string>
   onProxyProgress(cb: (p: { path: string; progress: number }) => void): () => void
@@ -383,6 +396,24 @@ export interface KadrApi {
   exportDialog(defaultName: string, ext: string): Promise<string | null>
   exportBegin(job: ExportJob): Promise<void>
   exportVideoChunk(data: ArrayBuffer, position: number): Promise<void>
+  /** Direct encode in the renderer process: preload spawns ffmpeg and pipes
+      raw RGBA frames into it. contextIsolation is off, so the frame view is
+      passed BY REFERENCE — zero copies until the kernel pipe. rawEncodeStart
+      resolves with the temp file the encoder writes; exportUseVideo hands it
+      to the muxer stage. */
+  rawEncodeStart(o: {
+    width: number; height: number; fps: number; codec: string; bitrate: number
+  }): Promise<string>
+  /** resolves when ffmpeg's stdin accepted the memory — only then reuse it */
+  rawEncodeFrame(view: Uint8Array): Promise<void>
+  rawEncodeEnd(): Promise<void>
+  rawEncodeKill(): void
+  exportUseVideo(path: string): Promise<void>
+
+  /** main-process fallback raw encode: frames over WS (port > 0) or IPC */
+  exportRawBegin(width: number, height: number, fps: number): Promise<number>
+  exportRawFrame(data: ArrayBuffer): Promise<void>
+  exportRawEnd(): Promise<void>
   exportVideoDone(): Promise<void>
   exportCancel(): Promise<void>
   onExportProgress(cb: (p: ExportProgress) => void): () => void

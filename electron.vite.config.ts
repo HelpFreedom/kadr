@@ -19,6 +19,9 @@ export default defineConfig({
       outDir: 'out/preload',
       lib: { entry: 'electron/preload.ts' },
       rollupOptions: { external: ['electron'] }
+    },
+    resolve: {
+      alias: { '@shared': resolve(__dirname, 'shared') }
     }
   },
   renderer: {

@@ -9,12 +9,13 @@ import { wireProxies } from './engine/proxy'
 import {
   transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues
 } from './engine/subtitles'
-import { createFragment, ensureFragmentServer } from './engine/fragments'
+import { createFragment, ensureFragmentServer, deleteFragment } from './engine/fragments'
 import { wireFragmentCapture } from './engine/fragmentCapture'
 import './styles.css'
 
 import { wireAutosave, autosaveNow, activity } from './engine/autosave'
 import { autoCaptions, captionsTsx } from './engine/captions'
+import { reverseClip } from './engine/reverse'
 
 wireProxies()
 wireFragmentCapture()
@@ -25,7 +26,8 @@ wireAutosave()
 ;(window as any).kadrEditor = {
   useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, PRESETS, startExport, evalAnim,
   transcribe: transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues,
-  createFragment, ensureFragmentServer, autoCaptions, captionsTsx, autosaveNow, activity
+  createFragment, ensureFragmentServer, deleteFragment, autoCaptions, captionsTsx, autosaveNow, activity,
+  reverseClip
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

@@ -74,6 +74,44 @@ export function findClip(p: Project, clipId: string): { track: Track; clip: Clip
   return null
 }
 
+/**
+ * Heal foreign or script-written projects on load. Anim slots written as
+ * plain numbers (e.g. `gain: 0.5` from a kadr_eval script) become `{value}`,
+ * non-finite values and broken keyframes are dropped — a single NaN reaching
+ * WebAudio used to kill playback for the rest of the session.
+ */
+export function sanitizeProject(p: Project): Project {
+  const anim = (a: unknown, fallback: number): Anim => {
+    if (typeof a === 'number') return { value: Number.isFinite(a) ? a : fallback }
+    if (!a || typeof a !== 'object') return { value: fallback }
+    const o = a as Anim
+    if (o.keyframes) {
+      o.keyframes = o.keyframes.filter((k) => Number.isFinite(k?.time) && Number.isFinite(k?.value))
+      if (!o.keyframes.length) delete o.keyframes
+    }
+    if (!Number.isFinite(o.value)) o.value = o.keyframes?.[0]?.value ?? fallback
+    return o
+  }
+  if (typeof p.background !== 'string') p.background = '#000000'
+  if (!Number.isFinite(p.width) || p.width <= 0) p.width = 1920
+  if (!Number.isFinite(p.height) || p.height <= 0) p.height = 1080
+  if (!Number.isFinite(p.fps) || p.fps <= 0) p.fps = 30
+  p.assets ??= []
+  for (const track of p.tracks) {
+    if (!Number.isFinite(track.gain)) track.gain = 1
+    for (const c of track.clips) {
+      for (const k of ['start', 'duration', 'inPoint'] as const)
+        if (!Number.isFinite(c[k])) c[k] = 0
+      if (!Number.isFinite(c.speed) || c.speed <= 0) c.speed = 1
+      c.transform = { ...newClipDefaults().transform, ...(c.transform ?? {}) }
+      c.gain = anim(c.gain, 1)
+      c.effects ??= []
+      forEachAnim(c, (a) => anim(a, Number.isFinite((a as Anim)?.value) ? (a as Anim).value : 0))
+    }
+  }
+  return p
+}
+
 /** All animatable scalars of a clip (transform, gain, mask, shape). */
 export function forEachAnim(c: Clip, fn: (a: Anim) => Anim) {
   const tr = c.transform
@@ -436,7 +474,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   setProject: (project, path = null) =>
     set({
-      project, projectPath: path, past: [], future: [],
+      project: sanitizeProject(project), projectPath: path, past: [], future: [],
       selection: [], playhead: 0, playing: false, range: null
     }),
   setProjectPath: (projectPath) => set({ projectPath }),

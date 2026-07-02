@@ -7,6 +7,15 @@ import { execFileSync } from 'child_process'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
 
+// self-contained: a 25 fps white box crossing a dark frame at 900 px/s —
+// fast enough that a genuine source-frame step moves ~200 sampled pixels
+execFileSync('bash', ['-c',
+  'mkdir -p /tmp/kadr-test && ' +
+  'ffmpeg -v error -f lavfi -i "color=c=0x202020:s=1920x1080:r=25:d=3" ' +
+  '-f lavfi -i "color=c=white:s=300x300:r=25:d=3" ' +
+  '-filter_complex "[0][1]overlay=x=\'mod(900*t\\,1500)\':y=390" ' +
+  '-c:v libx264 -crf 18 -pix_fmt yuv420p -y /tmp/kadr-test/t25.mp4'])
+
 async function getPageWs() {
   for (let i = 0; i < 30; i++) {
     try {

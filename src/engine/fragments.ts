@@ -67,3 +67,22 @@ export async function createFragment(
   void ensureFragmentServer().catch(() => { /* surfaces in the overlay */ })
   return { ...info, clipId }
 }
+
+/**
+ * Delete a fragment AND every clip that references it. Deleting only the
+ * workspace folder (window.kadr.fragmentDelete) leaves zombie clips whose
+ * overlay shows «unknown composition» forever.
+ */
+export async function deleteFragment(fragmentId: string): Promise<void> {
+  const st = useEditor.getState()
+  const doomed = st.project.tracks
+    .flatMap((t) => t.clips)
+    .filter((c) => c.kind === 'remotion' && c.fragmentId === fragmentId)
+    .map((c) => c.id)
+  if (doomed.length) {
+    st.pushHistory('hDelete')
+    st.select(doomed)
+    useEditor.getState().deleteSelection()
+  }
+  await window.kadr.fragmentDelete(fragmentId)
+}

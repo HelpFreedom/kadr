@@ -28,15 +28,25 @@ mixes audio and muxes/transcodes per preset.
   (drawn last).
 - `electron/main.ts` — window, `kadr://` streaming protocol with manual
   Range support, IPC: dialogs, project IO (incl. atomic autosave), export,
-  user stores, proxy queue.
+  user stores, proxy queue, reversed-media cache. The scheme MUST stay
+  registered with `corsEnabled: true` (+ ACAO:* responses and
+  `crossOrigin='anonymous'` on media elements incl. Image) — modern
+  Chromium otherwise taints kadr:// pixels and preview/export go black.
+  Startup sweeps leftover helper processes; shutdown force-exits
+  (window-all-closed → app.exit failsafe, render-process-gone → exit).
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
-  bins), `makeProxy` (540p preview proxies), `ExportMuxer` (per-segment
-  `volume,atempo*,afade,adelay,apad,atrim` → `amix` with exact level
-  compensation).
+  bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
+  render of a clip's source range, RAM-bounded chunks), `ExportMuxer`
+  (per-segment `volume,atempo*,afade,adelay,apad,atrim` → `amix` with
+  exact level compensation), `RawVideoEncoder` (fallback raw-frame
+  encoder; the primary one is spawned by the preload).
 - `electron/claude.ts` — embedded Claude Code: node-pty PTY running the
-  user's `claude` CLI, per-session HTTP bridge (POST /eval →
+  user's `claude` CLI inside a watchdog wrapper (kills its process group
+  if Electron dies hard), per-session HTTP bridge (POST /eval →
   `webContents.executeJavaScript`); extra env/command via
-  `userData/claude-env.json`.
+  `userData/claude-env.json`, extra MCP servers via
+  `userData/claude-mcp.json`; `sweepStaleSessions()` clears leftovers of
+  hard-killed runs at startup.
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
   via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
   kadr_export / kadr_transcribe / kadr_fragment_create.
@@ -46,29 +56,45 @@ mixes audio and muxes/transcodes per preset.
   (WYSIWYG).
 - `electron/fragments.ts` — Remotion workspace (`~/kadr-fragments`):
   scaffold, vite dev server (watchdogged), fragment create/delete,
-  `remotion render` once per content hash (vp8+alpha webm or h264; cached
-  in `userData/fragment-renders`), offscreen pixel-capture windows.
+  `remotion render` once per content hash at near-lossless settings
+  (PNG frames; vp9+alpha `--crf=12` for transparent, h264 `--crf=15`
+  otherwise; cached in `userData/fragment-renders`), offscreen
+  pixel-capture windows (created with `enableLargerThanScreen` — some
+  window managers/displays clamp hidden windows otherwise). The player
+  page syncs to the editor clock by nudging playbackRate, not seek jumps.
 - `src/state/store.ts` — zustand store. Undo convention: callers invoke
   `pushHistory(labelKey)` once before a discrete edit; high-level actions
-  push their own. File-backed preset stores (pose/fx) via user-store IPC.
+  push their own. `sanitizeProject` heals foreign/script-written projects
+  on load (scalar Anims → {value}, broken keyframes dropped, missing
+  fields defaulted). File-backed preset stores (pose/fx) via user-store IPC.
 - `src/engine/player.ts` — pure layer/audio queries, `MediaPool`,
   `drawFrame` (shared by preview and export), `Player` (anchored rAF
-  clock, ~4 fps idle when paused).
+  clock, ~4 fps idle when paused; the tick is exception-proof — one bad
+  frame never kills playback; element resync never reseeks mid-seek and
+  aims ahead by 0.08×speed so software decode can't storm).
 - `src/gl/compositor.ts` — WebGL2 quad compositor: perspective-correct 3D,
   masks (crop + up to 8 shapes), transition FBOs, motion-blur accumulator,
-  glow passes, raw-BGRA capture upload.
+  glow + gaussian-blur effect passes (`drawLayerFx`), raw-BGRA capture
+  upload, `readPixels` for the export pipe.
 - `src/gl/transitions.ts` / `src/gl/edges.ts` / `src/gl/glow.ts` — GLSL
   registries: 14 overlap transitions, 12 edge (tip) transitions, the smoky
   outer-glow effect.
 - `src/engine/exporter.ts` — offline render: fragment materialization →
   fast decode (`src/engine/demux.ts`, mp4box + WebCodecs, element-seek
   fallback, `KADR_DISABLE_FAST_DECODE` kill-switch) → optional 8-sample
-  motion blur and per-clip frame blending → `VideoEncoder` → main-process
-  ffmpeg pass.
+  motion blur and per-clip frame blending → ffmpeg x264 encode at the
+  preset bitrate (the preload spawns ffmpeg and receives readPixels
+  frames BY REFERENCE — contextIsolation is off exactly for this; every
+  IPC/bridge route copies ~8 MB per 1080p frame and tripled render time;
+  Chromium's own WebCodecs encoder ignores the requested bitrate and
+  stays behind the «fast encoder» checkbox) → main-process ffmpeg mux
+  pass. `src/engine/reverse.ts` — clip reversal flow (cached backwards
+  renders, linked AV pairs, ⏳ progress).
 - `src/engine/subtitles.ts` / `captions.ts` — SRT parse/serialize,
   word-precise cue splitting (`segmentsToRichCues`), auto-captions
   fragment generator.
-- `src/engine/fragments.ts` / `fragmentCapture.ts` — fragment create flow
+- `src/engine/fragments.ts` / `fragmentCapture.ts` — fragment create and
+  delete flows (`deleteFragment` removes the clips referencing it too)
   and the hybrid preview: iframe overlay by default, automatic pixel
   capture when the clip carries GL-only features (effects/3D/masks/
   transitions).

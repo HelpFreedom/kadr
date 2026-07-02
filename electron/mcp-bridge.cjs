@@ -14,6 +14,22 @@ if (!PORT) {
   process.exit(1)
 }
 
+// Never outlive our claude (stdin closes when it dies) or the editor
+// (bridge port stops answering) — an orphaned bridge inherits Chromium's
+// listening sockets and would block the next editor launch.
+process.stdin.on('end', () => process.exit(0))
+process.stdin.on('close', () => process.exit(0))
+let bridgeMisses = 0
+setInterval(() => {
+  const req = http.request(
+    { host: '127.0.0.1', port: PORT, path: '/', method: 'GET', timeout: 3000 },
+    (res) => { res.resume(); bridgeMisses = 0 } // any response = editor alive
+  )
+  req.on('error', () => { if (++bridgeMisses >= 3) process.exit(0) })
+  req.on('timeout', () => { req.destroy(); if (++bridgeMisses >= 3) process.exit(0) })
+  req.end()
+}, 10000).unref()
+
 /** POST the code (async function body) to the editor, return parsed result. */
 function editorEval(code) {
   return new Promise((resolve, reject) => {
@@ -82,11 +98,14 @@ server.registerTool('kadr_eval', {
     'addTrack(kind), select([ids]), setPlayhead(sec), setProject(project), splitAtPlayhead(), ' +
     'deleteSelection(), setTransition(clipId, type|null), setEdgeTransitions(...).\n' +
     '- window.kadrEditor.uid() → new id; .PRESETS → export presets; .projectDuration(project); ' +
-    '.evalAnim(anim, t).\n' +
+    '.evalAnim(anim, t); await .reverseClip(clipId) — reverse a video/audio clip in place ' +
+    '(renders a backwards copy, swaps the clip to it; calling again un-reverses).\n' +
     '- await window.kadr.probeMedia(path) → { asset } (probe a media file to import: then ' +
     'addAsset({ id: uid(), ...asset })); window.kadr.writeProject(path, project); ' +
     'window.kadr.readProject(path).\n' +
-    'Times are seconds. Mutations: always pushHistory first; the store is zustand — re-read ' +
+    'Times are seconds. Animatable scalars (clip gain, transform.x/y/scale/rotation/opacity) are ' +
+    'Anim objects — write { value: 0.5 }, NEVER a bare number. ' +
+    'Mutations: always pushHistory first; the store is zustand — re-read ' +
     'getState() after each action. Example — add a media file to track V1 at 2s:\n' +
     'const ed = window.kadrEditor; const st = () => ed.useEditor.getState();\n' +
     'const { asset } = await window.kadr.probeMedia("/path/v.mp4");\n' +

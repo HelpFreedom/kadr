@@ -39,7 +39,9 @@ export function attachAudio(el: HTMLMediaElement) {
 /** Per-clip volume; values above 1 boost beyond the source level. */
 export function setElementGain(el: HTMLMediaElement, v: number) {
   const g = gains.get(el)
-  if (g) g.gain.value = Math.max(0, v)
+  // a non-finite value throws inside WebAudio and kills the caller's rAF
+  // loop — no gain glitch is worth losing playback for the whole session
+  if (g) g.gain.value = Number.isFinite(v) ? Math.max(0, v) : 0
 }
 
 export function isRouted(el: HTMLMediaElement): boolean {

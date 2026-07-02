@@ -91,9 +91,9 @@ const INDEX_HTML = `<!doctype html>
 </html>
 `
 
-const PLAYER_TSX = `// Kadr player page: mounts one fragment in @remotion/player and obeys
+const PLAYER_TSX = `// Kadr player page v2: mounts one fragment in @remotion/player and obeys
 // sync messages from the editor. Managed by Kadr — do not edit.
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Player, PlayerRef } from '@remotion/player'
 import { fragments } from './src/fragments'
@@ -102,6 +102,10 @@ function App() {
   const id = new URLSearchParams(location.search).get('comp') || ''
   const entry = (fragments as Record<string, any>)[id]
   const ref = useRef<PlayerRef>(null)
+  // Drift against the editor clock is corrected by nudging playbackRate a
+  // few percent — a seekTo() jump of several frames reads as a visible
+  // stutter on moving content; hard resync only for gross desync.
+  const [rate, setRate] = useState(1)
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
       const m = e.data
@@ -116,9 +120,16 @@ function App() {
         }
         if (!m.playing) {
           if (p.isPlaying()) p.pause()
+          setRate(1)
           if (cur !== m.frame) p.seekTo(m.frame)
         } else {
-          if (Math.abs(cur - m.frame) > 3) p.seekTo(m.frame)
+          const drift = cur - m.frame // >0 = we are ahead of the editor
+          if (Math.abs(drift) > 6) {
+            p.seekTo(m.frame)
+            setRate(1)
+          } else {
+            setRate(Math.max(0.92, Math.min(1.08, 1 - drift * 0.03)))
+          }
           if (!p.isPlaying()) p.play()
         }
       }
@@ -139,6 +150,7 @@ function App() {
     compositionWidth: entry.meta.width,
     compositionHeight: entry.meta.height,
     fps: entry.meta.fps,
+    playbackRate: rate,
     style: { width: '100vw', height: '100vh' },
     controls: false,
     clickToPlay: false,
@@ -222,6 +234,14 @@ async function writeIfMissing(path: string, content: string) {
   }
 }
 
+/** Kadr-managed file ("do not edit"): follow template changes in place. */
+async function writeManaged(path: string, content: string) {
+  try {
+    if ((await fs.readFile(path, 'utf8')) === content) return
+  } catch { /* missing */ }
+  await fs.writeFile(path, content)
+}
+
 /** Rewrite the registry from the folders actually present on disk. */
 async function regenRegistry() {
   const dirs = (await fs.readdir(FRAG_DIR(), { withFileTypes: true }))
@@ -249,8 +269,8 @@ async function ensureWorkspace(
   await writeIfMissing(join(WORKSPACE, 'vite.config.ts'), VITE_CONFIG)
   await writeIfMissing(join(WORKSPACE, 'tsconfig.json'), TSCONFIG)
   await writeIfMissing(join(WORKSPACE, 'index.html'), INDEX_HTML)
-  await writeIfMissing(join(WORKSPACE, 'player.tsx'), PLAYER_TSX)
-  await writeIfMissing(join(WORKSPACE, 'src', 'Root.tsx'), ROOT_TSX)
+  await writeManaged(join(WORKSPACE, 'player.tsx'), PLAYER_TSX)
+  await writeManaged(join(WORKSPACE, 'src', 'Root.tsx'), ROOT_TSX)
   await writeIfMissing(join(WORKSPACE, 'src', 'index.ts'), INDEX_TS)
   if (!existsSync(join(FRAG_DIR(), 'index.ts'))) await regenRegistry()
 
@@ -406,16 +426,22 @@ async function renderFragment(
     if (opts?.transparent === undefined) transparent = !!meta.transparent
   } catch { /* meta is optional for the decision */ }
   const ext = transparent ? 'webm' : 'mp4'
-  const out = join(renderDir(), `${id}-${fragmentHash(id)}${transparent ? '-a' : ''}.${ext}`)
+  // 'q2' marks the render settings generation — old low-quality cache misses
+  const out = join(renderDir(), `${id}-${fragmentHash(id)}-q2${transparent ? '-a' : ''}.${ext}`)
   try {
     await fs.access(out)
     return { path: out, cached: true } // exact content already rendered
   } catch { /* not yet */ }
   await fs.mkdir(renderDir(), { recursive: true })
 
-  const args = ['remotion', 'render', 'src/index.ts', id, out, '--log=error']
-  if (transparent) args.push('--codec=vp8', '--pixel-format=yuva420p', '--image-format=png')
-  else args.push('--codec=h264')
+  // Quality matters more than render time here (one cached render per
+  // content hash): PNG frames avoid Remotion's default JPEG-80 pass, VP9
+  // replaces VP8 for alpha (dramatically better on sharp graphics), and a
+  // low CRF keeps this intermediate visually lossless — the final export
+  // pass re-encodes it once more.
+  const args = ['remotion', 'render', 'src/index.ts', id, out, '--log=error', '--image-format=png']
+  if (transparent) args.push('--codec=vp9', '--pixel-format=yuva420p', '--crf=12')
+  else args.push('--codec=h264', '--crf=15')
 
   const extraEnv = await netEnv()
   const job = renderChain.then(() => new Promise<void>((resolve, reject) => {
@@ -462,15 +488,22 @@ async function captureStart(
   fps: number
 ): Promise<void> {
   if (captures.has(id)) return
+  const cw = Math.max(64, Math.round(w))
+  const ch = Math.max(36, Math.round(h))
   const win = new BrowserWindow({
     show: false,
     frame: false,
     transparent: true,
-    width: Math.max(64, Math.round(w)),
-    height: Math.max(36, Math.round(h)),
+    width: cw,
+    height: ch,
+    // newer Electron clamps even hidden windows to the display they land on —
+    // with a portrait-rotated monitor first in the layout, a 1280×720 request
+    // came back 1080×720 and captured frames arrived letterboxed + stretched
+    enableLargerThanScreen: true,
     webPreferences: { offscreen: true }
   })
   captures.set(id, win)
+  win.setContentSize(cw, ch) // re-assert: creation may still have clamped
   win.webContents.setFrameRate(Math.max(10, Math.min(60, Math.round(fps))))
   win.webContents.on('paint', (_ev, _dirty, image) => {
     const size = image.getSize()

@@ -186,8 +186,9 @@ const drag = await evalJs(`(async () => {
 check('gizmo drag moves the captions (with an undo entry)',
   drag.moved && !!drag.undoLabel, JSON.stringify(drag))
 
-// cleanup
-await evalJs(`(async () => window.kadr.fragmentDelete(${JSON.stringify(cap.fragId)}))()`)
+// cleanup: the flow removes the timeline clip too — a bare
+// window.kadr.fragmentDelete leaves an «unknown composition» zombie clip
+await evalJs(`(async () => window.kadrEditor.deleteFragment(${JSON.stringify(cap.fragId)}))()`)
   .catch(() => { /* best effort */ })
 try { unlinkSync('/tmp/kadr-test/as/proj.autosave.kadr') } catch { /* gone */ }
 

@@ -19,6 +19,7 @@ export function ExportDialog() {
   const [presetId, setPresetId] = useState(PRESETS[0].id)
   const [motionBlur, setMotionBlur] = useState(true)
   const [frameBlending, setFrameBlending] = useState(true)
+  const [fastEncoder, setFastEncoder] = useState(false)
   const [status, setStatus] = useState<Status>({ kind: 'idle' })
   const handle = useRef<ExportHandle | null>(null)
 
@@ -48,7 +49,7 @@ export function ExportDialog() {
       out,
       (p) => setStatus({ kind: 'running', phase: p.phase, progress: p.progress }),
       s.range,
-      { motionBlur, frameBlending }
+      { motionBlur, frameBlending, encoder: fastEncoder ? 'webcodecs' : 'x264' }
     )
     handle.current = h
     h.done.catch((err) => {
@@ -115,6 +116,15 @@ export function ExportDialog() {
             onChange={(e) => setFrameBlending(e.target.checked)}
           />
           {t('frameBlending')}
+        </label>
+        <label className="anim-check export-mb" title={t('fastEncoderHint')}>
+          <input
+            type="checkbox"
+            checked={fastEncoder}
+            disabled={running}
+            onChange={(e) => setFastEncoder(e.target.checked)}
+          />
+          {t('fastEncoder')}
         </label>
 
         {status.kind === 'running' && (

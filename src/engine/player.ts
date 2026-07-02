@@ -132,6 +132,9 @@ export class MediaPool {
     if (!el) {
       if (asset.kind === 'image') {
         el = new Image()
+        // without CORS the kadr:// image is tainted on modern Chromium and
+        // texImage2D refuses it — the clip simply vanishes from the preview
+        el.crossOrigin = 'anonymous'
       } else {
         el = document.createElement('video')
         el.preload = 'auto'
@@ -346,9 +349,17 @@ function drawClipLayer(
     // enabled outer glows render the layer through the effect pass; smoke is
     // clocked by clip-local time, identical in preview and export
     const glows = (clip.effects ?? []).filter((e) => e.enabled && e.type === 'glow')
+    // gaussian blur effect: size as a fraction of project height, so the
+    // result is identical at any render resolution
+    const blurFx = (clip.effects ?? []).find((e) => e.enabled && e.type === 'blur')
+    const blurSize = typeof blurFx?.params.size === 'number' ? blurFx.params.size : 0
+    const blurFrac = Math.max(0, blurSize) / Math.max(1, project.height)
     const emit = (...layers: LayerDraw[]) => {
-      if (glows.length) comp.drawLayerGlow(layers, glows.map((g) => glowParams(g.params)), rel)
-      else for (const l of layers) comp.drawLayer(l)
+      if (glows.length || blurFrac > 0.0002) {
+        comp.drawLayerFx(layers, blurFrac, glows.map((g) => glowParams(g.params)), rel)
+      } else {
+        for (const l of layers) comp.drawLayer(l)
+      }
     }
     if (clip.kind === 'remotion') {
       // captured fragments draw like any layer — masks/3D/transitions work;
@@ -458,8 +469,19 @@ export class Player {
 
   attach(canvas: HTMLCanvasElement) {
     this.comp = new Compositor(canvas)
+    let lastErrLog = 0
     const loop = (ts: number) => {
-      this.tick(ts)
+      // one bad frame (corrupt clip data, GL hiccup) must never kill the
+      // loop — an unre-scheduled rAF means no preview and no playback for
+      // the rest of the session, which reads as "the editor broke"
+      try {
+        this.tick(ts)
+      } catch (err) {
+        if (ts - lastErrLog > 2000) {
+          lastErrLog = ts
+          console.error('player tick failed:', err)
+        }
+      }
       this.raf = requestAnimationFrame(loop)
     }
     this.raf = requestAnimationFrame(loop)
@@ -546,7 +568,17 @@ export class Player {
 
       if (el.readyState < 2) loading = true
       if (playing) {
-        if (Math.abs(el.currentTime - desired) > 0.15) el.currentTime = desired
+        // Resync discipline: a seek on a software-decoded element takes
+        // ~0.1-0.2 s, during which the master clock runs on — naively
+        // reseeking on every drift made each correction land already
+        // behind, storming into a seek-per-few-frames flicker at high
+        // clip speeds. Never reseek mid-seek, scale the tolerance with
+        // speed, and aim slightly AHEAD so the seek lands on time.
+        const speed = clip.speed || 1
+        const tolerance = Math.max(0.15, 0.08 * speed)
+        if (!el.seeking && Math.abs(el.currentTime - desired) > tolerance) {
+          el.currentTime = desired + 0.08 * speed
+        }
         if (el.paused) el.play().catch(() => { /* not ready yet */ })
       } else {
         if (!el.paused) el.pause()

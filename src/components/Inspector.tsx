@@ -177,6 +177,10 @@ function EffectsSection({ clip }: { clip: Clip }) {
     useEditor.getState().pushHistory('hEffect')
     update([...effects, { id: uid(), type: 'glow', enabled: true, params: { ...GLOW_DEFAULTS } }])
   }
+  const addBlur = () => {
+    useEditor.getState().pushHistory('hEffect')
+    update([...effects, { id: uid(), type: 'blur', enabled: true, params: { size: 20 } }])
+  }
   useEffect(() => {
     if (!menu) return
     const close = () => setMenu(null)
@@ -218,10 +222,15 @@ function EffectsSection({ clip }: { clip: Clip }) {
       {effects.map((fx) =>
         fx.type === 'glow' ? (
           <GlowControls key={fx.id} clip={clip} fx={fx} />
+        ) : fx.type === 'blur' ? (
+          <BlurControls key={fx.id} clip={clip} fx={fx} />
         ) : null
       )}
       {!effects.some((e) => e.type === 'glow') && (
         <button className="fx-add" onClick={addGlow}>✨ {t('fxGlow')}</button>
+      )}
+      {!effects.some((e) => e.type === 'blur') && (
+        <button className="fx-add" onClick={addBlur}>🌫 {t('fxBlur')}</button>
       )}
       {menu && (
         <CtxMenu x={menu.x} y={menu.y} className="preset-menu fx-preset-menu">
@@ -255,6 +264,45 @@ function EffectsSection({ clip }: { clip: Clip }) {
         </CtxMenu>
       )}
     </>
+  )
+}
+
+function BlurControls({ clip, fx }: { clip: Clip; fx: Effect }) {
+  const t = useT()
+  const st = () => useEditor.getState()
+  const patchFx = (patch: Partial<Effect>) =>
+    st().updateClip(clip.id, {
+      effects: (clip.effects ?? []).map((e) => (e.id === fx.id ? { ...e, ...patch } : e))
+    })
+  const size = typeof fx.params.size === 'number' ? fx.params.size : 20
+  return (
+    <div className="fx-block">
+      <div className="fx-head">
+        <label>
+          <input
+            type="checkbox"
+            checked={fx.enabled}
+            onChange={(e) => {
+              st().pushHistory('hEffect')
+              patchFx({ enabled: e.target.checked })
+            }}
+          />
+          <span>🌫 {t('fxBlur')}</span>
+        </label>
+        <button
+          className="fx-del"
+          title={t('fxDelete')}
+          onClick={() => {
+            st().pushHistory('hEffect')
+            st().updateClip(clip.id, {
+              effects: (clip.effects ?? []).filter((e) => e.id !== fx.id)
+            })
+          }}
+        >✕</button>
+      </div>
+      <Slider label={t('fxBlurSize')} value={size} min={0} max={300} step={1}
+        onChange={(v) => patchFx({ params: { ...fx.params, size: v } })} />
+    </div>
   )
 }
 

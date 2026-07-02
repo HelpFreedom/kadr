@@ -151,6 +151,30 @@ uniform sampler2D uTex;
 out vec4 outColor;
 void main() { outColor = texture(uTex, vUV); }`
 
+// Separable gaussian over the premultiplied layer FBO. uDir carries one
+// texel step along the pass axis; uRadius is the blur radius in pixels
+// along that axis (taps spread out for big radii — 24 per side).
+const BLUR_FS = `#version 300 es
+precision highp float;
+in vec2 vUV;
+uniform sampler2D uTex;
+uniform vec2 uDir;
+uniform float uRadius;
+out vec4 outColor;
+void main() {
+  float sigma = max(0.35, uRadius * 0.5);
+  float step = max(1.0, uRadius / 24.0);
+  vec4 acc = vec4(0.0);
+  float wsum = 0.0;
+  for (int i = -24; i <= 24; i++) {
+    float off = float(i) * step;
+    float w = exp(-0.5 * off * off / (sigma * sigma));
+    acc += texture(uTex, vUV + uDir * off) * w;
+    wsum += w;
+  }
+  outColor = acc / wsum;
+}`
+
 export interface LayerDraw {
   source: TexImageSource | null
   /** raw BGRA premultiplied pixels (fragment capture) instead of `source` */
@@ -232,8 +256,13 @@ export class Compositor {
   private curFbo: WebGLFramebuffer | null = null
   private blitProg: WebGLProgram | null = null
   // outer-glow buffers: full-res layer + low-res blurred silhouette field
-  private fx: { layer: Overlay; field: Overlay; fw: number; fh: number } | null = null
+  private fx: { layer: Overlay; field: Overlay; blur: Overlay; fw: number; fh: number } | null = null
   private fxSize = 0
+  private blurProg: {
+    prog: WebGLProgram
+    uDir: WebGLUniformLocation
+    uRadius: WebGLUniformLocation
+  } | null = null
   private fieldProg: { prog: WebGLProgram; uSize: WebGLUniformLocation; uRatio: WebGLUniformLocation } | null = null
   private glowProg: {
     prog: WebGLProgram
@@ -318,6 +347,13 @@ export class Compositor {
     this.canvas.width = w
     this.canvas.height = h
     this.gl.viewport(0, 0, w, h)
+  }
+
+  /** Copy the finished frame out of the default framebuffer (bottom-up rows). */
+  readPixels(out: Uint8Array) {
+    const gl = this.gl
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, out)
   }
 
   begin(background: string) {
@@ -524,6 +560,15 @@ export class Compositor {
 
   /** Draw a layer (possibly frame-blended pair) with outer glows beneath. */
   drawLayerGlow(layers: LayerDraw[], glows: GlowParams[], time: number) {
+    this.drawLayerFx(layers, 0, glows, time)
+  }
+
+  /**
+   * Layer(s) through the effects chain: optional gaussian blur (radius as a
+   * fraction of output height — resolution independent), then outer glows,
+   * then the (possibly blurred) layer itself, premultiplied into curFbo.
+   */
+  drawLayerFx(layers: LayerDraw[], blurFrac: number, glows: GlowParams[], time: number) {
     const gl = this.gl
     this.ensureFx()
     const fx = this.fx!
@@ -531,6 +576,36 @@ export class Compositor {
     gl.clearColor(0, 0, 0, 0)
     gl.clear(gl.COLOR_BUFFER_BIT)
     for (const l of layers) this.drawLayer(l)
+
+    const radius = blurFrac * this.height
+    if (radius > 0.2) {
+      if (!this.blurProg) {
+        const prog = this.buildProgram(TRANS_VS, BLUR_FS)
+        gl.useProgram(prog)
+        gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0)
+        this.blurProg = {
+          prog,
+          uDir: gl.getUniformLocation(prog, 'uDir')!,
+          uRadius: gl.getUniformLocation(prog, 'uRadius')!
+        }
+      }
+      const bp = this.blurProg
+      gl.disable(gl.BLEND)
+      gl.useProgram(bp.prog)
+      gl.activeTexture(gl.TEXTURE0)
+      // horizontal: layer → blur scratch
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fx.blur.fbo)
+      gl.bindTexture(gl.TEXTURE_2D, fx.layer.tex)
+      gl.uniform2f(bp.uDir, 1 / this.width, 0)
+      gl.uniform1f(bp.uRadius, radius)
+      this.fsQuad()
+      // vertical: scratch → back into the layer FBO (glow + blit read it)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fx.layer.fbo)
+      gl.bindTexture(gl.TEXTURE_2D, fx.blur.tex)
+      gl.uniform2f(bp.uDir, 0, 1 / this.height)
+      this.fsQuad()
+      gl.enable(gl.BLEND)
+    }
 
     const ratio = this.width / Math.max(1, this.height)
     for (const g of glows) {
@@ -620,14 +695,19 @@ export class Compositor {
     const size = this.width * 65536 + this.height
     if (this.fx && this.fxSize === size) return
     if (this.fx) {
-      for (const o of [this.fx.layer, this.fx.field]) {
+      for (const o of [this.fx.layer, this.fx.field, this.fx.blur]) {
         gl.deleteFramebuffer(o.fbo)
         gl.deleteTexture(o.tex)
       }
     }
     const fw = Math.max(2, Math.round(this.width / 4))
     const fh = Math.max(2, Math.round(this.height / 4))
-    this.fx = { layer: this.makeFbo(this.width, this.height), field: this.makeFbo(fw, fh), fw, fh }
+    this.fx = {
+      layer: this.makeFbo(this.width, this.height),
+      field: this.makeFbo(fw, fh),
+      blur: this.makeFbo(this.width, this.height),
+      fw, fh
+    }
     this.fxSize = size
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.curFbo)
   }
@@ -802,8 +882,9 @@ export class Compositor {
   }
 }
 
-function hexToRgb(hex: string): [number, number, number] {
-  const v = parseInt(hex.replace('#', ''), 16)
+function hexToRgb(hex: string | undefined): [number, number, number] {
+  const v = parseInt((hex ?? '#000000').replace('#', ''), 16)
+  if (!Number.isFinite(v)) return [0, 0, 0]
   return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255]
 }
 

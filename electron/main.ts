@@ -3,7 +3,7 @@ import { join, dirname, basename } from 'path'
 import { promises as fs, createReadStream, statSync } from 'fs'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
-import { probeMedia, makeProxy, ExportMuxer } from './ffmpeg'
+import { probeMedia, makeProxy, makeReversed, ExportMuxer, RawVideoEncoder } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerFragmentIpc } from './fragments'
@@ -11,9 +11,23 @@ import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
 // file content regardless of its own origin (http in dev, file in prod).
+// corsEnabled is required since Chromium ~136: without it a kadr:// <video>
+// is treated as cross-origin, so its pixels are "tainted" and can't be
+// uploaded to WebGL (texImage2D throws) — black preview and black export.
+// The media response sends Access-Control-Allow-Origin:* and the elements
+// set crossOrigin='anonymous', so the CORS check then passes and untaints.
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'kadr', privileges: { secure: true, stream: true, supportFetchAPI: true, bypassCSP: true } }
+  {
+    scheme: 'kadr',
+    privileges: { secure: true, stream: true, supportFetchAPI: true, corsEnabled: true, bypassCSP: true }
+  }
 ])
+
+// Don't touch the OS keyring (gnome-keyring/libsecret): Chromium ≥ some
+// recent version otherwise pops a "unlock keyring" password dialog on
+// launch to encrypt its cookie/storage store. Kadr keeps no web secrets,
+// so the in-app "basic" store is correct — and it means no prompt.
+app.commandLine.appendSwitch('password-store', 'basic')
 
 // Let Chromium use VAAPI for hardware video encode/decode where the driver
 // allows it (Intel iGPU on this machine); WebCodecs then picks it up via
@@ -42,11 +56,24 @@ function createWindow() {
     title: 'Kadr',
     webPreferences: {
       preload: join(__dirname, '../preload/preload.js'),
-      contextIsolation: true,
+      // page and preload share one JS context: export frames reach the
+      // preload-spawned ffmpeg by reference — any bridge/IPC route copies
+      // ~8 MB per 1080p frame at only a few hundred MB/s and dominates
+      // render time. The renderer loads local content only.
+      contextIsolation: false,
       sandbox: false
     }
   })
   win.setMenuBarVisibility(false)
+  // a killed/crashed renderer leaves a dead window and an immortal main
+  // process (the running project is lost either way — autosave has it);
+  // exit cleanly so the next launch starts fresh instead of being blocked
+  win.webContents.on('render-process-gone', (_e, details) => {
+    if (details.reason !== 'clean-exit') {
+      console.error('[kadr] renderer gone:', details.reason, '— exiting')
+      app.exit(1)
+    }
+  })
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -145,7 +172,18 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  if (process.platform !== 'darwin') {
+    app.quit()
+    // an in-flight export/muxer or any stray handle must never keep a
+    // windowless process alive — a lingering instance blocks the next
+    // launch and reads as "the editor won't open anymore"
+    setTimeout(() => app.exit(0), 2500)
+  }
+})
+
+app.on('before-quit', () => {
+  exportState?.muxer?.cancel()
+  void cleanupExport()
 })
 
 // ---------------------------------------------------------------------------
@@ -161,6 +199,14 @@ let exportState: {
   videoTemp: string
   fh: fs.FileHandle | null
   muxer: ExportMuxer | null
+  raw: RawVideoEncoder | null
+  rawEncoded: boolean
+  /** WebSocket frame transport: Electron IPC serializes ~8 MB per 1080p
+      frame at only ~400 MB/s (≈20 ms of renderer main-thread per frame) —
+      a local binary WebSocket moves the same data several times faster */
+  rawWss: import('ws').WebSocketServer | null
+  rawChain: Promise<void>
+  rawErr: Error | null
 } | null = null
 
 function sendProgress(p: import('@shared/types').ExportProgress) {
@@ -210,6 +256,49 @@ async function requestProxy(srcPath: string, duration: number): Promise<string> 
   return out
 }
 
+// reversed renders: keyed by source identity + range, built one at a time
+const reverseDir = () => join(app.getPath('userData'), 'reversed')
+let reverseChain: Promise<unknown> = Promise.resolve()
+
+async function requestReversed(
+  srcPath: string,
+  start: number,
+  duration: number,
+  info: { kind: string; hasAudio: boolean; width: number; height: number; fps: number }
+): Promise<string> {
+  const stat = statSync(srcPath)
+  const key = createHash('sha1')
+    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}:${start.toFixed(3)}:${duration.toFixed(3)}`)
+    .digest('hex')
+    .slice(0, 20)
+  const out = join(reverseDir(), `${key}.${info.kind === 'video' ? 'mp4' : 'wav'}`)
+  try {
+    await fs.access(out)
+    return out
+  } catch { /* not built yet */ }
+  await fs.mkdir(reverseDir(), { recursive: true })
+  const job = reverseChain.then(async () => {
+    try {
+      await fs.access(out)
+      return // built while queued
+    } catch { /* still missing */ }
+    const tmp = join(reverseDir(), `${key}.part.${info.kind === 'video' ? 'mp4' : 'wav'}`)
+    try {
+      await makeReversed(srcPath, start, duration, tmp, info, join(reverseDir(), `${key}.tmp`), (p) => {
+        win?.webContents.send('reverse:progress', { path: srcPath, start, duration, progress: p })
+      })
+      await fs.rename(tmp, out)
+    } catch (err) {
+      fs.unlink(tmp).catch(() => { /* nothing to clean */ })
+      throw err
+    }
+  })
+  reverseChain = job.catch(() => { /* keep the queue alive */ })
+  await job
+  win?.webContents.send('reverse:progress', { path: srcPath, start, duration, progress: 1 })
+  return out
+}
+
 // every save/open dialog remembers its last directory; the first run lands
 // in Videos/Downloads — never in the app's working directory, where renders
 // silently disappear from the user's sight
@@ -245,6 +334,13 @@ async function rememberDir(kind: string, filePath: string) {
 function registerIpc() {
   ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number) =>
     requestProxy(srcPath, duration)
+  )
+
+  ipcMain.handle(
+    'media:reverse',
+    (_e, srcPath: string, start: number, duration: number, info: {
+      kind: string; hasAudio: boolean; width: number; height: number; fps: number
+    }) => requestReversed(srcPath, start, duration, info)
   )
 
   ipcMain.handle('store:read', async (_e, name: string) => {
@@ -330,12 +426,86 @@ function registerIpc() {
     await cleanupExport()
     const videoTemp = join(tmpdir(), `kadr-export-${Date.now()}.mp4`)
     const fh = job.preset.audioOnly ? null : await fs.open(videoTemp, 'w')
-    exportState = { job, videoTemp, fh, muxer: null }
+    exportState = {
+      job, videoTemp, fh, muxer: null, raw: null, rawEncoded: false,
+      rawWss: null, rawChain: Promise.resolve(), rawErr: null
+    }
   })
 
   ipcMain.handle('export:video-chunk', async (_e, data: ArrayBuffer, position: number) => {
     if (!exportState?.fh) throw new Error('no export in progress')
     await exportState.fh.write(Buffer.from(data), 0, data.byteLength, position)
+  })
+
+  // direct ffmpeg encode: raw RGBA frames from the renderer over stdin;
+  // returns a local WebSocket port for the frame stream (0 = use IPC)
+  ipcMain.handle('export:raw-begin', async (_e, width: number, height: number, fps: number) => {
+    if (!exportState) throw new Error('no export in progress')
+    const st = exportState
+    await st.fh?.close()
+    st.fh = null
+    const preset = st.job.preset
+    st.raw = new RawVideoEncoder()
+    st.rawEncoded = true
+    st.raw.start({
+      width, height, fps,
+      codec: preset.ffmpegVideo === 'copy' ? 'libx264' : preset.ffmpegVideo,
+      bitrate: preset.videoBitrate,
+      out: st.videoTemp
+    })
+    try {
+      const { WebSocketServer } = await import('ws')
+      const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+      await new Promise<void>((res, rej) => { wss.once('listening', res); wss.once('error', rej) })
+      let pendingWrites = 0
+      wss.on('connection', (sock) => {
+        sock.on('message', (data) => {
+          if (!st.raw) return
+          pendingWrites++
+          if (pendingWrites > 12) sock.pause() // ffmpeg fell behind — stop reading
+          st.rawChain = st.rawChain
+            .then(() => st.raw?.write(data as Buffer))
+            .then(() => {
+              if (--pendingWrites <= 4 && sock.isPaused) sock.resume()
+            })
+            .catch((err) => { st.rawErr = st.rawErr ?? (err as Error) })
+        })
+      })
+      st.rawWss = wss
+      const addr = wss.address()
+      return typeof addr === 'object' && addr ? addr.port : 0
+    } catch {
+      return 0 // no ws transport — the renderer falls back to IPC frames
+    }
+  })
+
+  // preload encoded the video itself — adopt its file for the mux stage
+  ipcMain.handle('export:use-video', async (_e, path: string) => {
+    if (!exportState) throw new Error('no export in progress')
+    const st = exportState
+    await st.fh?.close()
+    st.fh = null
+    if (st.videoTemp !== path) {
+      try { await fs.unlink(st.videoTemp) } catch { /* never written */ }
+    }
+    st.videoTemp = path
+    st.rawEncoded = true
+  })
+
+  ipcMain.handle('export:raw-frame', async (_e, data: ArrayBuffer) => {
+    if (!exportState?.raw) throw new Error('no raw encoder')
+    await exportState.raw.write(Buffer.from(data))
+  })
+
+  ipcMain.handle('export:raw-end', async () => {
+    if (!exportState?.raw) throw new Error('no raw encoder')
+    const st = exportState
+    await st.rawChain
+    if (st.rawErr) throw st.rawErr
+    st.rawWss?.close()
+    st.rawWss = null
+    await st.raw!.finish()
+    st.raw = null
   })
 
   ipcMain.handle('export:video-done', async () => {
@@ -345,7 +515,11 @@ function registerIpc() {
     st.fh = null
     st.muxer = new ExportMuxer()
     try {
-      await st.muxer.run(st.job, st.videoTemp, sendProgress)
+      // raw path already produced the final video stream — never re-encode it
+      const job = st.rawEncoded
+        ? { ...st.job, preset: { ...st.job.preset, ffmpegVideo: 'copy' as const } }
+        : st.job
+      await st.muxer.run(job, st.videoTemp, sendProgress)
       sendProgress({ phase: 'done', progress: 1 })
     } catch (err: any) {
       sendProgress({
@@ -359,6 +533,7 @@ function registerIpc() {
   })
 
   ipcMain.handle('export:cancel', async () => {
+    exportState?.raw?.kill()
     exportState?.muxer?.cancel()
     if (exportState && !exportState.muxer) {
       await cleanupExport()
@@ -371,6 +546,8 @@ async function cleanupExport() {
   if (!exportState) return
   const st = exportState
   exportState = null
+  st.raw?.kill()
+  st.rawWss?.close()
   try { await st.fh?.close() } catch { /* already closed */ }
   try { await fs.unlink(st.videoTemp) } catch { /* never created */ }
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import type { Clip, MediaAsset, Track } from '@shared/types'
 import {
   useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM
@@ -7,6 +8,7 @@ import { useT } from '@/i18n'
 import { TRANSITIONS } from '@/gl/transitions'
 import { EDGE_TRANSITIONS } from '@/gl/edges'
 import { CtxMenu } from './CtxMenu'
+import { reverseClip, useReverseUi } from '@/engine/reverse'
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
 
@@ -177,13 +179,18 @@ export function Timeline({ height }: { height: number }) {
     const onWheel = (e: WheelEvent) => {
       // plain wheel (and Ctrl+wheel) zooms around the cursor; Shift+wheel pans
       if (e.shiftKey) return
+      // the gain/opacity slider row has its own precise ±1% wheel
+      if ((e.target as HTMLElement).closest?.('.track-gain-row')) return
       e.preventDefault()
       const s = useEditor.getState()
       const rect = el.getBoundingClientRect()
       const cx = e.clientX - rect.left - HEADER_W + el.scrollLeft
       const tAtCursor = cx / s.zoom
       const nz = Math.min(MAX_ZOOM, Math.max(4, s.zoom * Math.exp(-e.deltaY * 0.0015)))
-      s.setZoom(nz)
+      // commit the new content width NOW: scrollLeft set against the stale
+      // (narrower) width gets clamped by the browser, so zooming near the
+      // end of a long timeline used to anchor somewhere left of the cursor
+      flushSync(() => s.setZoom(nz))
       el.scrollLeft = tAtCursor * nz - (e.clientX - rect.left - HEADER_W)
       updateView()
     }
@@ -419,6 +426,26 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
           >
             {t('animTab')}…
           </button>
+          {(() => {
+            const p = useEditor.getState().project
+            const f = findClip(p, menu.clipId!)
+            const a = f?.clip.assetId ? p.assets.find((x) => x.id === f.clip.assetId) : null
+            if (!a || a.kind === 'image' || !a.duration) return null
+            const busy = useReverseUi.getState().busy[menu.clipId!]
+            if (busy !== undefined) {
+              return <button disabled>⏳ {t('reversing')} {Math.round(busy * 100)}%</button>
+            }
+            return (
+              <button
+                onClick={() => {
+                  void reverseClip(menu.clipId!)
+                  onClose()
+                }}
+              >
+                {a.reverseOf ? t('unreverse') : t('reverse')}
+              </button>
+            )
+          })()}
           <button
             className="danger"
             onClick={() => {
@@ -530,6 +557,9 @@ interface ViewWindow {
   end: number
 }
 
+// groups a burst of wheel notches over one gain slider into a single undo entry
+const gainWheelMark = { id: '', ts: 0 }
+
 function TrackRow({
   track, trackH, contentW, view, onMenu
 }: {
@@ -541,6 +571,30 @@ function TrackRow({
 }) {
   const t = useT()
   const reorder = useRef<{ pushed: boolean } | null>(null)
+  const gainRef = useRef<HTMLInputElement>(null)
+
+  // wheel over the volume/opacity slider: precise ±1% per notch (a drag can't
+  // hit exact values); consecutive notches merge into one history entry
+  useEffect(() => {
+    const el = gainRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      e.stopPropagation() // the timeline zoom listener must not see this
+      const st = useEditor.getState()
+      const tr = st.project.tracks.find((x) => x.id === track.id)
+      if (!tr) return
+      const now = Date.now()
+      if (gainWheelMark.id !== track.id || now - gainWheelMark.ts > 1000) st.pushHistory('hEdit')
+      gainWheelMark.id = track.id
+      gainWheelMark.ts = now
+      const max = tr.kind === 'audio' ? 2 : 1
+      const next = Math.round((tr.gain + (e.deltaY < 0 ? 0.01 : -0.01)) * 100) / 100
+      st.updateTrack(track.id, { gain: Math.min(max, Math.max(0, next)) })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [track.id, trackH < 46]) // the slider row mounts only when tall enough
 
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
     const assetId = e.dataTransfer.getData('kadr/asset')
@@ -635,6 +689,7 @@ function TrackRow({
         {trackH >= 46 && (
           <div className="track-gain-row">
             <input
+              ref={gainRef}
               className="track-gain"
               type="range"
               min={0}
@@ -782,6 +837,7 @@ function ClipView({
   const asset = useEditor((s) =>
     clip.assetId ? s.project.assets.find((a) => a.id === clip.assetId) : undefined
   )
+  const reversing = useReverseUi((s) => s.busy[clip.id]) // 0..1 or undefined
   const drag = useRef<DragState | null>(null)
   const waveRef = useRef<HTMLCanvasElement>(null)
   const [levelDrag, setLevelDrag] = useState<number | null>(null)
@@ -1135,7 +1191,15 @@ function ClipView({
         {isText ? `T: ${clip.text}` : clip.label}
         {speed !== 1 ? ` ×${speed.toFixed(2)}` : ''}
         {loops ? ' ↻' : ''}
+        {reversing !== undefined
+          ? ` ⏳ ${Math.round(reversing * 100)}%`
+          : asset?.reverseOf
+            ? ' ⏪'
+            : ''}
       </span>
+      {reversing !== undefined && (
+        <div className="reverse-progress" style={{ width: `${Math.round(reversing * 100)}%` }} />
+      )}
       {tipIn && <div className="tip-strip left" style={{ width: tipIn.duration * zoom }} />}
       {tipOut && <div className="tip-strip right" style={{ width: tipOut.duration * zoom }} />}
       {track.kind === 'video' && w > 40 && (

@@ -1,6 +1,6 @@
 // Test: Remotion fragments — create over a range (clip on a fresh top
 // track, ≥60 fps meta), live preview overlay iframe, hot file edits keep it
-// alive, one-shot final render (vp8 alpha webm), export materialization
+// alive, one-shot final render (vp9 alpha webm), export materialization
 // composites the fragment over a video, MCP exposes kadr_fragment_create.
 // Requires the workspace to be installed (first fragmentEnsure run).
 import WebSocket from 'ws'
@@ -9,6 +9,11 @@ import { writeFileSync, unlinkSync, readFileSync } from 'fs'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
 const ENV_FILE = `${process.env.HOME}/.config/kadr/claude-env.json`
+
+// self-contained media: the export check counts smpte-bar pixels below the fragment
+execFileSync('bash', ['-c',
+  'mkdir -p /tmp/kadr-test && ffmpeg -v error -f lavfi -i "smptebars=s=640x360:d=3:r=30" ' +
+  '-c:v libx264 -crf 18 -pix_fmt yuv420p -y /tmp/kadr-test/b.mp4'])
 
 async function getPageWs() {
   for (let i = 0; i < 30; i++) {
@@ -96,6 +101,8 @@ for (let i = 0; i < 30; i++) {
 }
 
 let fragId = null
+let envBackup = null
+let envWritten = false
 try {
   // 1) create a short fragment over [1, 2)
   const created = await evalJs(`(async () => {
@@ -139,15 +146,15 @@ try {
   })()`)
   check('hot edit keeps the overlay alive', afterEdit === true)
 
-  // 4) one-shot render: vp8 alpha webm lands in the cache
+  // 4) one-shot render: vp9 alpha webm lands in the cache
   const rendered = await evalJs(`(async () =>
     window.kadr.fragmentRender(${JSON.stringify(fragId)}, { transparent: true })
   )()`)
   check('fragment renders to an alpha webm', rendered.path.endsWith('.webm'), rendered.path)
   const probe = execFileSync('ffprobe', ['-v', 'error', '-show_entries',
     'stream=codec_name,width,r_frame_rate', '-of', 'csv', rendered.path]).toString()
-  check('render is vp8 at 60 fps, project width',
-    probe.includes('vp8') && probe.includes('60/1'), probe.trim().split('\n')[0])
+  check('render is vp9 at 60 fps, project width',
+    probe.includes('vp9') && probe.includes('60/1'), probe.trim().split('\n')[0])
 
   // 5) export composites the fragment over an underlying video
   await evalJs(`(async () => {
@@ -181,9 +188,9 @@ print(bars, text)
     px[0] > 200 && px[1] > 30, `bar-px=${px[0]} text-px=${px[1]}`)
 
   // 6) MCP exposes the fragment tool
-  let envBackup = null
-try { envBackup = readFileSync(ENV_FILE, 'utf8') } catch { /* none */ }
-writeFileSync(ENV_FILE, JSON.stringify({ command: 'bash', args: [] }))
+  try { envBackup = readFileSync(ENV_FILE, 'utf8') } catch { /* none */ }
+  writeFileSync(ENV_FILE, JSON.stringify({ command: 'bash', args: [] }))
+  envWritten = true
   const opened = await evalJs(`(async () => window.kadr.claudeOpen(80, 24, null))()`)
   const mcp = spawn('node', ['electron/mcp-bridge.cjs', String(opened.port)],
     { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'inherit'] })
@@ -222,10 +229,12 @@ writeFileSync(ENV_FILE, JSON.stringify({ command: 'bash', args: [] }))
   mcp.kill()
   await evalJs(`(async () => window.kadr.claudeClose())()`)
 } finally {
-  if (envBackup !== null) writeFileSync(ENV_FILE, envBackup)
-  else try { unlinkSync(ENV_FILE) } catch { /* absent */ }
+  if (envWritten) {
+    if (envBackup !== null) writeFileSync(ENV_FILE, envBackup)
+    else try { unlinkSync(ENV_FILE) } catch { /* absent */ }
+  }
   if (fragId) {
-    await evalJs(`(async () => window.kadr.fragmentDelete(${JSON.stringify(fragId)}))()`)
+    await evalJs(`(async () => window.kadrEditor.deleteFragment(${JSON.stringify(fragId)}))()`)
       .catch(() => { /* best effort */ })
   }
 }

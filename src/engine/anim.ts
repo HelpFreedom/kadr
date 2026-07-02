@@ -9,9 +9,13 @@ const ease: Record<Easing, (t: number) => number> = {
 }
 
 /** Evaluate an animatable property at time t (relative to clip start). */
-export function evalAnim(a: Anim, t: number): number {
+export function evalAnim(a: Anim | number | undefined, t: number): number {
+  // tolerate scalar anims from scripts/foreign projects — a NaN escaping
+  // into WebAudio or CSS kills far more than one property
+  if (typeof a === 'number') return Number.isFinite(a) ? a : 0
+  if (!a) return 0
   const kfs = a.keyframes
-  if (!kfs || kfs.length === 0) return a.value
+  if (!kfs || kfs.length === 0) return Number.isFinite(a.value) ? a.value : 0
   if (t <= kfs[0].time) return kfs[0].value
   const last = kfs[kfs.length - 1]
   if (t >= last.time) return last.value

@@ -91,6 +91,10 @@ export interface ExportOptions {
   /** mix neighbouring source frames when the source fps can't fill the
       project fps (25→60, slow motion) — smooths content cadence */
   frameBlending?: boolean
+  /** 'x264' (default) streams raw frames to ffmpeg — real rate control,
+      desktop-NLE quality; 'webcodecs' keeps the old in-browser encoder
+      (faster, but Chromium's OpenH264 ignores the preset bitrate) */
+  encoder?: 'x264' | 'webcodecs'
 }
 
 export function startExport(
@@ -154,39 +158,87 @@ export function startExport(
     const frames = new Map<string, VideoFrame>()
     const blends = opts?.frameBlending === false ? undefined : new Map<string, BlendFrame>()
 
-    let writeChain: Promise<void> = Promise.resolve()
-    const muxer = new Muxer({
-      target: new StreamTarget({
-        onData: (data, position) => {
-          const copy = data.slice().buffer
-          writeChain = writeChain.then(() => window.kadr.exportVideoChunk(copy, position))
-        },
-        chunked: true
-      }),
-      video: { codec: 'avc', width, height },
-      fastStart: false,
-      firstTimestampBehavior: 'offset'
-    })
+    // default: stream raw frames to ffmpeg/libx264 in main — Chromium's
+    // WebCodecs encoders ignore the preset bitrate and produce soft output.
+    // The IPC transfer is pipelined: invoke() serializes the buffer
+    // synchronously, so the loop keeps decoding/drawing the next frames
+    // while up to RAW_AHEAD transfers are still in flight (ffmpeg encodes
+    // in its own process in parallel anyway).
+    const useRaw = opts?.encoder !== 'webcodecs'
+    const rawBuf = useRaw ? new Uint8Array(width * height * 4) : null
+    const RAW_AHEAD = 3
+    const rawInFlight: Promise<void>[] = []
+    // frames travel over a local binary WebSocket when main offers one:
+    // ws.send() costs a plain memcpy, while an 8 MB IPC invoke burns ~20 ms
+    // of renderer main-thread on Electron's structured-clone serialization
+    let rawWs: WebSocket | null = null
 
+    let writeChain: Promise<void> = Promise.resolve()
+    let muxer: Muxer<StreamTarget> | null = null
+    let encoder: VideoEncoder | null = null
     let encodeError: Error | null = null
-    const encoder = new VideoEncoder({
-      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-      error: (e) => { encodeError = e }
-    })
-    const baseConfig: VideoEncoderConfig = {
-      codec: avcCodecString(width, height, fps),
-      width,
-      height,
-      bitrate: preset.videoBitrate,
-      framerate: fps,
-      latencyMode: 'quality'
+    // best transport: preload spawns ffmpeg inside this process; with
+    // contextIsolation off the frame buffers pass by reference (no copies).
+    // Double buffer: fill one while ffmpeg still owns the other. Falls back
+    // to main-side WS, then IPC.
+    let rawDirect: string | null = null
+    const slots: Uint8Array[] = []
+    const slotPending: (Promise<void> | null)[] = [null, null]
+    if (useRaw) {
+      const codec = preset.ffmpegVideo === 'copy' ? 'libx264' : preset.ffmpegVideo
+      try {
+        rawDirect = await window.kadr.rawEncodeStart({
+          width, height, fps, codec, bitrate: preset.videoBitrate
+        })
+        for (let s = 0; s < 2; s++) slots.push(new Uint8Array(width * height * 4))
+      } catch (err) {
+        console.warn('[kadr] direct raw encoder unavailable, falling back', err)
+        rawDirect = null
+      }
+      if (!rawDirect) {
+        const wsPort = await window.kadr.exportRawBegin(width, height, fps)
+        if (wsPort > 0) {
+          rawWs = await new Promise<WebSocket | null>((res) => {
+            const s = new WebSocket(`ws://127.0.0.1:${wsPort}`)
+            s.binaryType = 'arraybuffer'
+            s.onopen = () => res(s)
+            s.onerror = () => res(null) // IPC fallback
+          })
+        }
+      }
+      console.info(`[kadr] export encoder: ffmpeg x264 (${rawDirect ? 'direct' : rawWs ? 'ws' : 'ipc'} pipe)`)
+    } else {
+      muxer = new Muxer({
+        target: new StreamTarget({
+          onData: (data, position) => {
+            const copy = data.slice().buffer
+            writeChain = writeChain.then(() => window.kadr.exportVideoChunk(copy, position))
+          },
+          chunked: true
+        }),
+        video: { codec: 'avc', width, height },
+        fastStart: false,
+        firstTimestampBehavior: 'offset'
+      })
+      encoder = new VideoEncoder({
+        output: (chunk, meta) => muxer!.addVideoChunk(chunk, meta),
+        error: (e) => { encodeError = e }
+      })
+      const baseConfig: VideoEncoderConfig = {
+        codec: avcCodecString(width, height, fps),
+        width,
+        height,
+        bitrate: preset.videoBitrate,
+        framerate: fps,
+        latencyMode: 'quality'
+      }
+      // prefer the GPU encoder (VAAPI) and fall back to software when missing
+      let config: VideoEncoderConfig = { ...baseConfig, hardwareAcceleration: 'prefer-hardware' }
+      const hw = await VideoEncoder.isConfigSupported(config).catch(() => null)
+      if (!hw?.supported) config = { ...baseConfig, hardwareAcceleration: 'no-preference' }
+      console.info(`[kadr] export encoder: webcodecs ${hw?.supported ? 'hardware' : 'software'}`)
+      encoder.configure(config)
     }
-    // prefer the GPU encoder (VAAPI) and fall back to software when missing
-    let config: VideoEncoderConfig = { ...baseConfig, hardwareAcceleration: 'prefer-hardware' }
-    const hw = await VideoEncoder.isConfigSupported(config).catch(() => null)
-    if (!hw?.supported) config = { ...baseConfig, hardwareAcceleration: 'no-preference' }
-    console.info(`[kadr] export encoder: ${hw?.supported ? 'hardware' : 'software'}`)
-    encoder.configure(config)
 
     try {
       const totalFrames = Math.max(1, Math.round(duration * fps))
@@ -209,28 +261,68 @@ export function startExport(
         } else {
           drawFrame(comp, project, t, pool, frames, blends)
         }
-        const frame = new VideoFrame(canvas, {
-          timestamp: Math.round((k * 1e6) / fps),
-          duration: Math.round(1e6 / fps)
-        })
-        encoder.encode(frame, { keyFrame: k % (Math.round(fps) * 2) === 0 })
-        frame.close()
-        while (encoder.encodeQueueSize > 8) await sleep(4)
+        if (useRaw) {
+          if (rawDirect) {
+            const s = k & 1
+            if (slotPending[s]) await slotPending[s] // ffmpeg still owns this one
+            comp.readPixels(slots[s])
+            slotPending[s] = window.kadr.rawEncodeFrame(slots[s])
+          } else if (rawWs) {
+            comp.readPixels(rawBuf!)
+            rawWs.send(rawBuf!) // copies synchronously — the buffer is reusable
+            while (rawWs.bufferedAmount > 64_000_000) await sleep(2)
+            if (rawWs.readyState !== WebSocket.OPEN) throw new Error('raw frame socket died')
+          } else {
+            comp.readPixels(rawBuf!)
+            rawInFlight.push(window.kadr.exportRawFrame(rawBuf!.buffer))
+            if (rawInFlight.length >= RAW_AHEAD) await rawInFlight.shift()
+          }
+        } else {
+          const frame = new VideoFrame(canvas, {
+            timestamp: Math.round((k * 1e6) / fps),
+            duration: Math.round(1e6 / fps)
+          })
+          encoder!.encode(frame, { keyFrame: k % (Math.round(fps) * 2) === 0 })
+          frame.close()
+          while (encoder!.encodeQueueSize > 8) await sleep(4)
+        }
         if (k % 5 === 0 || k === totalFrames - 1) {
           onProgress({ phase: 'video', progress: (k + 1) / totalFrames })
         }
       }
-      await encoder.flush()
-      muxer.finalize()
-      await writeChain
+      if (useRaw) {
+        if (rawDirect) {
+          for (const p of slotPending) if (p) await p
+          await window.kadr.rawEncodeEnd()
+          await window.kadr.exportUseVideo(rawDirect)
+        } else {
+          if (rawWs) {
+            // TCP delivers in order: once our close handshake completes, main
+            // has every frame — only then may raw-end flush the encoder
+            while (rawWs.bufferedAmount > 0) await sleep(5)
+            await new Promise<void>((res) => {
+              rawWs!.onclose = () => res()
+              rawWs!.close()
+            })
+          }
+          await Promise.all(rawInFlight)
+          await window.kadr.exportRawEnd()
+        }
+      } else {
+        await encoder!.flush()
+        muxer!.finalize()
+        await writeChain
+      }
       // hand off to ffmpeg in the main process (audio mix + mux);
       // further progress arrives via onExportProgress events
       await window.kadr.exportVideoDone()
     } catch (err) {
+      if (rawDirect) window.kadr.rawEncodeKill()
       await window.kadr.exportCancel().catch(() => { /* already gone */ })
       throw err
     } finally {
-      try { encoder.close() } catch { /* already closed */ }
+      try { rawWs?.close() } catch { /* already closed */ }
+      try { encoder?.close() } catch { /* already closed */ }
       for (const src of sources.values()) src?.close()
       pool.dispose()
     }

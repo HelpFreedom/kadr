@@ -10,6 +10,39 @@ import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
 import { CaptionsDialog } from './components/CaptionsDialog'
 import { useEditor, newProject } from './state/store'
 import { useT, type TKey } from './i18n'
+import { create } from 'zustand'
+import type { Project } from '@shared/types'
+
+// Save feedback: which project snapshot is on disk (→ the ● dirty dot) and
+// a transient "✓ saved" flash in the topbar.
+const useSaveUi = create<{
+  savedProject: Project | null
+  flash: { key: TKey; detail: string; error: boolean } | null
+}>(() => ({ savedProject: null, flash: null }))
+
+let flashTimer: ReturnType<typeof setTimeout> | undefined
+function flashSave(key: TKey, detail: string, error = false) {
+  useSaveUi.setState({ flash: { key, detail, error } })
+  clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => useSaveUi.setState({ flash: null }), 3000)
+}
+
+/** remember what's on disk now — the ● goes away until the next edit */
+export function markProjectSaved(p: Project) {
+  useSaveUi.setState({ savedProject: p })
+}
+
+async function writeAndConfirm(path: string) {
+  const s = useEditor.getState()
+  try {
+    await window.kadr.writeProject(path, s.project)
+    s.setProjectPath(path)
+    markProjectSaved(s.project)
+    flashSave('saved', path.split('/').pop() ?? path)
+  } catch (err) {
+    flashSave('saveError', String(err), true)
+  }
+}
 
 async function saveProject() {
   const s = useEditor.getState()
@@ -18,8 +51,7 @@ async function saveProject() {
     path = await window.kadr.saveProjectDialog(s.project.name)
     if (!path) return
   }
-  await window.kadr.writeProject(path, s.project)
-  s.setProjectPath(path)
+  await writeAndConfirm(path)
 }
 
 /** Always ask for a (new) location; the project lives there from now on. */
@@ -27,8 +59,7 @@ async function saveProjectAs() {
   const s = useEditor.getState()
   const path = await window.kadr.saveProjectDialog(s.project.name)
   if (!path) return
-  await window.kadr.writeProject(path, s.project)
-  s.setProjectPath(path)
+  await writeAndConfirm(path)
 }
 
 async function openProject() {
@@ -36,6 +67,7 @@ async function openProject() {
   if (!path) return
   const p = await window.kadr.readProject(path)
   useEditor.getState().setProject(p, path)
+  markProjectSaved(useEditor.getState().project)
 }
 
 const TL_MIN = 160
@@ -43,6 +75,14 @@ const TL_MIN = 160
 export default function App() {
   const t = useT()
   const name = useEditor((s) => s.project.name)
+  const project = useEditor((s) => s.project)
+  const savedProject = useSaveUi((s) => s.savedProject)
+  const flash = useSaveUi((s) => s.flash)
+  // a fresh (empty) session isn't "unsaved work" yet
+  useEffect(() => {
+    if (useSaveUi.getState().savedProject === null) markProjectSaved(useEditor.getState().project)
+  }, [])
+  const dirty = savedProject !== null && project !== savedProject
   const undoLabel = useEditor((s) => s.past[s.past.length - 1]?.label)
   const redoLabel = useEditor((s) => s.future[0]?.label)
   const [tlHeight, setTlHeight] = useState(() =>
@@ -148,7 +188,16 @@ export default function App() {
     <div className="app">
       <div className="topbar">
         <span className="brand">Kadr</span>
-        <span className="project-name">{name}</span>
+        <span className="project-name">
+          {name}
+          {dirty && <span className="dirty-dot" title={t('unsavedChanges')}> ●</span>}
+        </span>
+        {flash && (
+          <span className={flash.error ? 'save-flash error' : 'save-flash'}>
+            {flash.error ? '✕' : '✓'} {t(flash.key)}
+            {flash.detail ? ` · ${flash.detail}` : ''}
+          </span>
+        )}
         <span className="flex1" />
         <button title={undoTitle} disabled={!undoLabel} onClick={() => useEditor.getState().undo()}>
           ↶ {t('undoShort')}
@@ -156,7 +205,14 @@ export default function App() {
         <button title={redoTitle} disabled={!redoLabel} onClick={() => useEditor.getState().redo()}>
           ↷ {t('redoShort')}
         </button>
-        <button onClick={() => useEditor.getState().setProject(newProject())}>{t('newProject')}</button>
+        <button
+          onClick={() => {
+            useEditor.getState().setProject(newProject())
+            markProjectSaved(useEditor.getState().project)
+          }}
+        >
+          {t('newProject')}
+        </button>
         <button onClick={openProject}>{t('open')}</button>
         <button onClick={saveProject} title="Ctrl+S">{t('save')}</button>
         <button onClick={saveProjectAs} title="Ctrl+Shift+S">{t('saveAs')}</button>

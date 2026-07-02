@@ -23,9 +23,13 @@ captions to this part», watch it happen live in the preview.
   perspective-correct texturing.
 - 🎭 **Masks** — animatable edge crop plus up to 8 feathered shapes
   (rect/ellipse/triangle, invertible).
-- 🌫️ **Smoky outer glow** — not a flat halo: billow-noise smoke, ragged
-  tendrils, drifting embers; fully parametric, identical in preview and
-  export.
+- 🌫️ **Effects: smoky outer glow and blur** — a glow of billow-noise
+  smoke, ragged tendrils and drifting embers, plus per-layer gaussian
+  blur with an intensity slider; fully parametric, preset-able,
+  identical in preview and export.
+- ⏪ **Clip reverse** — right-click → “Reverse”: the used source range is
+  rendered backwards (cached), the linked AV pair flips in sync, and a
+  second click instantly restores the original.
 - 🔀 **26 transitions** — 14 overlap transitions (Vegas-style: just overlap
   two clips) and 12 cinematic edge transitions (whip pans, blur zooms, RGB
   split, glitch…) with spectral motion blur.
@@ -44,13 +48,21 @@ captions to this part», watch it happen live in the preview.
   terminal panel, wired to the live project over MCP: it reads the
   timeline, edits clips, transcribes, creates and iterates Remotion
   fragments while you watch the preview update.
-- 📤 **Fast, careful export** — WebCodecs hardware encoding, mp4box-based
-  fast decode (~8× over element seeks, with graceful fallback), 8-sample
-  motion blur, automatic frame blending for fps-mismatched sources,
-  presets for YouTube/Shorts/WebM/MP3.
+- 📤 **Uncompromised export** — video is encoded by ffmpeg x264 at the
+  preset's true bitrate (Chromium's built-in encoder ignored the bitrate
+  and softened the picture — measured and replaced; frames reach ffmpeg
+  with zero copies), mp4box-based fast decode (~8× over element seeks,
+  with graceful fallback), 8-sample motion blur, automatic frame blending
+  for fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3.
 - 🛟 **Quality-of-life** — background 540p preview proxies, autosave every
-  5 minutes (atomic, skipped during exports/AI sessions), effect & pose
-  presets shared across projects, RU/EN interface.
+  5 minutes (atomic, skipped during exports/AI sessions), an
+  unsaved-changes indicator with “✓ Saved” feedback, self-healing after
+  hard closes (no lingering processes), effect & pose presets shared
+  across projects, RU/EN interface.
+- 🔒 **Clean `npm audit`** — Electron 42 / Chromium 148, vite 7, fresh
+  tar: 0 known vulnerabilities in the dependency tree (thanks to
+  [@Antony-hash512](https://github.com/Antony-hash512) for
+  [issue #1](https://github.com/HelpFreedom/kadr/issues/1)).
 
 ## Requirements
 

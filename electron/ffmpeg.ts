@@ -1,7 +1,10 @@
 // ffmpeg/ffprobe helpers running in the main process.
 import { execFile, spawn, ChildProcess } from 'child_process'
 import { promisify } from 'util'
+import { promises as fsp } from 'fs'
+import { join } from 'path'
 import type { ProbeResult, ExportJob, ExportProgress, WaveformData } from '@shared/types'
+import { rawEncodeArgs } from '@shared/rawEncode'
 
 const execFileP = promisify(execFile)
 
@@ -155,6 +158,69 @@ export function makeProxy(
   })
 }
 
+/**
+ * Reversed copy of a source range. ffmpeg's `reverse` filter buffers every
+ * decoded frame in RAM, so video is reversed in bounded chunks (frame budget
+ * scaled by resolution) that are then concatenated in reverse order; audio is
+ * tiny and reversed in one pass. Audio-only sources produce a lossless wav.
+ */
+export async function makeReversed(
+  src: string,
+  start: number,
+  dur: number,
+  out: string,
+  info: { kind: string; hasAudio: boolean; width: number; height: number; fps: number },
+  tmpDir: string,
+  onProgress?: (p: number) => void
+): Promise<void> {
+  const run = (args: string[]) =>
+    execFileP(FFMPEG, ['-y', '-v', 'error', ...args], { maxBuffer: 4 * 1024 * 1024 })
+  const range = ['-ss', start.toFixed(3), '-t', dur.toFixed(3), '-i', src]
+
+  if (info.kind !== 'video') {
+    await run([...range, '-vn', '-af', 'areverse', '-c:a', 'pcm_s16le', out])
+    onProgress?.(1)
+    return
+  }
+
+  await fsp.mkdir(tmpDir, { recursive: true })
+  try {
+    // ~500 MB of raw frames per chunk, at least half a second
+    const fps = info.fps || 30
+    const frameBytes = Math.max(1, info.width * info.height * 1.5)
+    const chunkSec = Math.max(0.5, Math.min(6, Math.floor(500e6 / frameBytes) / fps))
+    const n = Math.max(1, Math.ceil(dur / chunkSec - 1e-6))
+    const chunks: string[] = []
+    for (let i = 0; i < n; i++) {
+      const cs = start + i * chunkSec
+      const cd = Math.min(chunkSec, start + dur - cs)
+      const file = join(tmpDir, `c${i}.mp4`)
+      await run([
+        '-ss', cs.toFixed(3), '-t', cd.toFixed(3), '-i', src,
+        '-vf', 'reverse', '-an',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '17', '-pix_fmt', 'yuv420p',
+        file
+      ])
+      chunks.push(file)
+      onProgress?.(((i + 1) / n) * 0.92) // the concat+audio tail is quick
+    }
+    const list = join(tmpDir, 'list.txt')
+    await fsp.writeFile(list, chunks.reverse().map((f) => `file '${f}'`).join('\n'))
+    if (info.hasAudio) {
+      const ra = join(tmpDir, 'a.m4a')
+      await run([...range, '-vn', '-af', 'areverse', '-c:a', 'aac', '-b:a', '192k', ra])
+      await run([
+        '-f', 'concat', '-safe', '0', '-i', list, '-i', ra,
+        '-c', 'copy', '-movflags', '+faststart', out
+      ])
+    } else {
+      await run(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', out])
+    }
+  } finally {
+    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => { /* best effort */ })
+  }
+}
+
 /** atempo only accepts 0.5..2 per instance — chain factors for wider speeds. */
 function atempoChain(speed: number): string[] {
   const out: string[] = []
@@ -197,6 +263,62 @@ function runCollect(bin: string, args: string[], maxBytes = 64 * 1024 * 1024): P
 
 // ---------------------------------------------------------------------------
 // Final export pass: mix audio segments and mux with the rendered video.
+
+/**
+ * Direct ffmpeg video encode: the renderer streams raw RGBA frames (WebGL
+ * readPixels, bottom-up — hence vflip) over stdin and libx264/libvpx does the
+ * real rate control. Chromium's WebCodecs encoders ignore the requested
+ * bitrate (OpenH264 saturates at ~0.7 Mbit/s on real 1080p footage — soft,
+ * "мыльный" output); x264 at the preset bitrate matches desktop NLEs.
+ */
+export class RawVideoEncoder {
+  private child: ChildProcess | null = null
+  private closed: Promise<void> | null = null
+  private err = ''
+
+  start(opts: {
+    width: number
+    height: number
+    fps: number
+    codec: string // 'libx264' or an ffmpegVideo codec like 'libvpx-vp9'
+    bitrate: number
+    out: string
+  }) {
+    const child = spawn(FFMPEG, rawEncodeArgs(opts), { stdio: ['pipe', 'ignore', 'pipe'] })
+    this.child = child
+    child.stderr!.on('data', (c) => { this.err += c })
+    this.closed = new Promise((resolve, reject) => {
+      child.on('error', reject)
+      child.on('close', (code) => {
+        this.child = null
+        if (code === 0) resolve()
+        else reject(new Error(`raw encoder exited ${code}: ${this.err.slice(0, 800)}`))
+      })
+    })
+    this.closed.catch(() => { /* surfaced via write/finish */ })
+  }
+
+  write(data: Buffer): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const stdin = this.child?.stdin
+      if (!stdin || stdin.destroyed) {
+        reject(new Error(`raw encoder gone: ${this.err.slice(0, 300)}`))
+        return
+      }
+      if (stdin.write(data)) resolve()
+      else stdin.once('drain', resolve)
+    })
+  }
+
+  async finish(): Promise<void> {
+    this.child?.stdin?.end()
+    await this.closed
+  }
+
+  kill() {
+    try { this.child?.kill('SIGKILL') } catch { /* gone */ }
+  }
+}
 
 export class ExportMuxer {
   private child: ChildProcess | null = null

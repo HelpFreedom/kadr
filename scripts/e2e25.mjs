@@ -185,7 +185,7 @@ try {
     `mid=${trans.mid} pure=${trans.pure}`)
 } finally {
   if (fragId) {
-    await evalJs(`(async () => window.kadr.fragmentDelete(${JSON.stringify(fragId)}))()`)
+    await evalJs(`(async () => window.kadrEditor.deleteFragment(${JSON.stringify(fragId)}))()`)
       .catch(() => { /* best effort */ })
   }
 }

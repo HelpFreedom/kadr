@@ -7,6 +7,11 @@ import { execFileSync } from 'child_process'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
 
+// self-contained media: an opaque clip for the glow to wrap around
+execFileSync('bash', ['-c',
+  'mkdir -p /tmp/kadr-test && ffmpeg -v error -f lavfi -i "smptebars=s=640x360:d=3:r=30" ' +
+  '-c:v libx264 -crf 18 -pix_fmt yuv420p -y /tmp/kadr-test/b.mp4'])
+
 async function getPageWs() {
   for (let i = 0; i < 30; i++) {
     try {

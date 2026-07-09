@@ -11,8 +11,9 @@ mixes audio and muxes/transcodes per preset.
 - `npm run typecheck` — both renderer (`tsconfig.web.json`) and main
   (`tsconfig.node.json`)
 - `node scripts/e2eNN.mjs` — CDP smoke tests; first start the app with
-  `npx electron-vite dev -- --remote-debugging-port=9777`; test media
-  lives in `/tmp/kadr-test` (generated with ffmpeg lavfi)
+  `npx electron-vite dev -- --remote-debugging-port=9777`; generate the
+  test media with `scripts/gen-test-media.sh` (the older suites need it;
+  newer suites create their own files in `/tmp/kadr-test`)
 
 ## Requirements
 - Node.js ≥ 20, system `ffmpeg`/`ffprobe` in PATH
@@ -28,11 +29,18 @@ mixes audio and muxes/transcodes per preset.
   (drawn last).
 - `electron/main.ts` — window, `kadr://` streaming protocol with manual
   Range support, IPC: dialogs, project IO (incl. atomic autosave), export,
-  user stores, proxy queue, reversed-media cache. The scheme MUST stay
-  registered with `corsEnabled: true` (+ ACAO:* responses and
-  `crossOrigin='anonymous'` on media elements incl. Image) — modern
-  Chromium otherwise taints kadr:// pixels and preview/export go black.
-  Startup sweeps leftover helper processes; shutdown force-exits
+  user stores, proxy queue, reversed-media cache, media intake
+  (`media:download` — browser-URL drops fetched into `userData/imported`,
+  cached by URL hash; `media:save-blob` — path-less Files / data: URLs /
+  clipboard images, cached by content hash; `media:portal-files` — XDG
+  FileTransfer portal drops resolved over the session bus via gdbus;
+  `media:clipboard-paste` — copied files or a copied image). A malformed
+  `DBUS_SESSION_BUS_ADDRESS` in the launching environment silently breaks
+  portal drops — main normalizes it to the live user socket at startup.
+  The scheme MUST stay registered with `corsEnabled: true` (+ ACAO:*
+  responses and `crossOrigin='anonymous'` on media elements incl. Image)
+  — modern Chromium otherwise taints kadr:// pixels and preview/export go
+  black. Startup sweeps leftover helper processes; shutdown force-exits
   (window-all-closed → app.exit failsafe, render-process-gone → exit).
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
@@ -67,6 +75,22 @@ mixes audio and muxes/transcodes per preset.
   push their own. `sanitizeProject` heals foreign/script-written projects
   on load (scalar Anims → {value}, broken keyframes dropped, missing
   fields defaulted). File-backed preset stores (pose/fx) via user-store IPC.
+  `insertClipsFromAssets` lays several assets back-to-back in one undo
+  (audio → audio track, AV twins as usual); `removeAssets` drops bin
+  entries AND every clip using them (one undo); `setClipSpeed` rescales
+  keyframes/fades and takes an optional `start` (left-edge speed drags
+  keep the right edge anchored).
+- `src/engine/mediaImport.ts` — every media intake path: `importFiles`
+  (probe → bin, deduped by path, optional timeline placement),
+  `dropPayload` (reads dataTransfer SYNCHRONOUSLY: files → uri-list /
+  x-moz-url / DownloadURL → portal key), `importDrop` (paths → URLs →
+  raw blobs), window-level catch-all drop in App.tsx, drop forensics to
+  `window.__dragLog` + `userData/drop-log.jsonl`.
+- Clip speed UX (`Timeline.tsx`): Ctrl-drag on either extend grip or
+  clip edge = 0.02–100× with ~16 px snapping to round multipliers AND
+  neighbouring clip edges/playhead; a cursor-following ×N badge lights up
+  when snapped. Preview clamps element playbackRate to Chromium's hard
+  [0.0625, 16] range — out-of-range assignment THROWS.
 - `src/engine/player.ts` — pure layer/audio queries, `MediaPool`,
   `drawFrame` (shared by preview and export), `Player` (anchored rAF
   clock, ~4 fps idle when paused; the tick is exception-proof — one bad

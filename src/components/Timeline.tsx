@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { flushSync } from 'react-dom'
+import { flushSync, createPortal } from 'react-dom'
 import type { Clip, MediaAsset, Track } from '@shared/types'
 import {
   useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM
@@ -9,6 +9,7 @@ import { TRANSITIONS } from '@/gl/transitions'
 import { EDGE_TRANSITIONS } from '@/gl/edges'
 import { CtxMenu } from './CtxMenu'
 import { reverseClip, useReverseUi } from '@/engine/reverse'
+import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
 
@@ -219,6 +220,35 @@ export function Timeline({ height }: { height: number }) {
     return () => window.removeEventListener('pointerdown', close)
   }, [menu])
 
+  // fallback drop target for the WHOLE timeline: the ruler and the empty
+  // space below the tracks must accept media too, not just the lanes
+  // (a lane that took the drop leaves the event defaultPrevented)
+  const onAnyDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (e.defaultPrevented) return
+    if (e.dataTransfer.types.includes('kadr/asset') || dragHasMedia(e)) {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'copy'
+    }
+  }
+  const onAnyDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (e.defaultPrevented) return
+    const sc = e.currentTarget
+    const rect = sc.getBoundingClientRect()
+    const time = Math.max(0,
+      (e.clientX - rect.left + sc.scrollLeft - HEADER_W) / useEditor.getState().zoom)
+    const assetId = e.dataTransfer.getData('kadr/asset')
+    if (assetId) {
+      e.preventDefault()
+      useEditor.getState().insertClipFromAsset(assetId, null, time)
+      return
+    }
+    const payload = dropPayload(e)
+    if (dropUsable(payload)) {
+      e.preventDefault()
+      void importDrop(payload, { trackId: null, at: time })
+    }
+  }
+
   return (
     <div className="timeline" style={{ height }}>
       <div className="tl-toolbar">
@@ -256,7 +286,7 @@ export function Timeline({ height }: { height: number }) {
           />
         </label>
       </div>
-      <div className="tl-scroll" ref={scrollRef}>
+      <div className="tl-scroll" ref={scrollRef} onDragOver={onAnyDragOver} onDrop={onAnyDrop}>
         <div className="tl-content" style={{ width: HEADER_W + contentW }}>
           <RulerRow contentW={contentW} />
           {tracks.map((track) => (
@@ -560,6 +590,16 @@ interface ViewWindow {
 // groups a burst of wheel notches over one gain slider into a single undo entry
 const gainWheelMark = { id: '', ts: 0 }
 
+// Ctrl-drag speed range and the round multipliers the drag snaps to.
+// Preview playback is clamped to Chromium's 0.0625–16× element range and
+// relies on resync seeks beyond it; export is exact at any speed.
+const SPEED_MIN = 0.02
+const SPEED_MAX = 100
+const SPEED_SNAPS = [
+  0.05, 0.1, 0.2, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10,
+  12, 16, 20, 25, 32, 50, 64, 100
+]
+
 function TrackRow({
   track, trackH, contentW, view, onMenu
 }: {
@@ -597,12 +637,22 @@ function TrackRow({
   }, [track.id, trackH < 46]) // the slider row mounts only when tall enough
 
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    const assetId = e.dataTransfer.getData('kadr/asset')
-    if (!assetId) return
-    e.preventDefault()
     const rect = e.currentTarget.getBoundingClientRect()
     const time = Math.max(0, (e.clientX - rect.left) / useEditor.getState().zoom)
-    useEditor.getState().insertClipFromAsset(assetId, track.id, time)
+    const assetId = e.dataTransfer.getData('kadr/asset')
+    if (assetId) {
+      e.preventDefault()
+      useEditor.getState().insertClipFromAsset(assetId, track.id, time)
+      return
+    }
+    // files (or browser image URLs / raw image data) dropped from outside:
+    // import into the bin AND lay them out back-to-back from the drop point
+    // (audio goes to an audio track; remote URLs are downloaded first)
+    const payload = dropPayload(e)
+    if (dropUsable(payload)) {
+      e.preventDefault()
+      void importDrop(payload, { trackId: track.id, at: time })
+    }
   }
 
   const onLaneDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -714,7 +764,10 @@ function TrackRow({
         data-lane={track.id}
         style={{ width: contentW, height: trackH }}
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes('kadr/asset')) e.preventDefault()
+          if (e.dataTransfer.types.includes('kadr/asset') || dragHasMedia(e)) {
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'copy'
+          }
         }}
         onDrop={onDrop}
         onPointerDown={onLaneDown}
@@ -841,6 +894,9 @@ function ClipView({
   const drag = useRef<DragState | null>(null)
   const waveRef = useRef<HTMLCanvasElement>(null)
   const [levelDrag, setLevelDrag] = useState<number | null>(null)
+  // live ×N readout during a Ctrl speed drag; highlighted when snapped
+  const [speedBadge, setSpeedBadge] =
+    useState<{ x: number; y: number; speed: number; snapped: boolean } | null>(null)
 
   const w = clip.duration * zoom
   const speed = clip.speed || 1
@@ -901,7 +957,22 @@ function ClipView({
     const st = useEditor.getState()
     const linkedIds = withLinked(st.project, [clip.id])
     if (e.ctrlKey) {
-      // toggle the clip together with its linked partner
+      // Ctrl+drag near EITHER edge = speed (Vegas-style time stretch) —
+      // the same gesture as the extend handles, but forgiving about where
+      // exactly the clip is grabbed
+      const rect = e.currentTarget.getBoundingClientRect()
+      const lx = e.clientX - rect.left
+      if (w > 24 && asset && asset.kind !== 'image') {
+        if (lx > rect.width - 14) {
+          startExtendDrag('right')(e)
+          return
+        }
+        if (lx < 14) {
+          startExtendDrag('left')(e)
+          return
+        }
+      }
+      // otherwise: toggle the clip together with its linked partner
       const sel = new Set(st.selection)
       if (sel.has(clip.id)) linkedIds.forEach((id) => sel.delete(id))
       else linkedIds.forEach((id) => sel.add(id))
@@ -1044,37 +1115,69 @@ function ClipView({
   }
 
   // ---------------------------------------------------- extend/speed drag
-  const startExtendDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+  // Works from BOTH clip ends. Right: the start stays put (resize = loop-
+  // extend, Ctrl = speed). Left: the RIGHT edge stays anchored (resize =
+  // trim-in, Ctrl = speed with the start moving instead).
+  const startExtendDrag = (edge: 'left' | 'right') =>
+    (e: React.PointerEvent<HTMLDivElement>) => {
     if (track.locked || e.button !== 0) return
     e.stopPropagation()
     e.preventDefault()
     const st = useEditor.getState()
     if (!selected) st.select([clip.id])
     const speedMode = e.ctrlKey && !!asset && asset.kind !== 'image'
-    st.pushHistory(speedMode ? 'hSpeed' : 'hResize')
+    const leftTrim = edge === 'left' && !speedMode
+    st.pushHistory(speedMode ? 'hSpeed' : leftTrim ? 'hTrim' : 'hResize')
+    const origStart = clip.start
+    const origEnd = clip.start + clip.duration
     const origDur = clip.duration
     const origSpeed = speed
-    const points = snapPoints(st.project, clip.id, st.playhead)
-    windowDrag(e, (dx) => {
+    // exclude the linked twin from snap targets — it follows the drag
+    const points = snapPoints(st.project, withLinked(st.project, [clip.id]), st.playhead)
+    windowDrag(e, (dx, ev) => {
       const s = useEditor.getState()
       const dt = dx / s.zoom
       if (speedMode) {
         // same source span, new tempo — no looping; keyframes/fades rescale
         // along, and the linked audio/video partner changes tempo too
         const srcSpan = origDur * origSpeed
-        let nd = Math.max(0.05, origDur + dt)
-        if (Math.abs(nd - srcSpan) < 10 / s.zoom) nd = srcSpan // sticky at speed = 1
-        const nspeed = Math.min(4, Math.max(0.25, srcSpan / nd))
-        s.setClipSpeed(clip.id, nspeed, srcSpan / nspeed)
+        let nd = edge === 'right'
+          ? Math.max(0.05, origDur + dt)
+          : Math.min(origEnd, Math.max(0.05, origDur - dt)) // start may not go below 0
+        // snap within ~16 px: to round multipliers AND to the edges of the
+        // other clips / the playhead — the closest candidate wins
+        let snapped = false
+        let bestGap = 16 / s.zoom
+        let snapNd = nd
+        const consider = (candNd: number) => {
+          const gap = Math.abs(candNd - nd)
+          if (candNd > 0.05 && gap < bestGap) {
+            bestGap = gap
+            snapNd = candNd
+            snapped = true
+          }
+        }
+        for (const cand of SPEED_SNAPS) consider(srcSpan / cand)
+        // the MOVING edge lands on a timeline point
+        for (const p of points) consider(edge === 'right' ? p - origStart : origEnd - p)
+        if (snapped) nd = snapNd
+        const nspeed = Math.min(SPEED_MAX, Math.max(SPEED_MIN, srcSpan / nd))
+        setSpeedBadge({ x: ev.clientX, y: ev.clientY, speed: nspeed, snapped })
+        s.setClipSpeed(clip.id, nspeed, srcSpan / nspeed,
+          edge === 'left' ? origEnd - srcSpan / nspeed : undefined)
+      } else if (leftTrim) {
+        // same semantics as dragging the clip's left trim edge: content
+        // stays in place, inPoint compensates, source start clamps
+        s.trimClip(clip.id, 'in', snapTime(origStart + dt, points, s.zoom))
       } else {
         let nd = Math.max(0.05, origDur + dt)
         // sticky zone at the natural (source) length
         if (isFinite(natural) && Math.abs(nd - natural) < 10 / s.zoom) nd = natural
-        const snapped = snapTime(clip.start + nd, points, s.zoom) - clip.start
+        const snapped = snapTime(origStart + nd, points, s.zoom) - origStart
         if (snapped > 0.05 && Math.abs(snapped - nd) < 10 / s.zoom) nd = snapped
         s.setClipDuration(clip.id, nd) // linked partner follows
       }
-    })
+    }, () => setSpeedBadge(null))
   }
 
   // rubber band: opacity for video clips, gain for audio clips
@@ -1237,9 +1340,23 @@ function ClipView({
           <div
             className="extend-handle"
             title="Drag: resize/loop · Ctrl: speed"
-            onPointerDown={startExtendDrag}
+            onPointerDown={startExtendDrag('right')}
+          />
+          <div
+            className="extend-handle left"
+            title="Drag: resize · Ctrl: speed"
+            onPointerDown={startExtendDrag('left')}
           />
         </>
+      )}
+      {speedBadge && createPortal(
+        <div
+          className={speedBadge.snapped ? 'speed-badge snapped' : 'speed-badge'}
+          style={{ left: speedBadge.x + 14, top: speedBadge.y - 30 }}
+        >
+          ×{speedBadge.speed.toFixed(2)}
+        </div>,
+        document.body
       )}
     </div>
   )

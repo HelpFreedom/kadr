@@ -16,10 +16,12 @@ import './styles.css'
 import { wireAutosave, autosaveNow, activity } from './engine/autosave'
 import { autoCaptions, captionsTsx } from './engine/captions'
 import { reverseClip } from './engine/reverse'
+import { importFiles, wireDropDiagnostics } from './engine/mediaImport'
 
 wireProxies()
 wireFragmentCapture()
 wireAutosave()
+wireDropDiagnostics()
 
 // Scripting surface for automation and AI integration (Claude Code / MCP):
 // every editor operation is reachable from here.
@@ -27,7 +29,7 @@ wireAutosave()
   useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, PRESETS, startExport, evalAnim,
   transcribe: transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues,
   createFragment, ensureFragmentServer, deleteFragment, autoCaptions, captionsTsx, autosaveNow, activity,
-  reverseClip
+  reverseClip, importFiles
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

@@ -399,6 +399,9 @@ interface EditorState {
   redo(): void
 
   addAsset(a: MediaAsset): void
+  /** Remove media files from the bin AND every timeline clip that uses them
+      (linked twins share the assetId) — one undo entry. */
+  removeAssets(assetIds: string[]): void
   /** register transcript/text docs in the sources (one undo entry) */
   addTexts(docs: TextDoc[]): void
   removeText(id: string): void
@@ -413,10 +416,15 @@ interface EditorState {
   updateTrack(trackId: string, patch: Partial<Track>): void
 
   insertClipFromAsset(assetId: string, trackId: string | null, at: number): void
+  /** Place several assets back-to-back starting at `at` (one undo entry);
+      audio assets go to an audio track regardless of the drop lane. */
+  insertClipsFromAssets(assetIds: string[], trackId: string | null, at: number): void
   insertTextClip(at: number): void
   updateClip(clipId: string, patch: Partial<Clip>): void
-  /** Change speed/duration, rescaling keyframes and fades to stay on content. */
-  setClipSpeed(clipId: string, speed: number, duration: number): void
+  /** Change speed/duration, rescaling keyframes and fades to stay on content.
+      Optional `start` moves the clip too (a speed drag from the LEFT edge
+      keeps the right edge anchored). */
+  setClipSpeed(clipId: string, speed: number, duration: number, start?: number): void
   /** Change duration (loop-extend); linked partners follow. */
   setClipDuration(clipId: string, duration: number): void
   /** Pick the transition for a clip's incoming overlap ('none' = hard cut). */
@@ -510,6 +518,31 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   addAsset: (a) =>
     set((s) => ({ project: { ...s.project, assets: [...s.project.assets, a] } })),
+
+  removeAssets: (assetIds) => {
+    const ids = new Set(assetIds)
+    const s = get()
+    if (!s.project.assets.some((a) => ids.has(a.id))) return
+    s.pushHistory('hDeleteMedia')
+    set((st) => {
+      const p = clone(st.project)
+      p.assets = p.assets.filter((a) => !ids.has(a.id))
+      const dead = new Set<string>()
+      // clips lose their source — drop them everywhere, locked tracks included
+      for (const tr of p.tracks) {
+        tr.clips = tr.clips.filter((c) => {
+          const doomed = !!c.assetId && ids.has(c.assetId)
+          if (doomed) dead.add(c.id)
+          return !doomed
+        })
+      }
+      return {
+        project: p,
+        selection: st.selection.filter((id) => !dead.has(id)),
+        animClipId: st.animClipId && dead.has(st.animClipId) ? null : st.animClipId
+      }
+    })
+  },
 
   addTexts: (docs) => {
     get().pushHistory('hText')
@@ -618,53 +651,65 @@ export const useEditor = create<EditorState>((set, get) => ({
       return { project: p }
     }),
 
-  insertClipFromAsset: (assetId, trackId, at) => {
+  insertClipFromAsset: (assetId, trackId, at) =>
+    get().insertClipsFromAssets([assetId], trackId, at),
+
+  insertClipsFromAssets: (assetIds, trackId, at) => {
     const s = get()
-    const asset = s.project.assets.find((a) => a.id === assetId)
-    if (!asset) return
+    const found = assetIds
+      .map((id) => s.project.assets.find((a) => a.id === id))
+      .filter((a): a is MediaAsset => !!a)
+    if (!found.length) return
     s.pushHistory('hInsert')
     set((st) => {
       const p = clone(st.project)
-      const wantKind: TrackKind = asset.kind === 'audio' ? 'audio' : 'video'
-      let track = trackId ? p.tracks.find((t) => t.id === trackId) : undefined
-      if (!track || track.kind !== wantKind || track.locked) {
-        track = p.tracks.find((t) => t.kind === wantKind && !t.locked)
-      }
-      if (!track) return st
-      const clip: Clip = {
-        id: uid(),
-        assetId: asset.id,
-        kind: 'media',
-        start: Math.max(0, at),
-        duration: asset.kind === 'image' ? 5 : asset.duration,
-        inPoint: 0,
-        label: asset.name,
-        ...newClipDefaults()
-      }
-      track.clips.push(clip)
-      const ids = [clip.id]
-      // a video with sound also gets a linked audio clip on an audio track
-      if (asset.kind === 'video' && asset.hasAudio) {
-        const audioTrack = p.tracks.find((t) => t.kind === 'audio' && !t.locked)
-        if (audioTrack) {
-          const linkId = uid()
-          clip.linkId = linkId
-          clip.muted = true // sound comes from the audio-track twin
-          const audioClip: Clip = {
-            ...clone(clip),
-            id: uid(),
-            muted: false,
-            linkId
-          }
-          audioTrack.clips.push(audioClip)
-          ids.push(audioClip.id)
+      let cursor = Math.max(0, at)
+      const ids: string[] = []
+      for (const asset of found) {
+        const wantKind: TrackKind = asset.kind === 'audio' ? 'audio' : 'video'
+        let track = trackId ? p.tracks.find((t) => t.id === trackId) : undefined
+        if (!track || track.kind !== wantKind || track.locked) {
+          track = p.tracks.find((t) => t.kind === wantKind && !t.locked)
         }
+        if (!track) continue
+        const duration = asset.kind === 'image' ? 5 : asset.duration
+        const clip: Clip = {
+          id: uid(),
+          assetId: asset.id,
+          kind: 'media',
+          start: cursor,
+          duration,
+          inPoint: 0,
+          label: asset.name,
+          ...newClipDefaults()
+        }
+        track.clips.push(clip)
+        ids.push(clip.id)
+        // a video with sound also gets a linked audio clip on an audio track
+        if (asset.kind === 'video' && asset.hasAudio) {
+          const audioTrack = p.tracks.find((t) => t.kind === 'audio' && !t.locked)
+          if (audioTrack) {
+            const linkId = uid()
+            clip.linkId = linkId
+            clip.muted = true // sound comes from the audio-track twin
+            const audioClip: Clip = {
+              ...clone(clip),
+              id: uid(),
+              muted: false,
+              linkId
+            }
+            audioTrack.clips.push(audioClip)
+            ids.push(audioClip.id)
+          }
+        }
+        cursor += duration // next dropped file starts where this one ends
       }
+      if (!ids.length) return st
       return { project: p, selection: ids }
     })
   },
 
-  setClipSpeed: (clipId, speed, duration) =>
+  setClipSpeed: (clipId, speed, duration, start) =>
     set((s) => {
       const p = clone(s.project)
       // linked partners change tempo together
@@ -676,6 +721,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         rescaleClipAnims(c, oldSpeed / speed)
         c.speed = speed
         c.duration = duration
+        if (start !== undefined) c.start = Math.max(0, start)
       }
       return { project: p }
     }),

@@ -93,7 +93,10 @@ for (let i = 0; i < 30; i++) {
   await new Promise((r) => setTimeout(r, 1000))
 }
 
-// 1. smooth easing is pronounced (faster start, long settle)
+// 1. smooth easing is pronounced. NB the curve was deliberately retuned in
+// b02261e to biasEase(2.2, 1.4) — "long build-up of speed, short crisp
+// settle" (q3 ≈ 78.7); the old expectation (q3 > 90) described the previous
+// (1.6, 2.4) curve.
 const easing = await evalJs(`(() => {
   const ev = window.kadrEditor.evalAnim
   const lin = { value: 0, keyframes: [
@@ -105,7 +108,8 @@ const easing = await evalJs(`(() => {
     lin1: +ev(lin, 0.25).toFixed(1)
   }
 })()`)
-check('smooth: s-curve with long settle (q1<22, q3>90)', easing.q1 < 22 && easing.q3 > 90 && easing.lin1 === 25,
+check('smooth: s-curve with long build-up (q1<10, 70<q3<90)',
+  easing.q1 < 10 && easing.q3 > 70 && easing.q3 < 90 && easing.lin1 === 25,
   JSON.stringify(easing))
 
 // setup clip

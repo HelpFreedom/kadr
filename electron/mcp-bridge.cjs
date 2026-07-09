@@ -94,12 +94,17 @@ server.registerTool('kadr_eval', {
     'pushHistory(label) (call ONCE before a discrete low-level edit like updateClip — enables undo; ' +
     'high-level actions such as addTrack/insertClipFromAsset/splitAtPlayhead push their own), ' +
     'updateClip(clipId, patch), ' +
-    'insertClipFromAsset(assetId, trackId, startSec), setClipDuration(clipId, sec), addAsset(asset), ' +
+    'insertClipFromAsset(assetId, trackId, startSec), insertClipsFromAssets([ids], trackId, at) ' +
+    '(back-to-back, audio → audio track), removeAssets([assetIds]) (drops the bin entries AND every ' +
+    'clip using them, one undo), setClipDuration(clipId, sec), setClipSpeed(clipId, speed, duration) ' +
+    '(speed 0.02–100), addAsset(asset), ' +
     'addTrack(kind), select([ids]), setPlayhead(sec), setProject(project), splitAtPlayhead(), ' +
     'deleteSelection(), setTransition(clipId, type|null), setEdgeTransitions(...).\n' +
     '- window.kadrEditor.uid() → new id; .PRESETS → export presets; .projectDuration(project); ' +
     '.evalAnim(anim, t); await .reverseClip(clipId) — reverse a video/audio clip in place ' +
-    '(renders a backwards copy, swaps the clip to it; calling again un-reverses).\n' +
+    '(renders a backwards copy, swaps the clip to it; calling again un-reverses); ' +
+    'await .importFiles([paths], {trackId, at}|null) — probe files into the bin (deduped by path) ' +
+    'and, with a placement, lay them out back-to-back on the timeline from `at`.\n' +
     '- await window.kadr.probeMedia(path) → { asset } (probe a media file to import: then ' +
     'addAsset({ id: uid(), ...asset })); window.kadr.writeProject(path, project); ' +
     'window.kadr.readProject(path).\n' +

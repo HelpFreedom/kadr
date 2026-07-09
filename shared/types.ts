@@ -366,6 +366,22 @@ export interface KadrApi {
   openMediaDialog(): Promise<string[]>
   probeMedia(path: string): Promise<ProbeResult>
   fileUrl(path: string): string
+  /** Absolute path of a File dropped from the OS (File.path is gone since
+      Electron 32 — this goes through webUtils.getPathForFile). */
+  pathForFile(f: File): string
+  /** Download an http(s) media URL (browser drag) into userData/imported;
+      cached by URL. Returns the local file path. */
+  downloadMedia(url: string): Promise<string>
+  /** Save raw media content (path-less File / data: URL from a browser drag)
+      into userData/imported; cached by content hash. Returns the path. */
+  saveBlobMedia(name: string, mime: string, data: Uint8Array): Promise<string>
+  /** Resolve an XDG FileTransfer portal drop (transfer key → local paths). */
+  portalFiles(key: string): Promise<string[]>
+  /** Media from the OS clipboard: copied files (uri-list) or a copied image
+      (saved as PNG into userData/imported). Empty array = nothing usable. */
+  clipboardMedia(): Promise<string[]>
+  /** Append a drop-diagnostics entry to userData/drop-log.jsonl. */
+  dropLog(entry: unknown): void
 
   saveProjectDialog(currentName: string): Promise<string | null>
   openProjectDialog(): Promise<string | null>

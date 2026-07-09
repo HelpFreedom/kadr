@@ -9,6 +9,7 @@ import { ClaudePanel } from './components/ClaudePanel'
 import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
 import { CaptionsDialog } from './components/CaptionsDialog'
 import { useEditor, newProject } from './state/store'
+import { dropPayload, dropUsable, importDrop, importFiles } from './engine/mediaImport'
 import { useT, type TKey } from './i18n'
 import { create } from 'zustand'
 import type { Project } from '@shared/types'
@@ -93,6 +94,26 @@ export default function App() {
     Math.min(640, Math.max(200, Number(localStorage.getItem('kadr.sidew')) || 280))
   )
 
+  // media dropped ANYWHERE in the window is at least imported into the bin
+  // (the timeline zones place clips and mark the event handled); a non-media
+  // drop must not navigate the window away
+  useEffect(() => {
+    const over = (e: DragEvent) => e.preventDefault()
+    const drop = (e: DragEvent) => {
+      const handled = e.defaultPrevented
+      e.preventDefault()
+      if (handled || !e.dataTransfer) return
+      const payload = dropPayload(e as { dataTransfer: DataTransfer })
+      if (dropUsable(payload)) void importDrop(payload, null)
+    }
+    window.addEventListener('dragover', over)
+    window.addEventListener('drop', drop)
+    return () => {
+      window.removeEventListener('dragover', over)
+      window.removeEventListener('drop', drop)
+    }
+  }, [])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
@@ -122,7 +143,17 @@ export default function App() {
         if (s.selection.length) s.copySelection()
         else if (s.range) s.copyRange()
       } else if (e.code === 'KeyV' && e.ctrlKey) {
-        s.pasteAtPlayhead()
+        if (s.clipboard.length) {
+          s.pasteAtPlayhead()
+        } else {
+          // nothing copied inside the editor — try the OS clipboard:
+          // copied files or a copied image (e.g. from Telegram/browser)
+          void window.kadr.clipboardMedia().then((paths) => {
+            if (paths.length) {
+              return importFiles(paths, { trackId: null, at: useEditor.getState().playhead })
+            }
+          }).catch((err) => console.error('clipboard paste failed', err))
+        }
       } else if (e.code === 'KeyU') {
         s.toggleLinkSelection()
       } else if (e.code === 'ArrowLeft') {

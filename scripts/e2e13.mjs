@@ -2,6 +2,16 @@
 // wipeRight reveals halves, the timeline shows zones, the badge menu picks
 // the effect, 'none' falls back to a hard cut.
 import WebSocket from 'ws'
+import { execFileSync } from 'child_process'
+
+// self-contained second clip: smptebars WITH audio, so both clips carry a
+// linked audio twin and the overlap shows a zone on the audio track too
+execFileSync('bash', ['-c',
+  'mkdir -p /tmp/kadr-test && ' +
+  'ffmpeg -v error -f lavfi -i "smptebars=s=640x360:r=30:d=4" ' +
+  '-f lavfi -i "sine=frequency=880:duration=4" ' +
+  '-c:v libx264 -crf 18 -pix_fmt yuv420p -c:a aac -shortest ' +
+  '-movflags +faststart -y /tmp/kadr-test/bau.mp4'])
 
 const PORT = process.env.KADR_CDP_PORT || 9777
 
@@ -72,13 +82,13 @@ for (let i = 0; i < 30; i++) {
   await new Promise((r) => setTimeout(r, 1000))
 }
 
-// setup: a.mp4 (testsrc2, 6s) at 0 and b.mp4 (smptebars, 4s) at 4 on V1 —
-// the overlap 4..6 becomes the transition
+// setup: a.mp4 (testsrc2, 6s) at 0 and bau.mp4 (smptebars+audio, 4s) at 4 on
+// V1 — the overlap 4..6 becomes the transition
 await evalJs(`(async () => {
   const ed = window.kadrEditor
   const st = () => ed.useEditor.getState()
   const a = await window.kadr.probeMedia('/tmp/kadr-test/a.mp4')
-  const b = await window.kadr.probeMedia('/tmp/kadr-test/b.mp4')
+  const b = await window.kadr.probeMedia('/tmp/kadr-test/bau.mp4')
   const idA = ed.uid(), idB = ed.uid()
   st().addAsset({ id: idA, ...a.asset })
   st().addAsset({ id: idB, ...b.asset })

@@ -114,7 +114,9 @@ await mouse('mouseReleased', geo[0].x + 40, geo[0].y + geo[0].h / 2)
 await mouse('mousePressed', geo[1].x + 40, geo[1].y + geo[1].h / 2, { modifiers: 2 }) // ctrl
 await mouse('mouseReleased', geo[1].x + 40, geo[1].y + geo[1].h / 2, { modifiers: 2 })
 const sel = await evalJs(`window.kadrEditor.useEditor.getState().selection.length`)
-check('Ctrl+click selects two clips', sel === 2, 'selected=' + sel)
+// a.mp4 carries audio, so each video clip selects together with its linked
+// audio twin — 2 clicks → 4 selected (behavior since the AV-link feature)
+check('Ctrl+click selects two clips (+ linked audio twins)', sel === 4, 'selected=' + sel)
 
 // 2. click on clip parks the playhead there (clicked first clip at +40px, zoom 50 → 0.8s)
 const ph = await evalJs(`window.kadrEditor.useEditor.getState().playhead`)

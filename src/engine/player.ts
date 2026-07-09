@@ -564,7 +564,10 @@ export class Player {
       this.pool.setVolume(el, Math.max(0,
         evalAnim(clip.gain, rel) * track.gain * fadeFactor(clip, rel, overlapFades(track, clip))
       ))
-      el.playbackRate = clip.speed || 1
+      // Chromium throws on rates outside [0.0625, 16]; beyond the cap the
+      // element free-runs at the clamped rate and the resync below keeps it
+      // on the master clock with periodic seeks
+      el.playbackRate = Math.min(16, Math.max(0.0625, clip.speed || 1))
 
       if (el.readyState < 2) loading = true
       if (playing) {

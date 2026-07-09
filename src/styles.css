@@ -174,6 +174,31 @@ input[type='color'] { padding: 0; width: 40px; height: 24px; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.bin-item.selected {
+  border-color: var(--accent, #7fc4ff);
+  box-shadow: 0 0 0 1px var(--accent, #7fc4ff);
+}
+.bin-del {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  border: none;
+  border-radius: 3px;
+  background: rgba(10, 12, 18, 0.7);
+  color: #c9ccd6;
+  font-size: 11px;
+  line-height: 14px;
+  padding: 1px 5px;
+  cursor: pointer;
+  display: none;
+}
+.bin-item:hover .bin-del { display: block; }
+.bin-del:hover { background: rgba(150, 42, 42, 0.92); color: #fff; }
+.bin-del-sel { color: #ff9090; }
+.bin-confirm { max-width: 420px; }
+.bin-confirm p { margin: 8px 0; font-size: 13px; line-height: 1.45; }
+button.danger { background: #7a2b2b; border-color: #a04040; }
+button.danger:hover { background: #944; }
 
 /* ---- preview ---- */
 .center-col {
@@ -449,7 +474,17 @@ input[type='color'] { padding: 0; width: 40px; height: 24px; }
   background: #181b24;
   border-bottom: 1px solid #2c3040;
   font-size: 13px;
+  cursor: move;
+  user-select: none;
 }
+/* invisible resize strips inside the panel edges (overflow is hidden,
+   so they cannot stick out) */
+.claude-rs { position: absolute; z-index: 5; }
+.claude-rs.l { left: 0; top: 28px; bottom: 14px; width: 6px; cursor: ew-resize; }
+.claude-rs.r { right: 0; top: 28px; bottom: 14px; width: 6px; cursor: ew-resize; }
+.claude-rs.b { bottom: 0; left: 14px; right: 14px; height: 6px; cursor: ns-resize; }
+.claude-rs.bl { left: 0; bottom: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+.claude-rs.br { right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize; }
 .claude-hint { flex: 1; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .claude-close {
   background: none;
@@ -766,6 +801,11 @@ input[type='color'] { padding: 0; width: 40px; height: 24px; }
   cursor: ew-resize;
   opacity: 0.45;
   z-index: 2;
+}
+.extend-handle.left {
+  right: auto;
+  left: -1px;
+  border-radius: 0 4px 4px 0;
 }
 .clip:hover .extend-handle, .clip.selected .extend-handle { opacity: 1; }
 
@@ -1330,6 +1370,27 @@ input[type='color'] { padding: 0; width: 40px; height: 24px; }
 }
 
 .export-mb { display: flex; gap: 6px; margin: 10px 0 2px; font-size: 13px; }
+
+/* live ×N readout during a Ctrl speed drag; lights up on a snapped value */
+.speed-badge {
+  position: fixed;
+  z-index: 300;
+  padding: 4px 10px;
+  border-radius: 5px;
+  background: #14161f;
+  border: 1px solid #3a4050;
+  color: #d8dce6;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.speed-badge.snapped {
+  border-color: var(--accent, #7fc4ff);
+  color: var(--accent, #7fc4ff);
+  box-shadow: 0 0 6px rgba(127, 196, 255, 0.35);
+}
 
 /* clip reversal in flight: amber fill grows with ffmpeg progress */
 .reverse-progress {

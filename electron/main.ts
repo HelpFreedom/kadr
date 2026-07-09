@@ -1,8 +1,9 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'electron'
 import { join, dirname, basename } from 'path'
-import { promises as fs, createReadStream, statSync } from 'fs'
+import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
+import { execFile } from 'child_process'
 import { probeMedia, makeProxy, makeReversed, ExportMuxer, RawVideoEncoder } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
@@ -28,6 +29,19 @@ protocol.registerSchemesAsPrivileged([
 // launch to encrypt its cookie/storage store. Kadr keeps no web secrets,
 // so the in-app "basic" store is correct — and it means no prompt.
 app.commandLine.appendSwitch('password-store', 'basic')
+
+// The dmenu/X-session environment on this machine can carry a malformed
+// DBUS_SESSION_BUS_ADDRESS ("Could not parse server address" in the log) —
+// then Chromium and our portal helper can't reach the session bus, and a
+// drag from an XDG-portal source (application/vnd.portal.filetransfer)
+// delivers nothing. Normalize to the live user socket when needed.
+{
+  const addr = process.env.DBUS_SESSION_BUS_ADDRESS
+  if (!addr || !/^(unix|tcp):/.test(addr)) {
+    const sock = `/run/user/${typeof process.getuid === 'function' ? process.getuid() : 1000}/bus`
+    if (existsSync(sock)) process.env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${sock}`
+  }
+}
 
 // Let Chromium use VAAPI for hardware video encode/decode where the driver
 // allows it (Intel iGPU on this machine); WebCodecs then picks it up via
@@ -367,6 +381,131 @@ function registerIpc() {
   })
 
   ipcMain.handle('media:probe', (_e, path: string) => probeMedia(path))
+
+  // sanitized basename + MIME-derived extension for downloaded/pasted media
+  const mediaBase = (name: string, mime: string): string => {
+    let base = (name || 'media').replace(/[^\w.-]+/g, '_').slice(-80) || 'media'
+    if (!/\.[a-z0-9]{2,4}$/i.test(base)) {
+      const extByMime: Record<string, string> = {
+        'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp',
+        'image/gif': '.gif', 'image/bmp': '.bmp', 'video/mp4': '.mp4',
+        'video/webm': '.webm', 'video/quicktime': '.mov', 'audio/mpeg': '.mp3',
+        'audio/wav': '.wav', 'audio/x-wav': '.wav', 'audio/ogg': '.ogg',
+        'audio/mp4': '.m4a', 'audio/flac': '.flac'
+      }
+      const ct = (mime || '').split(';')[0].trim()
+      if (extByMime[ct]) base += extByMime[ct]
+    }
+    return base
+  }
+  const importedDir = async (): Promise<string> => {
+    const dir = join(app.getPath('userData'), 'imported')
+    await fs.mkdir(dir, { recursive: true })
+    return dir
+  }
+  const writeImported = async (out: string, buf: Buffer): Promise<string> => {
+    await fs.writeFile(out + '.part', buf)
+    await fs.rename(out + '.part', out)
+    return out
+  }
+
+  // Media dragged out of a browser arrives as an http(s) URL — download it
+  // into userData/imported (cached by URL hash) and let the normal probe
+  // flow take over. net.fetch goes through Chromium's network stack.
+  ipcMain.handle('media:download', async (_e, url: string) => {
+    if (!/^https?:\/\//i.test(url)) throw new Error('unsupported url')
+    const dir = await importedDir()
+    let name = 'media'
+    try {
+      name = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'media')
+    } catch { /* keep default */ }
+    const tag = createHash('sha1').update(url).digest('hex').slice(0, 10)
+    const resp = await net.fetch(url)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const base = mediaBase(name, resp.headers.get('content-type') || '')
+    const out = join(dir, `${tag}-${base}`)
+    try {
+      await fs.access(out)
+      return out // same URL downloaded before
+    } catch { /* proceed */ }
+    const buf = Buffer.from(await resp.arrayBuffer())
+    if (buf.length > 512 * 1024 * 1024) throw new Error('remote file too large (>512 MB)')
+    if (!buf.length) throw new Error('empty response')
+    return writeImported(out, buf)
+  })
+
+  // Files dragged from an XDG-portal source (GTK apps, sandboxed browsers):
+  // the drop carries only a transfer key — the real paths come from the
+  // FileTransfer portal over the session bus.
+  ipcMain.handle('media:portal-files', async (_e, key: string) => {
+    if (!/^[\w.-]+$/.test(key)) throw new Error('bad portal key')
+    const stdout = await new Promise<string>((resolve, reject) => {
+      execFile('gdbus', [
+        'call', '--session',
+        '--dest', 'org.freedesktop.portal.Documents',
+        '--object-path', '/org/freedesktop/portal/documents',
+        '--method', 'org.freedesktop.portal.FileTransfer.RetrieveFiles',
+        key, '{}'
+      ], { timeout: 5000 }, (err, out) => (err ? reject(err) : resolve(out)))
+    })
+    // gdbus prints (['/path/a', '/path/b'],)
+    const paths = [...stdout.matchAll(/'((?:[^'\\]|\\.)*)'/g)].map((m) => m[1])
+    if (!paths.length) throw new Error(`no files in portal transfer: ${stdout.slice(0, 120)}`)
+    return paths
+  })
+
+  // Clipboard paste (Ctrl+V with an empty editor clipboard): copied FILES
+  // (file managers put text/uri-list on the clipboard) win over a copied
+  // IMAGE (e.g. Telegram's «Копировать изображение» — photos can't even be
+  // dragged out of tdesktop, paste is the ergonomic route into the editor).
+  ipcMain.handle('media:clipboard-paste', async () => {
+    let uriList = ''
+    try { uriList = clipboard.read('text/uri-list') || '' } catch { /* format absent */ }
+    const paths: string[] = []
+    for (const line of uriList.split(/\r?\n/)) {
+      const u = line.trim()
+      if (!u.startsWith('file://')) continue
+      try { paths.push(decodeURIComponent(new URL(u).pathname)) } catch { /* malformed */ }
+    }
+    if (paths.length) return paths
+    const img = clipboard.readImage()
+    if (!img.isEmpty()) {
+      const buf = img.toPNG()
+      const dir = await importedDir()
+      const tag = createHash('sha1').update(buf).digest('hex').slice(0, 10)
+      const out = join(dir, `${tag}-clipboard.png`)
+      try {
+        await fs.access(out)
+      } catch {
+        await writeImported(out, buf)
+      }
+      return [out]
+    }
+    return []
+  })
+
+  // drop forensics from the renderer — survives the window being closed
+  ipcMain.on('debug:drop-log', (_e, entry: unknown) => {
+    try {
+      appendFileSync(join(app.getPath('userData'), 'drop-log.jsonl'), JSON.stringify(entry) + '\n')
+    } catch { /* diagnostics must never break anything */ }
+  })
+
+  // Raw media content (a path-less File or a data: URL from a browser drag)
+  // saved into the same cache, keyed by content hash.
+  ipcMain.handle('media:save-blob', async (_e, name: string, mime: string, data: Uint8Array) => {
+    if (!data?.byteLength) throw new Error('empty blob')
+    if (data.byteLength > 512 * 1024 * 1024) throw new Error('blob too large (>512 MB)')
+    const dir = await importedDir()
+    const buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+    const tag = createHash('sha1').update(buf).digest('hex').slice(0, 10)
+    const out = join(dir, `${tag}-${mediaBase(name, mime)}`)
+    try {
+      await fs.access(out)
+      return out // identical content saved before
+    } catch { /* proceed */ }
+    return writeImported(out, buf)
+  })
 
   ipcMain.handle('project:save-dialog', async (_e, currentName: string) => {
     const r = await dialog.showSaveDialog(win!, {

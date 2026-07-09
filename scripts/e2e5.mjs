@@ -160,8 +160,12 @@ const chain = await evalJs(`(() => {
   const kfs = (c.transform.x.keyframes || []).map(k => [+k.time.toFixed(2), Math.round(k.value)])
   return kfs
 })()`)
-check('linked gestures chain into 2 keyframes (0.5s, 4s)',
-  chain.length === 2 && Math.abs(chain[0][0] - 0.5) < 0.05 && Math.abs(chain[1][0] - 4) < 0.05,
+// the auto-keyframe state machine (b02261e) may drop an intermediate state
+// keyframe between the two gestures — require the gesture keyframes at the
+// ends and allow extras in between (the exact semantics are covered by e2e8)
+check('linked gestures keyframe both gesture times (0.5s, 4s)',
+  chain.length >= 2 && Math.abs(chain[0][0] - 0.5) < 0.05 &&
+  Math.abs(chain[chain.length - 1][0] - 4) < 0.05,
   JSON.stringify(chain))
 
 // 5. mini-timeline shows diamonds

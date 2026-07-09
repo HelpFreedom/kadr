@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -62,6 +62,14 @@ const api: KadrApi = {
   openMediaDialog: () => ipcRenderer.invoke('media:open-dialog'),
   probeMedia: (path) => ipcRenderer.invoke('media:probe', path),
   fileUrl: (path) => `kadr://media${encodeURI(path).replace(/[?#]/g, encodeURIComponent)}`,
+  pathForFile: (f) => {
+    try { return webUtils.getPathForFile(f) } catch { return '' }
+  },
+  downloadMedia: (url) => ipcRenderer.invoke('media:download', url),
+  saveBlobMedia: (name, mime, data) => ipcRenderer.invoke('media:save-blob', name, mime, data),
+  portalFiles: (key) => ipcRenderer.invoke('media:portal-files', key),
+  clipboardMedia: () => ipcRenderer.invoke('media:clipboard-paste'),
+  dropLog: (entry) => ipcRenderer.send('debug:drop-log', entry),
 
   saveProjectDialog: (name) => ipcRenderer.invoke('project:save-dialog', name),
   openProjectDialog: () => ipcRenderer.invoke('project:open-dialog'),

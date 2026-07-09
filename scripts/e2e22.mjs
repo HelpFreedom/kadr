@@ -74,10 +74,14 @@ await new Promise((r, j) => { ws.on('open', r); ws.on('error', j) })
 // safe override: the "claude" session is a plain interactive bash
 let envBackup = null
 try { envBackup = readFileSync(ENV_FILE, 'utf8') } catch { /* none */ }
+// a leftover test override from a crashed run is NOT the user's config —
+// restoring it would silently turn the user's Claude panel into plain bash
+if (envBackup !== null && /"command"\s*:\s*"bash"/.test(envBackup)) envBackup = null
 writeFileSync(ENV_FILE, JSON.stringify({ command: 'bash', args: [] }))
 // user MCP servers from claude-mcp.json must merge into the generated config
 let mcpBackup = null
 try { mcpBackup = readFileSync(MCP_FILE, 'utf8') } catch { /* none */ }
+if (mcpBackup !== null && mcpBackup.includes('e2e-extra')) mcpBackup = null
 writeFileSync(MCP_FILE, JSON.stringify({
   mcpServers: { 'e2e-extra': { command: 'true', args: [] } }
 }))

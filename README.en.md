@@ -14,7 +14,18 @@ captions to this part», watch it happen live in the preview.
 ## Highlights
 
 - 🎬 **Real multi-track editing** — video/audio/text tracks, trimming,
-  speed, looping, fades, linked AV clips, ripple delete, full undo history.
+  looping, fades, linked AV clips, ripple delete, full undo history.
+  Clip speed from ×0.02 to ×100 by Ctrl-dragging **either** clip edge
+  (the left one anchors the right boundary), snapping to round
+  multipliers and to neighbouring clips' edges, with a live ×N badge.
+- 📥 **Media from anywhere** — drop files onto any spot of the window
+  (onto a track they land as clips back-to-back at the drop point, audio
+  routes to an audio track), drag a picture straight out of a browser
+  (fetched by URL), or hit Ctrl+V — clipboard paste understands both
+  copied files and "Copy image" (e.g. from Telegram, which won't let
+  photos be dragged out at all). XDG-portal drags from sandboxed apps
+  are supported too. The media bin gets multi-select and deletion that
+  removes the files together with their timeline clips (single undo).
 - ⚡ **GPU compositing (WebGL2)** — the preview *is* the render: the same
   compositor draws both, so export is pixel-exact WYSIWYG.
 - 🔑 **Keyframes everywhere** — position, scale, rotation, opacity, volume,
@@ -47,7 +58,8 @@ captions to this part», watch it happen live in the preview.
 - 🤖 **Embedded Claude Code** — a real interactive Claude session in a
   terminal panel, wired to the live project over MCP: it reads the
   timeline, edits clips, transcribes, creates and iterates Remotion
-  fragments while you watch the preview update.
+  fragments while you watch the preview update. The panel is draggable,
+  resizable and remembers its place across launches.
 - 📤 **Uncompromised export** — video is encoded by ffmpeg x264 at the
   preset's true bitrate (Chromium's built-in encoder ignored the bitrate
   and softened the picture — measured and replaced; frames reach ffmpeg

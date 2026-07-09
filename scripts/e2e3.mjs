@@ -117,7 +117,13 @@ const dr = await evalJs(`(() => {
   st().setRange(null)
   return clips
 })()`)
-check('deleteRange 2..3 splits clip into [0,2]+[3,6]', JSON.stringify(dr) === '[[0,2],[3,6],[9,2.01]]', JSON.stringify(dr))
+// numeric tolerance on the third clip: it is b.mp4/2, and the exact container
+// duration of the generated file varies slightly (4.02 s with aac, 4.00 without)
+const drOk = dr.length === 3 &&
+  Math.abs(dr[0][0] - 0) < 0.01 && Math.abs(dr[0][1] - 2) < 0.01 &&
+  Math.abs(dr[1][0] - 3) < 0.01 && Math.abs(dr[1][1] - 6) < 0.01 &&
+  Math.abs(dr[2][0] - 9) < 0.01 && Math.abs(dr[2][1] - 2) < 0.05
+check('deleteRange 2..3 splits clip into [0,2]+[3,6]', drOk, JSON.stringify(dr))
 
 // 4. hardware encoder availability (informational)
 const hw = await evalJs(`(async () => {

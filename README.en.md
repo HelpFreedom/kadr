@@ -2,7 +2,9 @@
 
 **AI-native, GPU-accelerated video editor — with Claude Code built into the timeline.**
 
-[Русская версия →](README.md) · [Full feature guide (RU) →](FEATURES.md)
+[Русская версия →](README.md) · [Full feature guide (RU) →](FEATURES.md) · [Video →](https://www.youtube.com/watch?v=1RKRtRgzE24)
+
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL_3.0-blue.svg)](LICENSE)
 
 ![Kadr demo](demo.gif)
 

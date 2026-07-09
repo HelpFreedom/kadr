@@ -3,6 +3,7 @@
 **ИИ-нативный видеоредактор с GPU-ускорением — и с Claude Code прямо в таймлайне.**
 
 [English version →](README.en.md) · [Полное руководство по функциям →](FEATURES.md) · [Video →](https://www.youtube.com/watch?v=1RKRtRgzE24)
+
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL_3.0-blue.svg)](LICENSE)
 
 ![Демо Kadr](demo.gif)

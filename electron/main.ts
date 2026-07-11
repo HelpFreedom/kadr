@@ -88,11 +88,14 @@ function createWindow() {
       app.exit(1)
     }
   })
-  if (process.env.ELECTRON_RENDERER_URL) {
-    win.loadURL(process.env.ELECTRON_RENDERER_URL)
-  } else {
-    win.loadFile(join(__dirname, '../renderer/index.html'))
-  }
+  setTimeout(() => {
+    if (process.env.ELECTRON_RENDERER_URL) {
+      const url = process.env.ELECTRON_RENDERER_URL.replace('localhost', '127.0.0.1');
+      win.loadURL(url)
+    } else {
+      win.loadFile(join(__dirname, '../renderer/index.html'))
+    }
+  }, 1500);
 }
 
 /**

@@ -145,11 +145,19 @@ export function startExport(
       return
     }
 
+    // drawFrame composites in PROJECT space (layer transforms, masks and
+    // effects are all in project pixels — it forces comp.setSize to project
+    // dims on every call). Frames are therefore rendered at project size and
+    // scaled to the preset size at the encoder: ffmpeg -vf scale (raw path)
+    // or a 2D fit blit (webcodecs path). Reading preset-sized buffers out of
+    // a project-sized framebuffer was GL_INVALID_OPERATION → black exports.
+    const rw = project.width
+    const rh = project.height
     const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
+    canvas.width = rw
+    canvas.height = rh
     const comp = new Compositor(canvas)
-    comp.setSize(width, height)
+    comp.setSize(rw, rh)
     const pool = new MediaPool()
     // 180° shutter: sub-samples cover half the frame interval around t
     const blurSamples = opts?.motionBlur ? 8 : 1
@@ -165,7 +173,7 @@ export function startExport(
     // while up to RAW_AHEAD transfers are still in flight (ffmpeg encodes
     // in its own process in parallel anyway).
     const useRaw = opts?.encoder !== 'webcodecs'
-    const rawBuf = useRaw ? new Uint8Array(width * height * 4) : null
+    const rawBuf = useRaw ? new Uint8Array(rw * rh * 4) : null
     const RAW_AHEAD = 3
     const rawInFlight: Promise<void>[] = []
     // frames travel over a local binary WebSocket when main offers one:
@@ -188,15 +196,16 @@ export function startExport(
       const codec = preset.ffmpegVideo === 'copy' ? 'libx264' : preset.ffmpegVideo
       try {
         rawDirect = await window.kadr.rawEncodeStart({
-          width, height, fps, codec, bitrate: preset.videoBitrate
+          width: rw, height: rh, outWidth: width, outHeight: height,
+          fps, codec, bitrate: preset.videoBitrate
         })
-        for (let s = 0; s < 2; s++) slots.push(new Uint8Array(width * height * 4))
+        for (let s = 0; s < 2; s++) slots.push(new Uint8Array(rw * rh * 4))
       } catch (err) {
         console.warn('[kadr] direct raw encoder unavailable, falling back', err)
         rawDirect = null
       }
       if (!rawDirect) {
-        const wsPort = await window.kadr.exportRawBegin(width, height, fps)
+        const wsPort = await window.kadr.exportRawBegin(rw, rh, fps, width, height)
         if (wsPort > 0) {
           rawWs = await new Promise<WebSocket | null>((res) => {
             const s = new WebSocket(`ws://127.0.0.1:${wsPort}`)
@@ -240,6 +249,22 @@ export function startExport(
       encoder.configure(config)
     }
 
+    // webcodecs path renders into the muxed stream directly ('copy' presets
+    // never re-encode), so its frames must already be preset-sized: blit the
+    // project-sized canvas into a centered fit rectangle when sizes differ
+    let fit: { c: HTMLCanvasElement; g: CanvasRenderingContext2D
+               dx: number; dy: number; dw: number; dh: number } | null = null
+    if (!useRaw && (width !== rw || height !== rh)) {
+      const c = document.createElement('canvas')
+      c.width = width
+      c.height = height
+      const s = Math.min(width / rw, height / rh)
+      const dw = Math.round(rw * s)
+      const dh = Math.round(rh * s)
+      fit = { c, g: c.getContext('2d')!,
+              dx: Math.floor((width - dw) / 2), dy: Math.floor((height - dh) / 2), dw, dh }
+    }
+
     try {
       const totalFrames = Math.max(1, Math.round(duration * fps))
       for (let k = 0; k < totalFrames; k++) {
@@ -278,7 +303,12 @@ export function startExport(
             if (rawInFlight.length >= RAW_AHEAD) await rawInFlight.shift()
           }
         } else {
-          const frame = new VideoFrame(canvas, {
+          if (fit) {
+            fit.g.fillStyle = '#000'
+            fit.g.fillRect(0, 0, width, height)
+            fit.g.drawImage(canvas, fit.dx, fit.dy, fit.dw, fit.dh)
+          }
+          const frame = new VideoFrame(fit ? fit.c : canvas, {
             timestamp: Math.round((k * 1e6) / fps),
             duration: Math.round(1e6 / fps)
           })

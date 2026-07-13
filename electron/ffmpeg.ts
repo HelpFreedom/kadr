@@ -279,6 +279,8 @@ export class RawVideoEncoder {
   start(opts: {
     width: number
     height: number
+    outWidth?: number
+    outHeight?: number
     fps: number
     codec: string // 'libx264' or an ffmpegVideo codec like 'libvpx-vp9'
     bitrate: number

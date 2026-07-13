@@ -418,7 +418,8 @@ export interface KadrApi {
       resolves with the temp file the encoder writes; exportUseVideo hands it
       to the muxer stage. */
   rawEncodeStart(o: {
-    width: number; height: number; fps: number; codec: string; bitrate: number
+    width: number; height: number; outWidth?: number; outHeight?: number
+    fps: number; codec: string; bitrate: number
   }): Promise<string>
   /** resolves when ffmpeg's stdin accepted the memory — only then reuse it */
   rawEncodeFrame(view: Uint8Array): Promise<void>
@@ -427,7 +428,10 @@ export interface KadrApi {
   exportUseVideo(path: string): Promise<void>
 
   /** main-process fallback raw encode: frames over WS (port > 0) or IPC */
-  exportRawBegin(width: number, height: number, fps: number): Promise<number>
+  exportRawBegin(
+    width: number, height: number, fps: number,
+    outWidth?: number, outHeight?: number
+  ): Promise<number>
   exportRawFrame(data: ArrayBuffer): Promise<void>
   exportRawEnd(): Promise<void>
   exportVideoDone(): Promise<void>

@@ -578,7 +578,10 @@ function registerIpc() {
 
   // direct ffmpeg encode: raw RGBA frames from the renderer over stdin;
   // returns a local WebSocket port for the frame stream (0 = use IPC)
-  ipcMain.handle('export:raw-begin', async (_e, width: number, height: number, fps: number) => {
+  ipcMain.handle('export:raw-begin', async (
+    _e, width: number, height: number, fps: number,
+    outWidth?: number, outHeight?: number
+  ) => {
     if (!exportState) throw new Error('no export in progress')
     const st = exportState
     await st.fh?.close()
@@ -587,7 +590,7 @@ function registerIpc() {
     st.raw = new RawVideoEncoder()
     st.rawEncoded = true
     st.raw.start({
-      width, height, fps,
+      width, height, outWidth, outHeight, fps,
       codec: preset.ffmpegVideo === 'copy' ? 'libx264' : preset.ffmpegVideo,
       bitrate: preset.videoBitrate,
       out: st.videoTemp

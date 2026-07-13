@@ -4,7 +4,7 @@ import { promises as fs, createReadStream, statSync, existsSync, appendFileSync 
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
-import { probeMedia, makeProxy, makeReversed, ExportMuxer, RawVideoEncoder } from './ffmpeg'
+import { probeMedia, makeProxy, makeDecoded, makeReversed, ExportMuxer, RawVideoEncoder } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerFragmentIpc } from './fragments'
@@ -270,6 +270,46 @@ async function requestProxy(srcPath: string, duration: number): Promise<string> 
   return out
 }
 
+// full-res H.264 intermediates for sources Chromium cannot decode (export
+// reads these instead of the original video stream; audio still reads the
+// original). Same identity key and queue discipline as proxies.
+const decodedDir = () => join(app.getPath('userData'), 'decoded')
+let decodedChain: Promise<unknown> = Promise.resolve()
+
+async function requestDecoded(srcPath: string, duration: number): Promise<string> {
+  const stat = statSync(srcPath)
+  const key = createHash('sha1')
+    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
+    .digest('hex')
+    .slice(0, 20)
+  const out = join(decodedDir(), `${key}.mp4`)
+  try {
+    await fs.access(out)
+    return out
+  } catch { /* not built yet */ }
+  await fs.mkdir(decodedDir(), { recursive: true })
+  const job = decodedChain.then(async () => {
+    try {
+      await fs.access(out)
+      return // built while we waited in the queue
+    } catch { /* still missing */ }
+    const tmp = join(decodedDir(), `${key}.part.mp4`)
+    try {
+      await makeDecoded(srcPath, tmp, duration, (p) => {
+        win?.webContents.send('proxy:progress', { path: srcPath, progress: p })
+      })
+      await fs.rename(tmp, out)
+    } catch (err) {
+      fs.unlink(tmp).catch(() => { /* nothing to clean */ })
+      throw err
+    }
+  })
+  decodedChain = job.catch(() => { /* keep the queue alive */ })
+  await job
+  win?.webContents.send('proxy:progress', { path: srcPath, progress: 1 })
+  return out
+}
+
 // reversed renders: keyed by source identity + range, built one at a time
 const reverseDir = () => join(app.getPath('userData'), 'reversed')
 let reverseChain: Promise<unknown> = Promise.resolve()
@@ -348,6 +388,10 @@ async function rememberDir(kind: string, filePath: string) {
 function registerIpc() {
   ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number) =>
     requestProxy(srcPath, duration)
+  )
+
+  ipcMain.handle('media:decoded', (_e, srcPath: string, duration: number) =>
+    requestDecoded(srcPath, duration)
   )
 
   ipcMain.handle(

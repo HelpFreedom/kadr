@@ -4,6 +4,7 @@
 import { create } from 'zustand'
 import type { MediaAsset } from '@shared/types'
 import { useEditor } from '@/state/store'
+import { chromiumCanDecode } from './codecs'
 
 /** sources at or above this short-side size get a preview proxy */
 const PROXY_MIN_SIDE = 720
@@ -16,7 +17,11 @@ interface ProxyProgressState {
 export const useProxyProgress = create<ProxyProgressState>(() => ({ jobs: {} }))
 
 export function wantsProxy(a: MediaAsset): boolean {
-  return a.kind === 'video' && Math.min(a.width, a.height) >= PROXY_MIN_SIDE
+  if (a.kind !== 'video') return false
+  // codecs Chromium can't decode need a proxy at ANY size — without one the
+  // preview <video> renders 0×0 and the clip is invisible
+  if (!chromiumCanDecode(a.codec)) return true
+  return Math.min(a.width, a.height) >= PROXY_MIN_SIDE
 }
 
 const inflight = new Set<string>()

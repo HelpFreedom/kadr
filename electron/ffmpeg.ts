@@ -46,6 +46,7 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
     fps: fps || 30,
     hasAudio: !!audio
   }
+  if (kind === 'video' && video?.codec_name) asset.codec = video.codec_name
 
   if (kind !== 'audio') {
     try {
@@ -154,6 +155,50 @@ export function makeProxy(
     child.on('close', (code) => {
       if (code === 0) resolve()
       else reject(new Error(`proxy ffmpeg exited ${code}: ${err.slice(0, 500)}`))
+    })
+  })
+}
+
+/**
+ * Full-resolution H.264 intermediate for sources Chromium cannot decode
+ * (HEVC without VAAPI, mpeg4, prores, …). Near-lossless on purpose — the
+ * export pipeline re-encodes it once more; video-only (the audio mix always
+ * reads the original).
+ */
+export function makeDecoded(
+  src: string,
+  out: string,
+  duration: number,
+  onProgress?: (p: number) => void
+): Promise<void> {
+  const args = [
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    '-i', src,
+    '-map', '0:v:0', '-an',
+    '-c:v', 'libx264', '-preset', 'fast', '-crf', '14', '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart',
+    out
+  ]
+  return new Promise((resolve, reject) => {
+    const child = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let err = ''
+    let buf = ''
+    child.stdout.on('data', (c) => {
+      buf += c
+      const lines = buf.split('\n')
+      buf = lines.pop() || ''
+      for (const line of lines) {
+        const m = line.match(/^out_time_us=(\d+)/)
+        if (m && duration > 0 && onProgress) {
+          onProgress(Math.min(1, Number(m[1]) / 1e6 / duration))
+        }
+      }
+    })
+    child.stderr.on('data', (c) => { err += c })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`decode ffmpeg exited ${code}: ${err.slice(0, 500)}`))
     })
   })
 }

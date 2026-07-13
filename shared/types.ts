@@ -26,6 +26,9 @@ export interface MediaAsset {
   /** poster of the last frame (clip tails show it on the timeline) */
   thumbnailEnd?: string
   waveform?: WaveformData
+  /** ffprobe codec_name of the video stream (e.g. 'h264', 'hevc') — decides
+      whether Chromium can decode the source or ffmpeg must step in */
+  codec?: string
   /** light 540p copy used by the preview; export always reads `path` */
   proxyPath?: string
   /** this asset is a reversed render of a source range of another asset */
@@ -408,6 +411,9 @@ export interface KadrApi {
   /** Build (or reuse) a preview proxy; resolves with the proxy file path. */
   requestProxy(path: string, duration: number): Promise<string>
   onProxyProgress(cb: (p: { path: string; progress: number }) => void): () => void
+  /** Full-resolution H.264 intermediate for sources Chromium cannot decode
+      (e.g. HEVC without VAAPI); cached like proxies, video-only. */
+  requestDecoded(path: string, duration: number): Promise<string>
 
   exportDialog(defaultName: string, ext: string): Promise<string | null>
   exportBegin(job: ExportJob): Promise<void>

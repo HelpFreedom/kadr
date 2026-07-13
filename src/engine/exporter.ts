@@ -13,6 +13,7 @@ import {
   type BlendFrame
 } from './player'
 import { Mp4FrameSource } from './demux'
+import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
 import { activity } from './autosave'
 import { projectDuration } from '@/state/store'
@@ -396,9 +397,16 @@ export function startExport(
       const srcT = clipSourceTime(clip, asset, t - clip.start)
       let src = sources.get(clip.id)
       if (src === undefined) {
-        src = (globalThis as { KADR_DISABLE_FAST_DECODE?: boolean }).KADR_DISABLE_FAST_DECODE
-          ? null
-          : await Mp4FrameSource.open(asset)
+        const fastOff = (globalThis as { KADR_DISABLE_FAST_DECODE?: boolean }).KADR_DISABLE_FAST_DECODE
+        src = fastOff ? null : await Mp4FrameSource.open(asset)
+        if (!src && !fastOff) {
+          // Chromium can't decode some codecs at all (HEVC without VAAPI,
+          // mpeg4, …): WebCodecs rejects them and a <video> element renders
+          // 0×0 — the element path would export black. Re-encode once to a
+          // cached full-res H.264 intermediate and fast-decode that instead.
+          const alt = await undecodableFallback(asset)
+          if (alt) src = await Mp4FrameSource.open(alt)
+        }
         sources.set(clip.id, src)
         console.info(`[kadr] export decode for ${asset.name}: ${src ? 'webcodecs' : 'element'}`)
       }
@@ -447,6 +455,34 @@ export function startExport(
     }
     await Promise.all(waits)
   }
+}
+
+/**
+ * A shim asset pointing at the cached ffmpeg H.264 intermediate when the
+ * source codec is one Chromium cannot decode; null when the codec is fine
+ * (the regular element fallback stays in charge) or the transcode failed.
+ * Old projects saved before the codec field existed are re-probed once.
+ */
+const undecodable = new Map<string, Promise<MediaAsset | null>>()
+
+function undecodableFallback(asset: MediaAsset): Promise<MediaAsset | null> {
+  let p = undecodable.get(asset.path)
+  if (!p) {
+    p = (async () => {
+      let codec = asset.codec
+      if (!codec) codec = (await window.kadr.probeMedia(asset.path)).asset.codec
+      if (chromiumCanDecode(codec)) return null
+      console.info(`[kadr] ${asset.name}: '${codec}' is not decodable by Chromium — building an H.264 intermediate`)
+      const path = await window.kadr.requestDecoded(asset.path, asset.duration)
+      return { ...asset, path }
+    })().catch((err) => {
+      console.warn(`[kadr] decode fallback failed for ${asset.name}`, err)
+      return null
+    })
+    undecodable.set(asset.path, p)
+  }
+  // shims carry per-asset metadata (name, fps…) — rebind onto this asset
+  return p.then((alt) => (alt ? { ...asset, path: alt.path } : null))
 }
 
 /**

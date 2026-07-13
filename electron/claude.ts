@@ -61,6 +61,7 @@ export async function sweepStaleSessions(): Promise<number> {
     join(tmpdir(), 'kadr-export'), // raw encoder + muxer temp files
     join(app.getPath('userData'), 'proxies'),
     join(app.getPath('userData'), 'reversed'),
+    join(app.getPath('userData'), 'decoded'),
     join(app.getPath('userData'), 'fragment-renders'),
     join(app.getAppPath(), 'scripts', 'transcribe.py')
   ]

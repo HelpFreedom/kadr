@@ -107,6 +107,21 @@ Claude/npm нужен прокси — создайте `~/.config/kadr/claude-e
 { "env": { "HTTPS_PROXY": "http://127.0.0.1:1080", "NO_PROXY": "127.0.0.1,localhost" } }
 ```
 
+## NixOS
+
+На NixOS (проверено на Niri/Wayland) `npm install`/`npm run dev` из коробки
+может упасть или показать пустой экран из-за нескольких платформенных
+особенностей (сборка `node-pty`, отсутствие prebuilt-бинарника Electron,
+Wayland/Ozone). Есть `flake.nix` с готовым `devShell`:
+
+```bash
+nix develop
+npm install
+npm run dev
+```
+
+Подробности и вариант без флейков — в [docs/nixos.md](docs/nixos.md).
+
 ## Как устроена ИИ-интеграция
 
 Kadr поднимает локальный мост в рендерер и отдаёт Claude MCP-сервер с

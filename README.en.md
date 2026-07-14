@@ -104,6 +104,21 @@ proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
 { "env": { "HTTPS_PROXY": "http://127.0.0.1:1080", "NO_PROXY": "127.0.0.1,localhost" } }
 ```
 
+## NixOS
+
+On NixOS (tested on Niri/Wayland), a plain `npm install`/`npm run dev` can
+fail or render a blank window because of a few platform quirks (building
+`node-pty`, no prebuilt Electron binary, Wayland/Ozone). A ready-made
+`flake.nix` devShell handles this:
+
+```bash
+nix develop
+npm install
+npm run dev
+```
+
+See [docs/nixos.md](docs/nixos.md) for details and a non-flake fallback.
+
 ## How the AI integration works
 
 Kadr starts a local HTTP bridge into the renderer and hands Claude an MCP

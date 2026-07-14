@@ -158,8 +158,13 @@ const api: KadrApi = {
   }
 }
 
+// Side-effect guard: prevent Vite from tree-shaking the api object
+// because the renderer accesses these methods at runtime via window.kadr
+void Object.keys(api)
+
 // contextIsolation is off (see main.ts: export frames pass by reference),
 // so the api object lands on the shared window directly; the bridge branch
 // keeps working if isolation is ever re-enabled.
+Object.defineProperty(globalThis, 'kadr', { value: api, writable: true, configurable: true })
 if (process.contextIsolated) contextBridge.exposeInMainWorld('kadr', api)
-else (globalThis as unknown as { kadr: KadrApi }).kadr = api
+console.log('[preload] kadr api keys:', Object.keys(api))

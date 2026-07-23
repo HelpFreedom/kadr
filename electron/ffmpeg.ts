@@ -2,7 +2,7 @@
 import { execFile, spawn, ChildProcess } from 'child_process'
 import { promisify } from 'util'
 import { promises as fsp } from 'fs'
-import { join } from 'path'
+import { join, basename } from 'path'
 import type { ProbeResult, ExportJob, ExportProgress, WaveformData } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
 
@@ -34,7 +34,7 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
   }
 
   const kind = isImage ? 'image' : video ? 'video' : 'audio'
-  const name = path.split('/').pop() || path
+  const name = basename(path)
 
   const asset: ProbeResult['asset'] = {
     path,

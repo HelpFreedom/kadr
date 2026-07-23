@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { useEditor, uid } from '@/state/store'
+import { baseOf } from '@shared/paths'
 import type { TextDoc } from '@shared/types'
 
 /** files/URLs currently being imported (drop or dialog) — drives the '…' hint */
@@ -36,7 +37,7 @@ async function importFilesInner(
     if (ext === 'srt' || ext === 'txt') {
       textDocs.push({
         id: uid(),
-        name: path.split('/').pop()!,
+        name: baseOf(path),
         path,
         format: ext as 'srt' | 'txt'
       })

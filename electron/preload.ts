@@ -61,7 +61,14 @@ const api: KadrApi = {
 
   openMediaDialog: () => ipcRenderer.invoke('media:open-dialog'),
   probeMedia: (path) => ipcRenderer.invoke('media:probe', path),
-  fileUrl: (path) => `kadr://media${encodeURI(path).replace(/[?#]/g, encodeURIComponent)}`,
+  fileUrl: (path) => {
+    // Windows paths (D:\dir\file) must become /D:/dir/file — a raw drive
+    // letter glued after the host ('kadr://mediaD:\…') is an INVALID URL:
+    // the element never loads and the preview spins forever (issue #6)
+    const posix = path.replace(/\\/g, '/')
+    const abs = posix.startsWith('/') ? posix : `/${posix}`
+    return `kadr://media${encodeURI(abs).replace(/[?#]/g, encodeURIComponent)}`
+  },
   pathForFile: (f) => {
     try { return webUtils.getPathForFile(f) } catch { return '' }
   },

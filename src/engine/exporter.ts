@@ -160,6 +160,12 @@ export function startExport(
     const comp = new Compositor(canvas)
     comp.setSize(rw, rh)
     const pool = new MediaPool()
+    // clip end times for the passed-clip cleanup below (the project is
+    // frozen during an export, so this map never goes stale)
+    const clipEnds = new Map<string, number>()
+    for (const tr of project.tracks) {
+      for (const c of tr.clips) clipEnds.set(c.id, c.start + c.duration)
+    }
     // 180° shutter: sub-samples cover half the frame interval around t
     const blurSamples = opts?.motionBlur ? 8 : 1
     // fast path: sequential WebCodecs decode per clip; null = element seeks
@@ -319,6 +325,32 @@ export function startExport(
         }
         if (k % 5 === 0 || k === totalFrames - 1) {
           onProgress({ phase: 'video', progress: (k + 1) / totalFrames })
+        }
+        if (k % 30 === 29) {
+          // release decoders and media elements of clips the export has fully
+          // passed: every source held its decoded frames until the very end,
+          // so memory grew with total clip COUNT — a 391-clip project reached
+          // ~7 GB and the kernel OOM killer took the renderer down at 99%.
+          // The 1 s margin covers motion-blur sub-samples and overlap
+          // transitions; a deleted entry would simply re-open on demand.
+          const horizon = t - 1
+          let released = false
+          for (const [clipId, src] of sources) {
+            const end = clipEnds.get(clipId)
+            if (end !== undefined && end < horizon) {
+              src?.close()
+              sources.delete(clipId)
+              released = true
+            }
+          }
+          if (released) {
+            const keep = new Set<string>()
+            for (const [clipId, end] of clipEnds) {
+              if (end >= horizon) keep.add(clipId)
+            }
+            pool.prune(keep)
+          }
+          comp.collect() // drop GPU textures idle for 300+ frames
         }
       }
       if (useRaw) {

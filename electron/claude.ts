@@ -274,8 +274,30 @@ function closeSession() {
   s.server.close()
 }
 
+/**
+ * Keep the kadr-editor agent skill fresh in the user's skills directory —
+ * the embedded claude discovers it from ~/.claude/skills. Scoped by its
+ * description to sessions where the kadr_* MCP tools exist, so it stays
+ * dormant in unrelated claude sessions and never collides with a separately
+ * installed remotion skill (different name, hands composition authoring off).
+ */
+async function syncSkill(): Promise<void> {
+  try {
+    const src = await fs.readFile(join(app.getAppPath(), 'electron', 'kadr-skill.md'), 'utf8')
+    const dir = join(app.getPath('home'), '.claude', 'skills', 'kadr-editor')
+    const dst = join(dir, 'SKILL.md')
+    const cur = await fs.readFile(dst, 'utf8').catch(() => null)
+    if (cur === src) return
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(dst, src)
+  } catch (err) {
+    console.warn('[claude] skill sync failed:', err)
+  }
+}
+
 export function registerClaudeIpc(getWin: () => BrowserWindow | null) {
   void sweepStaleSessions() // leftovers from a hard-killed previous run
+  void syncSkill()
   ipcMain.handle('claude:open', (_e, cols: number, rows: number, cwd: string | null) => {
     const win = getWin()
     if (!win) return { ok: false, error: 'no window' }

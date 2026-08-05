@@ -96,6 +96,9 @@ const api: KadrApi = {
   },
   requestProxy: (path, duration) => ipcRenderer.invoke('proxy:request', path, duration),
   requestDecoded: (path, duration) => ipcRenderer.invoke('media:decoded', path, duration),
+  pickDirectory: (title) => ipcRenderer.invoke('dialog:pick-dir', title),
+  saveSnapshot: (dir, baseName, png) => ipcRenderer.invoke('snapshot:save', dir, baseName, png),
+  measureLoudness: (path, start, duration) => ipcRenderer.invoke('media:loudness', path, start, duration),
   onProxyProgress: (cb) => {
     const handler = (_e: unknown, p: { path: string; progress: number }) => cb(p)
     ipcRenderer.on('proxy:progress', handler)

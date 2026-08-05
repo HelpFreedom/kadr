@@ -160,6 +160,45 @@ export function makeProxy(
 }
 
 /**
+ * EBU R128 loudness of a source range: integrated LUFS + true peak dBTP
+ * from ffmpeg's loudnorm measurement pass (JSON printed to stderr).
+ */
+export function measureLoudness(
+  src: string,
+  start: number,
+  duration: number
+): Promise<{ i: number; tp: number }> {
+  const args = [
+    '-v', 'info', '-nostats',
+    ...(start > 0 ? ['-ss', start.toFixed(3)] : []),
+    ...(duration > 0 ? ['-t', duration.toFixed(3)] : []),
+    '-i', src, '-vn',
+    '-af', 'loudnorm=I=-14:TP=-1:print_format=json',
+    '-f', 'null', '-'
+  ]
+  return new Promise((resolve, reject) => {
+    execFile(FFMPEG, args, { maxBuffer: 8 * 1024 * 1024 }, (err, _out, stderr) => {
+      // ffmpeg exits 0 on success; the measurement JSON is on stderr
+      const m = String(stderr).match(/\{[^{}]*"input_i"[\s\S]*?\}/)
+      if (!m) {
+        reject(err instanceof Error ? err : new Error(`loudnorm produced no measurement: ${String(stderr).slice(-300)}`))
+        return
+      }
+      try {
+        const j = JSON.parse(m[0])
+        const i = parseFloat(j.input_i)
+        const tp = parseFloat(j.input_tp)
+        if (!isFinite(i) || i <= -70) {
+          reject(new Error('clip audio is silent — nothing to normalize'))
+          return
+        }
+        resolve({ i, tp: isFinite(tp) ? tp : -1 })
+      } catch (e) { reject(e as Error) }
+    })
+  })
+}
+
+/**
  * Full-resolution H.264 intermediate for sources Chromium cannot decode
  * (HEVC without VAAPI, mpeg4, prores, …). Near-lossless on purpose — the
  * export pipeline re-encodes it once more; video-only (the audio mix always

@@ -4,7 +4,7 @@ import { promises as fs, createReadStream, statSync, existsSync, appendFileSync 
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
-import { probeMedia, makeProxy, makeDecoded, makeReversed, ExportMuxer, RawVideoEncoder } from './ffmpeg'
+import { probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, ExportMuxer, RawVideoEncoder } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerFragmentIpc } from './fragments'
@@ -397,6 +397,10 @@ function registerIpc() {
     requestDecoded(srcPath, duration)
   )
 
+  ipcMain.handle('media:loudness', (_e, srcPath: string, start: number, duration: number) =>
+    measureLoudness(srcPath, start, duration)
+  )
+
   ipcMain.handle(
     'media:reverse',
     (_e, srcPath: string, start: number, duration: number, info: {
@@ -552,6 +556,39 @@ function registerIpc() {
       return out // identical content saved before
     } catch { /* proceed */ }
     return writeImported(out, buf)
+  })
+
+  ipcMain.handle('dialog:pick-dir', async (_e, title?: string) => {
+    const r = await dialog.showOpenDialog(win!, {
+      title: title || undefined,
+      properties: ['openDirectory', 'createDirectory']
+    })
+    return r.canceled || !r.filePaths.length ? null : r.filePaths[0]
+  })
+
+  // frame snapshots: PNG next to the project file (Downloads when the
+  // project was never saved and no dir was chosen)
+  ipcMain.handle('snapshot:save', async (_e, dir: string | null, baseName: string, png: ArrayBuffer) => {
+    if (!png?.byteLength) throw new Error('empty snapshot')
+    // without an XDG DOWNLOAD entry getPath('downloads') degrades to $HOME —
+    // prefer the real ~/Downloads when it exists
+    let fallback = app.getPath('downloads')
+    if (fallback === app.getPath('home')) {
+      const dl = join(app.getPath('home'), 'Downloads')
+      try { await fs.access(dl); fallback = dl } catch { /* keep home */ }
+    }
+    const target = dir || fallback
+    await fs.mkdir(target, { recursive: true })
+    const safe = baseName.replace(/[^\p{L}\p{N} ._-]/gu, '_').slice(0, 120) || 'frame'
+    let out = join(target, `${safe}.png`)
+    for (let i = 1; i < 1000; i++) {
+      try {
+        await fs.access(out)
+        out = join(target, `${safe}.${i}.png`)
+      } catch { break }
+    }
+    await fs.writeFile(out, Buffer.from(png))
+    return out
   })
 
   ipcMain.handle('project:save-dialog', async (_e, currentName: string) => {

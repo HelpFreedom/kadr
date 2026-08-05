@@ -414,6 +414,13 @@ export interface KadrApi {
   /** Full-resolution H.264 intermediate for sources Chromium cannot decode
       (e.g. HEVC without VAAPI); cached like proxies, video-only. */
   requestDecoded(path: string, duration: number): Promise<string>
+  /** Native directory picker; null when the user cancels. */
+  pickDirectory(title?: string): Promise<string | null>
+  /** Write a frame snapshot PNG into dir (Downloads when null) under a
+      collision-free name derived from baseName; resolves with the path. */
+  saveSnapshot(dir: string | null, baseName: string, png: ArrayBuffer): Promise<string>
+  /** EBU R128 loudness of a source range: integrated LUFS + true peak dBTP. */
+  measureLoudness(path: string, start: number, duration: number): Promise<{ i: number; tp: number }>
 
   exportDialog(defaultName: string, ext: string): Promise<string | null>
   exportBegin(job: ExportJob): Promise<void>

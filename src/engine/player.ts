@@ -2,6 +2,7 @@ import type { Project, Clip, Track, MediaAsset } from '@shared/types'
 import { Compositor, type LayerDraw } from '@/gl/compositor'
 import { glowParams } from '@/gl/glow'
 import { getCaptureFrame } from './fragmentCapture'
+import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
 import { getTextLayer } from './text'
 import { attachAudio, setElementGain, isRouted, resumeAudio } from './audio'
@@ -121,14 +122,17 @@ export interface MediaPoolOptions {
 export class MediaPool {
   private items = new Map<string, HTMLVideoElement | HTMLImageElement>()
   private srcs = new Map<string, string>()
+  /** frame snapshots flip this on to decode ORIGINALS at full quality;
+      codecs Chromium can't decode keep their proxy (original would be black) */
+  sourceQuality = false
 
   constructor(private opts: MediaPoolOptions = {}) {}
 
   get(clipId: string, asset: MediaAsset): HTMLVideoElement | HTMLImageElement {
     let el = this.items.get(clipId)
-    const url = window.kadr.fileUrl(
-      this.opts.proxy && asset.proxyPath ? asset.proxyPath : asset.path
-    )
+    const useProxy = this.opts.proxy && !!asset.proxyPath &&
+      (!this.sourceQuality || !chromiumCanDecode(asset.codec))
+    const url = window.kadr.fileUrl(useProxy ? asset.proxyPath! : asset.path)
     if (!el) {
       if (asset.kind === 'image') {
         el = new Image()
@@ -466,6 +470,11 @@ export class Player {
   private lastSet = -1
 
   constructor(private hooks: PlayerHooks) {}
+
+  /** Frame snapshots: decode originals instead of preview proxies while on. */
+  setSourceQuality(on: boolean) {
+    this.pool.sourceQuality = on
+  }
 
   attach(canvas: HTMLCanvasElement) {
     this.comp = new Compositor(canvas)

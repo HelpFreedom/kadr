@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { useEditor, projectDuration } from '@/state/store'
 import { useSettings } from '@/state/store'
+import { snapshotFrame } from '@/engine/snapshot'
 import { useT, type TKey } from '@/i18n'
 
 export function formatTime(t: number, fps: number): string {
@@ -15,6 +17,7 @@ export function formatTime(t: number, fps: number): string {
 
 export function TransportBar() {
   const t = useT()
+  const [shot, setShot] = useState<'idle' | 'busy' | 'ok' | 'fail'>('idle')
   const playing = useEditor((s) => s.playing)
   const playhead = useEditor((s) => s.playhead)
   const fps = useEditor((s) => s.project.fps)
@@ -55,6 +58,23 @@ export function TransportBar() {
       <button title={t('split')} onClick={() => st().splitAtPlayhead()}>✂</button>
       <button title={t('delete')} onClick={() => st().deleteSelection()}>🗑</button>
       <button title={t('addText')} onClick={() => st().insertTextClip(playhead)}>T+</button>
+      <button
+        title={shot === 'fail' ? t('snapshotFail') : t('snapshot')}
+        disabled={shot === 'busy'}
+        onClick={() => {
+          setShot('busy')
+          snapshotFrame({ interactive: true }).then(
+            () => setShot('ok'),
+            (err) => {
+              if (String(err).includes('cancelled')) { setShot('idle'); return }
+              console.warn('[kadr] snapshot failed', err)
+              setShot('fail')
+            }
+          ).finally(() => setTimeout(() => setShot('idle'), 2000))
+        }}
+      >
+        {shot === 'busy' ? '⏳' : shot === 'ok' ? '✓' : shot === 'fail' ? '✕' : '📷'}
+      </button>
       <span className="time">
         {formatTime(playhead, fps)} <span className="dim">/ {formatTime(duration, fps)}</span>
         <span className="frame-counter dim">

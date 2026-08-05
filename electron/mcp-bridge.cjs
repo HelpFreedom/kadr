@@ -123,6 +123,10 @@ server.registerTool('kadr_eval', {
     '- window.kadrEditor.uid() → new id; .PRESETS → export presets; .projectDuration(project); ' +
     '.evalAnim(anim, t); await .reverseClip(clipId) — reverse a video/audio clip in place ' +
     '(renders a backwards copy, swaps the clip to it; calling again un-reverses); ' +
+    'await .normalizeClip(clipId, {targetLufs?, peakDb?}) — measure the clip audio (EBU R128) ' +
+    'and set its gain for −14 LUFS with a −1 dBTP ceiling (defaults); works on either half of a ' +
+    'linked A/V pair, one undo entry, returns {gain, gainDb, measuredLufs, peakLimited}; ' +
+    'await .snapshotFrame({t?, importToBin?}) — see kadr_snapshot; ' +
     'await .importFiles([paths], {trackId, at}|null) — probe files into the bin (deduped by path) ' +
     'and, with a placement, lay them out back-to-back on the timeline from `at`.\n' +
     '- await window.kadr.probeMedia(path) → { asset } (probe a media file to import: then ' +
@@ -142,6 +146,27 @@ server.registerTool('kadr_eval', {
   inputSchema: { code: z.string().describe('async function body to run in the editor page') }
 }, async ({ code }) => {
   try { return asText(await editorEval(code)) } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_snapshot', {
+  description:
+    'YOUR EYES on the timeline: render the WYSIWYG frame at time t (default: current playhead) ' +
+    'to a PNG at project resolution and return its absolute path — then Read that file to SEE ' +
+    'the frame (composition, text placement, colors, effects). Media decodes at SOURCE quality ' +
+    '(originals, not the preview proxies); Remotion fragments are included (forced through ' +
+    'pixel capture). The PNG lands next to the project file (Downloads if the project was ' +
+    'never saved) and is imported into the media bin unless importToBin=false — pass false ' +
+    'when you only need to look. Takes ~2 s, up to ~5 s with fragments or many clips.',
+  inputSchema: {
+    t: z.number().optional().describe('project time in seconds; default = current playhead'),
+    importToBin: z.boolean().optional().describe('default true: register the PNG as a media asset')
+  }
+}, async ({ t, importToBin }) => {
+  try {
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.snapshotFrame(${JSON.stringify({ t, importToBin })})
+      return r`))
+  } catch (e) { return asError(e) }
 })
 
 server.registerTool('kadr_export', {

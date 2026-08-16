@@ -1695,11 +1695,21 @@ button.danger:hover { background: #944; }
   border-radius: 8px;
   padding: 18px 22px;
   width: 440px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
 }
 .modal h2 { margin: 0 0 14px; font-size: 16px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 .export-progress progress { width: 100%; }
 .html-player-description { margin: 8px 0 12px; line-height: 1.4; }
+.html-player-settings {
+  margin: 12px 0 4px;
+  padding: 9px 12px 11px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.html-player-settings legend { padding: 0 6px; color: var(--text); font-size: 12px; }
+.html-player-settings .export-mb:first-of-type { margin-top: 4px; }
 .export-output-path { margin-top: 5px; overflow-wrap: anywhere; font-size: 11px; }
 .export-ok { color: #7fce8a; margin-top: 10px; }
 .export-err { color: #ff7a7a; margin-top: 10px; word-break: break-word; }

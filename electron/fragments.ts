@@ -318,14 +318,33 @@ async function inlineFragmentBundle(outputDir: string): Promise<void> {
   await fs.writeFile(indexPath, html, 'utf8')
 }
 
+export interface BundledFragmentAsset {
+  path: string
+  fragmentId?: string
+}
+
+async function bundledAssetPaths(root: string): Promise<BundledFragmentAsset[]> {
+  const manifestPath = join(root, '.vite', 'manifest.json')
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as Record<
+    string, { file: string; src?: string; isEntry?: boolean }
+  >
+  const assets = Object.values(manifest).filter((entry) => !entry.isEntry).map((entry) => {
+    const match = entry.src?.match(/\/src\/fragments\/([^/]+)\//)
+    return { path: entry.file, fragmentId: match?.[1] }
+  })
+  await fs.rm(join(root, '.vite'), { recursive: true, force: true })
+  return [...new Map(assets.map((asset) => [asset.path, asset])).values()]
+    .sort((left, right) => left.path.localeCompare(right.path, undefined, { numeric: true }))
+}
+
 /** Build the selected live compositions as a portable browser runtime.
  * This compiles TSX once; it never renders timeline frames. */
 export async function bundleFragments(
   fragmentIds: string[],
   outputDir: string,
   signal: AbortSignal
-): Promise<void> {
-  if (!fragmentIds.length) return
+): Promise<BundledFragmentAsset[]> {
+  if (!fragmentIds.length) return []
   await ensureWorkspace()
   const ids = [...new Set(fragmentIds)].sort()
   for (const id of ids) {
@@ -362,6 +381,7 @@ export default defineConfig({
     outDir: ${JSON.stringify(outputDir)},
     emptyOutDir: true,
     assetsDir: '.',
+    manifest: true,
     rollupOptions: { output: { inlineDynamicImports: true } }
   }
 })
@@ -395,6 +415,7 @@ export default defineConfig({
       })
     })
     await inlineFragmentBundle(outputDir)
+    return await bundledAssetPaths(outputDir)
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true })
   }

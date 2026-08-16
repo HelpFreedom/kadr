@@ -426,10 +426,23 @@ export interface ExportProgress {
   message?: string
 }
 
+export interface HtmlPlayerSettings {
+  showTimeline: boolean
+  allowSeeking: boolean
+  showControls: boolean
+}
+
+export const DEFAULT_HTML_PLAYER_SETTINGS: HtmlPlayerSettings = {
+  showTimeline: true,
+  allowSeeking: true,
+  showControls: true
+}
+
 export interface HtmlPlayerExportRequest {
   parentDir: string
   project: Project
   lang: 'ru' | 'en'
+  player: HtmlPlayerSettings
 }
 
 // ---------------------------------------------------------------------------

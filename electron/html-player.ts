@@ -1,18 +1,22 @@
 import { basename, extname, join } from 'path'
 import { promises as fs } from 'fs'
-import type { HtmlPlayerExportRequest, Project, VoiceoverSettings } from '@shared/types'
+import { DEFAULT_HTML_PLAYER_SETTINGS } from '@shared/types'
+import type { HtmlPlayerExportRequest, HtmlPlayerSettings, Project, VoiceoverSettings } from '@shared/types'
 
 interface HtmlPlayerWriterOptions {
   bundlePath: string
   signal: AbortSignal
   onProgress: (progress: number) => void
-  bundleFragments?: (fragmentIds: string[], outputDir: string, signal: AbortSignal) => Promise<void>
+  bundleFragments?: (
+    fragmentIds: string[], outputDir: string, signal: AbortSignal
+  ) => Promise<Array<{ path: string; fragmentId?: string }>>
 }
 
 const PLAYER_CSS = `
 :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 *{box-sizing:border-box}html,body,#kadr-player{width:100%;height:100%;margin:0;overflow:hidden;background:#080a0e;color:#eef1f6}
 button,input{font:inherit}.kadr-player{position:relative;display:flex;flex-direction:column;background:#080a0e}
+[hidden]{display:none!important}
 .kadr-stage{position:relative;flex:1;min-height:0;display:grid;place-items:center;overflow:hidden;background:#050609}
 .kadr-frame{position:relative;overflow:hidden;background:#000}
 .kadr-canvas{position:relative;z-index:0;display:block;width:100%;height:100%;background:#000;cursor:pointer}
@@ -22,7 +26,7 @@ button,input{font:inherit}.kadr-player{position:relative;display:flex;flex-direc
 .kadr-controls button,.kadr-big-play{display:grid;place-items:center;border:1px solid #3b424f;border-radius:7px;background:#272c35;color:#f2f4f8;cursor:pointer;transition:.15s ease}
 .kadr-controls button{flex:0 0 auto;width:38px;height:36px}.kadr-controls button:hover,.kadr-big-play:hover{border-color:#4f8cff;background:#303746}
 .kadr-play{width:46px!important;background:#4f8cff!important;border-color:#4f8cff!important}.kadr-current,.kadr-duration{min-width:48px;color:#c5cad3;font-variant-numeric:tabular-nums;font-size:13px}.kadr-current{text-align:right}.kadr-duration{text-align:left}
-.kadr-seek{flex:1;min-width:80px;accent-color:#4f8cff}.kadr-volume{width:95px;accent-color:#4f8cff}
+.kadr-seek{flex:1;min-width:80px;accent-color:#4f8cff}.kadr-seek.read-only{opacity:.7;pointer-events:none}.kadr-volume{width:95px;accent-color:#4f8cff}
 .kadr-big-play{position:absolute;z-index:3;width:74px;height:74px;border-radius:50%;font-size:30px;background:rgba(30,35,44,.88);box-shadow:0 12px 38px rgba(0,0,0,.42);backdrop-filter:blur(8px)}
 .kadr-big-play[hidden],.kadr-loading[hidden]{display:none}.kadr-loading{position:absolute;z-index:4;right:16px;top:16px;display:flex;align-items:center;gap:9px;padding:8px 11px;border:1px solid #343b48;border-radius:8px;background:rgba(20,23,29,.86);color:#cdd2dc;font-size:12px;backdrop-filter:blur(8px)}
 .kadr-loading span{width:14px;height:14px;border:2px solid #525b6d;border-top-color:#4f8cff;border-radius:50%;animation:kadr-spin .75s linear infinite}@keyframes kadr-spin{to{transform:rotate(360deg)}}
@@ -79,7 +83,13 @@ function rewriteVoiceoverPaths(project: Project, assetPaths: Map<string, string>
   }
 }
 
-function indexHtml(project: Project, lang: 'ru' | 'en', playerCode: string): string {
+function indexHtml(
+  project: Project,
+  lang: 'ru' | 'en',
+  playerCode: string,
+  playerSettings: HtmlPlayerSettings,
+  fragmentAssets: Array<{ path: string; fragmentId?: string }>
+): string {
   const title = escapeHtml(project.name)
   return `<!doctype html>
 <html lang="${lang}">
@@ -92,6 +102,8 @@ function indexHtml(project: Project, lang: 'ru' | 'en', playerCode: string): str
 <body>
   <main id="kadr-player" class="kadr-player"></main>
   <script id="kadr-project" type="application/json">${embeddedJson(project)}</script>
+  <script id="kadr-player-settings" type="application/json">${embeddedJson(playerSettings)}</script>
+  <script id="kadr-fragment-assets" type="application/json">${embeddedJson(fragmentAssets)}</script>
   <script>${embeddedScript(playerCode)}</script>
 </body>
 </html>`
@@ -124,13 +136,15 @@ export async function writeHtmlPlayerExport(
     project.assets.length + (project.texts?.length ?? 0) + (fragmentIds.length ? 1 : 0)
   )
   let complete = 0
+  let fragmentAssets: Array<{ path: string; fragmentId?: string }> = []
 
   try {
     await fs.mkdir(assetsDir, { recursive: true })
     if (fragmentIds.length) {
       if (!options.bundleFragments) throw new Error('Fragment bundler is unavailable')
       checkCancelled()
-      await options.bundleFragments(fragmentIds, fragmentsDir, signal)
+      fragmentAssets = (await options.bundleFragments(fragmentIds, fragmentsDir, signal))
+        .map((asset) => ({ ...asset, path: `fragments/${asset.path}` }))
       complete++
       onProgress(complete / total)
     }
@@ -174,7 +188,17 @@ export async function writeHtmlPlayerExport(
 
     rewriteVoiceoverPaths(project, assetPaths)
     checkCancelled()
-    await fs.writeFile(join(partialDir, 'index.html'), indexHtml(project, request.lang, playerCode), 'utf8')
+    await fs.writeFile(
+      join(partialDir, 'index.html'),
+      indexHtml(
+        project,
+        request.lang,
+        playerCode,
+        request.player ?? DEFAULT_HTML_PLAYER_SETTINGS,
+        fragmentAssets
+      ),
+      'utf8'
+    )
     await fs.rename(partialDir, outputDir)
     onProgress(1)
     return outputDir

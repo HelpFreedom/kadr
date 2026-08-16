@@ -1,4 +1,4 @@
-import type { ExportProgress, MediaAsset, Project } from '@shared/types'
+import type { ExportProgress, HtmlPlayerSettings, MediaAsset, Project } from '@shared/types'
 import { chromiumCanDecode } from '@/engine/codecs'
 
 const WEB_VIDEO_EXTENSIONS = new Set(['mp4', 'm4v', 'webm'])
@@ -20,6 +20,7 @@ export async function exportHtmlPlayer(
   sourceProject: Project,
   parentDir: string,
   lang: 'ru' | 'en',
+  settings: HtmlPlayerSettings,
   onProgress: (progress: ExportProgress) => void
 ): Promise<string> {
   const project = JSON.parse(JSON.stringify(sourceProject)) as Project
@@ -45,5 +46,5 @@ export async function exportHtmlPlayer(
     onProgress({ phase: 'files', progress: videos.length ? prepared / videos.length * 0.15 : 0.15 })
   }
 
-  return window.kadr.htmlPlayerExport({ parentDir, project, lang })
+  return window.kadr.htmlPlayerExport({ parentDir, project, lang, player: settings })
 }

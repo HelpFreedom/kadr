@@ -1,7 +1,9 @@
-import type { Project } from '@shared/types'
+import { DEFAULT_HTML_PLAYER_SETTINGS } from '@shared/types'
+import type { HtmlPlayerSettings, Project } from '@shared/types'
 import { Player } from '@/engine/player'
 import { setMasterGain } from '@/engine/audio'
 import { createFragmentRuntime, type FragmentRuntime } from './fragments'
+import { createAssetPreloader, type FragmentAssetRef } from './preloader'
 
 interface PlayerState {
   project: Project
@@ -68,6 +70,29 @@ function renderFailure(root: HTMLElement, labels: Labels, error: unknown): void 
   root.appendChild(message)
 }
 
+function playerSettings(): HtmlPlayerSettings {
+  const data = document.getElementById('kadr-player-settings')
+  if (!data) return { ...DEFAULT_HTML_PLAYER_SETTINGS }
+  try {
+    return { ...DEFAULT_HTML_PLAYER_SETTINGS, ...JSON.parse(data.textContent ?? '{}') }
+  } catch {
+    return { ...DEFAULT_HTML_PLAYER_SETTINGS }
+  }
+}
+
+function fragmentAssetPaths(): FragmentAssetRef[] {
+  const data = document.getElementById('kadr-fragment-assets')
+  if (!data) return []
+  try {
+    const paths = JSON.parse(data.textContent ?? '[]') as unknown
+    return Array.isArray(paths) ? paths.filter((asset): asset is FragmentAssetRef => (
+      typeof asset === 'object' && asset !== null && typeof (asset as FragmentAssetRef).path === 'string'
+    )) : []
+  } catch {
+    return []
+  }
+}
+
 function start(): void {
   const lang = document.documentElement.lang.toLowerCase().startsWith('ru') ? 'ru' : 'en'
   const labels = LABELS[lang]
@@ -77,8 +102,10 @@ function start(): void {
 
   try {
     const project = JSON.parse(data.textContent ?? '') as Project
+    const settings = playerSettings()
     const duration = projectDuration(project)
     const state: PlayerState = { project, playhead: 0, playing: false, loading: false }
+    const preloader = createAssetPreloader(project, fragmentAssetPaths())
 
     root.innerHTML = `
       <div class="kadr-stage">
@@ -89,7 +116,7 @@ function start(): void {
         <button class="kadr-big-play" type="button" aria-label="${labels.play}">▶</button>
         <div class="kadr-loading" hidden><span></span>${labels.loading}</div>
       </div>
-      <div class="kadr-controls">
+      <div class="kadr-controls"${!settings.showTimeline && !settings.showControls ? ' hidden' : ''}>
         <button class="kadr-restart" type="button" title="${labels.restart}" aria-label="${labels.restart}">⏮</button>
         <button class="kadr-play" type="button" title="${labels.play}" aria-label="${labels.play}">▶</button>
         <span class="kadr-current">0:00</span>
@@ -113,11 +140,26 @@ function start(): void {
     const volume = required<HTMLInputElement>(root, '.kadr-volume')
     const fullscreen = required<HTMLButtonElement>(root, '.kadr-fullscreen')
     const loading = required<HTMLElement>(root, '.kadr-loading')
+    restart.hidden = !settings.showControls || !settings.allowSeeking
+    playButton.hidden = !settings.showControls
+    mute.hidden = !settings.showControls
+    volume.hidden = !settings.showControls
+    fullscreen.hidden = !settings.showControls
+    current.hidden = !settings.showTimeline
+    seek.hidden = !settings.showTimeline
+    required<HTMLElement>(root, '.kadr-duration').hidden = !settings.showTimeline
+    if (!settings.allowSeeking) {
+      seek.disabled = true
+      seek.tabIndex = -1
+      seek.setAttribute('aria-readonly', 'true')
+      seek.classList.add('read-only')
+    }
     canvas.width = project.width
     canvas.height = project.height
 
     let lastVolume = 1
     let muted = false
+    const useWebAudio = location.protocol !== 'file:'
     let fragmentRuntime: FragmentRuntime | null = null
     const updateUi = (): void => {
       playButton.textContent = state.playing ? '⏸' : '▶'
@@ -148,7 +190,9 @@ function start(): void {
     }, {
       proxy: false,
       resolveUrl: (path) => new URL(path, document.baseURI).href,
-      crossOrigin: false
+      crossOrigin: false,
+      webAudio: useWebAudio,
+      outputGain: () => muted ? 0 : lastVolume
     })
     player.attach(canvas)
     fragmentRuntime = createFragmentRuntime(project, fragments)
@@ -172,7 +216,10 @@ function start(): void {
 
     const togglePlayback = (): void => {
       if (duration <= 0) return
-      if (!state.playing && state.playhead >= duration - 0.001) state.playhead = 0
+      if (!state.playing && state.playhead >= duration - 0.001) {
+        state.playhead = 0
+        preloader.prioritize(0)
+      }
       state.playing = !state.playing
       updateUi()
     }
@@ -180,17 +227,21 @@ function start(): void {
     bigPlay.addEventListener('click', togglePlayback)
     canvas.addEventListener('click', togglePlayback)
     restart.addEventListener('click', () => {
+      if (!settings.allowSeeking) return
       state.playhead = 0
+      preloader.prioritize(0)
       updateUi()
     })
     seek.addEventListener('input', () => {
+      if (!settings.allowSeeking) return
       state.playhead = Number(seek.value)
+      preloader.prioritize(state.playhead)
       updateUi()
     })
     volume.addEventListener('input', () => {
       lastVolume = Number(volume.value)
       muted = lastVolume <= 0
-      setMasterGain(lastVolume)
+      if (useWebAudio) setMasterGain(lastVolume)
       mute.textContent = muted ? '🔇' : '🔊'
       mute.title = muted ? labels.unmute : labels.mute
       mute.ariaLabel = mute.title
@@ -198,7 +249,7 @@ function start(): void {
     })
     mute.addEventListener('click', () => {
       muted = !muted
-      setMasterGain(muted ? 0 : lastVolume || 1)
+      if (useWebAudio) setMasterGain(muted ? 0 : lastVolume || 1)
       mute.textContent = muted ? '🔇' : '🔊'
       mute.title = muted ? labels.unmute : labels.mute
       mute.ariaLabel = mute.title
@@ -218,17 +269,21 @@ function start(): void {
       if (event.code === 'Space') {
         event.preventDefault()
         togglePlayback()
-      } else if (event.code === 'ArrowLeft') {
+      } else if (settings.allowSeeking && event.code === 'ArrowLeft') {
         state.playhead = Math.max(0, state.playhead - (event.shiftKey ? 10 : 5))
+        preloader.prioritize(state.playhead)
         updateUi()
-      } else if (event.code === 'ArrowRight') {
+      } else if (settings.allowSeeking && event.code === 'ArrowRight') {
         state.playhead = Math.min(duration, state.playhead + (event.shiftKey ? 10 : 5))
+        preloader.prioritize(state.playhead)
         updateUi()
-      } else if (event.code === 'Home') {
+      } else if (settings.allowSeeking && event.code === 'Home') {
         state.playhead = 0
+        preloader.prioritize(0)
         updateUi()
-      } else if (event.code === 'End') {
+      } else if (settings.allowSeeking && event.code === 'End') {
         state.playhead = duration
+        preloader.prioritize(duration)
         updateUi()
       } else if (event.code === 'KeyF') {
         fullscreen.click()
@@ -236,6 +291,7 @@ function start(): void {
     })
     window.addEventListener('beforeunload', () => {
       resizeObserver.disconnect()
+      preloader.destroy()
       fragmentRuntime?.destroy()
       player.detach()
     }, { once: true })

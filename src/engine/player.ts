@@ -121,6 +121,8 @@ export interface MediaPoolOptions {
   resolveUrl?: (path: string) => string
   /** Electron's kadr:// protocol needs CORS; local standalone files do not. */
   crossOrigin?: boolean
+  /** Master multiplier when WebAudio routing is unavailable (notably file://). */
+  outputGain?: () => number
 }
 
 export class MediaPool {
@@ -166,7 +168,8 @@ export class MediaPool {
       el.volume = 1
       setElementGain(el, v)
     } else {
-      el.volume = Math.min(1, Math.max(0, v))
+      const outputGain = this.opts.outputGain?.() ?? 1
+      el.volume = Math.min(1, Math.max(0, v * outputGain))
     }
   }
 
@@ -465,6 +468,10 @@ export interface PlayerOptions {
   proxy?: boolean
   resolveUrl?: (path: string) => string
   crossOrigin?: boolean
+  /** Disable MediaElementAudioSource where the browser blocks it (file://). */
+  webAudio?: boolean
+  /** Master multiplier used when webAudio is disabled. */
+  outputGain?: () => number
 }
 
 /** Live preview: master clock + media element sync + GPU composite. */
@@ -477,16 +484,19 @@ export class Player {
   private lastDrawnProject: Project | null = null
   private lastDrawnT = -1
   private stableTicks = 0
+  private webAudio: boolean
   /** playback clock anchor — see tick() */
   private anchor: { ts: number; t: number } | null = null
   private lastSet = -1
 
   constructor(private hooks: PlayerHooks, opts: PlayerOptions = {}) {
+    this.webAudio = opts.webAudio ?? true
     this.pool = new MediaPool({
-      audio: true,
+      audio: this.webAudio,
       proxy: opts.proxy ?? true,
       resolveUrl: opts.resolveUrl,
-      crossOrigin: opts.crossOrigin
+      crossOrigin: opts.crossOrigin,
+      outputGain: opts.outputGain
     })
   }
 
@@ -526,7 +536,7 @@ export class Player {
 
     let t = playhead
     if (playing) {
-      resumeAudio()
+      if (this.webAudio) resumeAudio()
       // anchored clock: rAF timestamps are vsync-aligned, so projecting from
       // a fixed anchor gives constant velocity — accumulating per-frame
       // deltas would fold frame-time jitter into the motion (visible judder)

@@ -106,7 +106,7 @@ export function ExportDialog() {
             disabled={running}
             onChange={(e) => setMotionBlur(e.target.checked)}
           />
-          {t('motionBlur')}
+          <span className="export-mb-label">{t('motionBlur')}</span>
         </label>
         <label className="anim-check export-mb" title={t('frameBlendingHint')}>
           <input
@@ -115,7 +115,7 @@ export function ExportDialog() {
             disabled={running}
             onChange={(e) => setFrameBlending(e.target.checked)}
           />
-          {t('frameBlending')}
+          <span className="export-mb-label">{t('frameBlending')}</span>
         </label>
         <label className="anim-check export-mb" title={t('fastEncoderHint')}>
           <input
@@ -124,7 +124,7 @@ export function ExportDialog() {
             disabled={running}
             onChange={(e) => setFastEncoder(e.target.checked)}
           />
-          {t('fastEncoder')}
+          <span className="export-mb-label">{t('fastEncoder')}</span>
         </label>
 
         {status.kind === 'running' && (

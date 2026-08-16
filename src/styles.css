@@ -1755,7 +1755,16 @@ button.danger:hover { background: #944; }
   color: #f4e9c8;
 }
 
-.export-mb { display: flex; gap: 6px; margin: 10px 0 2px; font-size: 13px; }
+.export-mb {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 10px 0 2px;
+  font-size: 13px;
+  white-space: normal;
+}
+.export-mb > input { flex: 0 0 auto; margin-top: 2px; }
+.export-mb-label { min-width: 0; overflow-wrap: anywhere; }
 
 /* live ×N readout during a Ctrl speed drag; lights up on a snapped value */
 .speed-badge {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
-import type { Clip, MediaAsset, Track } from '@shared/types'
+import type { Clip, MediaAsset, Track, VoiceoverStatus } from '@shared/types'
 import {
   useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM
 } from '@/state/store'
@@ -14,6 +14,7 @@ import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/medi
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
 
+import { useVoiceoverUi } from './VoiceoverStudio'
 /** Transcribe the selected range (Shift-drag on the ruler) into SRT/TXT. */
 function TranscribeRangeButton() {
   const t = useT()
@@ -313,6 +314,27 @@ export function Timeline({ height }: { height: number }) {
 function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) {
   const t = useT()
   const selCount = useEditor((s) => s.selection.length)
+  const voiceSettings = useEditor((s) => {
+    if (!menu.clipId) return null
+    return findClip(s.project, menu.clipId)?.clip.voiceover?.settings ?? null
+  })
+  const [voiceStatus, setVoiceStatus] = useState<VoiceoverStatus | null>(null)
+  useEffect(() => {
+    let current = true
+    setVoiceStatus(null)
+    if (voiceSettings) {
+      void window.kadr.voiceoverStatus(voiceSettings).then((status) => {
+        if (current) setVoiceStatus(status)
+      }).catch(() => {
+        if (current) setVoiceStatus({
+          ready: false,
+          reason: 'Не удалось проверить TTS',
+          configPath: '~/.config/kadr/tts.json'
+        })
+      })
+    }
+    return () => { current = false }
+  }, [menu.clipId, voiceSettings?.modelPath, voiceSettings?.pythonPath])
   const transCur = useEditor((s) => {
     if (menu.kind !== 'transition' || !menu.clipId) return null
     const f = findClip(s.project, menu.clipId)
@@ -505,6 +527,32 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
               st.select(withLinked(st.project, [menu.clipId!]))
               st.deleteSelection()
               onClose()
+          {(() => {
+            const f = findClip(useEditor.getState().project, menu.clipId!)
+            if (f?.track.kind !== 'audio' || !f.clip.voiceover) return null
+            const ready = voiceStatus?.ready === true
+            return (
+              <>
+                <button
+                  className="voice-menu-item"
+                  disabled={!ready}
+                  title={ready ? 'Создать новый дубль' : voiceStatus?.reason ?? 'Проверяю TTS…'}
+                  onClick={() => {
+                    useVoiceoverUi.getState().open(menu.clipId!)
+                    onClose()
+                  }}
+                >
+                  <span className="ctx-voice-mark">●</span>{' '}
+                  {voiceStatus ? 'Переозвучить…' : 'Проверяю TTS…'}
+                </button>
+                {voiceStatus && !ready && (
+                  <div className="ctx-voice-disabled-note">
+                    {voiceStatus.reason}. Как включить — раздел «Локальная переозвучка» в README.md.
+                  </div>
+                )}
+              </>
+            )
+          })()}
             }}
           >
             {t('clipDelete')}

@@ -125,6 +125,72 @@ export interface TextStyle {
   background: string // '' = none
 }
 
+// ---------------------------------------------------------------------------
+// Local voice-over studio
+
+/** Parameters are persisted with the clip so every later take uses the same
+ * voice/model recipe. Only the spoken text changes between generations. */
+export interface VoiceoverSettings {
+  modelPath: string
+  pythonPath: string
+  voicePrompt: string
+  language: string
+  temperature: number
+  topK: number
+  topP: number
+  repetitionPenalty: number
+  maxTokens: number
+  seed: number
+  loudnessLufs: number
+  truePeakDb: number
+}
+
+export interface VoiceoverVersion {
+  id: string
+  number: number
+  text: string
+  path: string
+  assetId: string
+  duration: number
+  createdAt: string
+  settings: VoiceoverSettings
+}
+
+export interface VoiceoverHistory {
+  activeVersionId?: string
+  versions: VoiceoverVersion[]
+  settings: VoiceoverSettings
+}
+
+export interface VoiceoverGenerateRequest {
+  clipId: string
+  projectPath: string | null
+  version: number
+  text: string
+  settings: VoiceoverSettings
+}
+
+export interface VoiceoverGenerateResult {
+  path: string
+  duration: number
+  seed: number
+}
+
+export interface VoiceoverStatus {
+  ready: boolean
+  reason?: string
+  pythonPath?: string
+  modelPath?: string
+  configPath: string
+}
+
+export interface VoiceoverProgress {
+  clipId: string
+  stage: 'loading' | 'generating' | 'mastering' | 'done' | 'error'
+  progress: number
+  message?: string
+}
+
 export interface Clip {
   id: string
   /** source asset; text clips have no asset */
@@ -137,6 +203,8 @@ export interface Clip {
   fragmentMeta?: FragmentSpec
   text?: string
   textStyle?: TextStyle
+  /** Local TTS takes and the currently selected take for narration clips. */
+  voiceover?: VoiceoverHistory
   /** position on the timeline */
   start: number
   duration: number
@@ -474,6 +542,13 @@ export interface KadrApi {
   writeTextFile(path: string, content: string): Promise<void>
   /** mtime in ms, or null when missing — used to pick up external edits */
   statFile(path: string): Promise<number | null>
+
+  /** Generate one local Qwen voice-over take. The model process stays warm
+      between requests; generated files are stored next to the .kadr project. */
+  voiceoverStatus(settings: VoiceoverSettings): Promise<VoiceoverStatus>
+  voiceoverGenerate(req: VoiceoverGenerateRequest): Promise<VoiceoverGenerateResult>
+  voiceoverCancel(): Promise<void>
+  onVoiceoverProgress(cb: (p: VoiceoverProgress) => void): () => void
 
   /** Embedded Claude Code terminal session (PTY in main + MCP bridge). */
   claudeOpen(cols: number, rows: number, cwd: string | null):

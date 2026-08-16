@@ -4,6 +4,7 @@ import { useEditor, useFxPresets, findClip, uid } from '@/state/store'
 import { GLOW_DEFAULTS } from '@/gl/glow'
 import { useT } from '@/i18n'
 import { CtxMenu } from './CtxMenu'
+import { rebaseAnim } from './animUtils'
 
 function Num({
   label, value, step = 1, min, max, onChange
@@ -77,9 +78,11 @@ function ProjectProps() {
 function ClipProps({ clip }: { clip: Clip }) {
   const t = useT()
   const update = (patch: Partial<Clip>) => useEditor.getState().updateClip(clip.id, patch)
-  const setAnim = (key: keyof Clip['transform'], v: number) =>
-    update({ transform: { ...clip.transform, [key]: { ...clip.transform[key], value: v } } })
-  const setGain = (v: number) => update({ gain: { ...clip.gain, value: v } as Anim })
+  const setAnim = (key: 'x' | 'y' | 'scale' | 'rotation' | 'opacity', v: number) => {
+    const mode = key === 'scale' || key === 'opacity' ? 'ratio' : 'offset'
+    update({ transform: { ...clip.transform, [key]: rebaseAnim(clip.transform[key], v, mode) } })
+  }
+  const setGain = (v: number) => update({ gain: rebaseAnim(clip.gain, v, 'ratio') as Anim })
   const setStyle = (patch: Partial<TextStyle>) =>
     update({ textStyle: { ...clip.textStyle!, ...patch } })
 

@@ -1,14 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { useEditor } from '@/state/store'
 import { evalAnim } from '@/engine/anim'
+import { measureTextContent } from '@/engine/previewHitTest'
+import { rebaseAnim } from './animUtils'
+import type { Clip, MediaAsset } from '@shared/types'
 
 /**
- * Mouse control for the selected remotion clip in the preview: drag the
- * dashed box to move it, drag the corner handle or scroll the wheel to
- * scale. Writes through clip.transform — works in both the iframe overlay
- * and the pixel-capture mode, and matches the final render exactly.
+ * Mouse control for every visible layer in the preview. Native text/images,
+ * media and Remotion fragments all write through the same clip.transform.
  */
-export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasElement> }) {
+export function FragmentGizmo({
+  canvas,
+  onPick
+}: {
+  canvas: React.RefObject<HTMLCanvasElement>
+  onPick?: (clientX: number, clientY: number) => void
+}) {
   const selId = useEditor((s) => s.selection[0])
   const project = useEditor((s) => s.project)
   const playhead = useEditor((s) => s.playhead)
@@ -23,15 +30,19 @@ export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasEl
     pushed: boolean
   } | null>(null)
 
-  const found = (() => {
+  const found: { clip: Clip; asset?: MediaAsset } | null = (() => {
     if (!selId) return null
     for (const track of project.tracks) {
       const clip = track.clips.find((c) => c.id === selId)
-      if (clip) return clip.kind === 'remotion' ? clip : null
+      if (!clip || track.kind !== 'video') continue
+      const asset = clip.assetId ? project.assets.find((a) => a.id === clip.assetId) : undefined
+      if (clip.kind === 'media' && (!asset || asset.kind === 'audio')) return null
+      return { clip, asset }
     }
     return null
   })()
-  const active = !!found && playhead >= found.start - 1e-9 && playhead < found.start + found.duration
+  const active = !!found && playhead >= found.clip.start - 1e-9 &&
+    playhead < found.clip.start + found.clip.duration
 
   useEffect(() => {
     const el = canvas.current
@@ -48,20 +59,39 @@ export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasEl
   }, [canvas, active])
 
   if (!found || !active || !rect) return null
-  const clip = found
+  const { clip, asset } = found
 
   const disp = rect.w / Math.max(1, project.width)
   const rel = Math.max(0, Math.min(clip.duration, playhead - clip.start))
-  const fw = clip.fragmentMeta?.width ?? project.width
-  const fh = clip.fragmentMeta?.height ?? project.height
-  const fit = Math.min(project.width / fw, project.height / fh)
   const scaleAnim = evalAnim(clip.transform.scale, rel)
+  const sourceW = clip.kind === 'remotion'
+    ? clip.fragmentMeta?.width ?? project.width
+    : clip.kind === 'media'
+      ? asset?.width ?? project.width
+      : project.width
+  const sourceH = clip.kind === 'remotion'
+    ? clip.fragmentMeta?.height ?? project.height
+    : clip.kind === 'media'
+      ? asset?.height ?? project.height
+      : project.height
+  const fit = clip.kind === 'text'
+    ? 1
+    : Math.min(project.width / Math.max(1, sourceW), project.height / Math.max(1, sourceH))
   const scale = scaleAnim * fit * disp
   const x = evalAnim(clip.transform.x, rel) * disp
   const y = evalAnim(clip.transform.y, rel) * disp
-  const boxW = fw * scale
-  const boxH = fh * scale
-  const left = rect.left + rect.w / 2 + x - boxW / 2
+  let contentW = sourceW
+  let contentH = sourceH
+  let contentOffsetX = 0
+  if (clip.kind === 'text' && clip.textStyle) {
+    const bounds = measureTextContent(clip.text ?? '', clip.textStyle, project.width)
+    contentW = bounds.width
+    contentH = bounds.height
+    contentOffsetX = bounds.centerX - project.width / 2
+  }
+  const boxW = Math.max(28, contentW * scale)
+  const boxH = Math.max(22, contentH * scale)
+  const left = rect.left + rect.w / 2 + x + contentOffsetX * scale - boxW / 2
   const top = rect.top + rect.h / 2 + y - boxH / 2
 
   const st = () => useEditor.getState()
@@ -71,9 +101,9 @@ export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasEl
     st().updateClip(c.id, {
       transform: {
         ...c.transform,
-        x: { ...c.transform.x, value: px },
-        y: { ...c.transform.y, value: py },
-        scale: { ...c.transform.scale, value: ps }
+        x: rebaseAnim(c.transform.x, px, 'offset'),
+        y: rebaseAnim(c.transform.y, py, 'offset'),
+        scale: rebaseAnim(c.transform.scale, ps, 'ratio')
       }
     })
   }
@@ -109,8 +139,10 @@ export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasEl
       writeTransform(g.baseX, g.baseY, Math.min(20, Math.max(0.05, g.baseScale * grow)))
     }
   }
-  const onUp = () => {
+  const onUp = (e: React.PointerEvent) => {
+    const g = gesture.current
     gesture.current = null
+    if (g?.kind === 'move' && !g.pushed) onPick?.(e.clientX, e.clientY)
   }
   const onWheel = (e: React.WheelEvent) => {
     e.preventDefault()
@@ -127,13 +159,13 @@ export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasEl
 
   return (
     <div
-      className="frag-gizmo"
+      className={`frag-gizmo ${clip.kind}`}
       style={{ left, top, width: boxW, height: boxH }}
       onPointerDown={begin('move')}
       onPointerMove={onMove}
       onPointerUp={onUp}
       onWheel={onWheel}
-      title="Перетащите — позиция · колесо/уголок — размер"
+      title="Перетащите — позиция · колесо или уголок — размер"
     >
       <div
         className="frag-gizmo-handle"

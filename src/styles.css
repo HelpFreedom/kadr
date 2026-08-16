@@ -340,7 +340,7 @@ button.danger:hover { background: #944; }
 }
 .clip.remotion-clip .clip-label::before { content: '⚛ '; }
 
-/* ---- fragment gizmo (mouse move/scale for remotion clips) ---- */
+/* ---- layer gizmo (mouse move/scale in the preview) ---- */
 .frag-gizmo {
   position: absolute;
   border: 2px dashed rgba(126, 91, 208, 0.9);
@@ -349,6 +349,10 @@ button.danger:hover { background: #944; }
   z-index: 7;
   touch-action: none;
 }
+.frag-gizmo.text { border-color: rgba(207, 240, 74, 0.95); }
+.frag-gizmo.media { border-color: rgba(63, 208, 255, 0.95); }
+.frag-gizmo.text .frag-gizmo-handle { background: #cfeF4a; }
+.frag-gizmo.media .frag-gizmo-handle { background: #3fd0ff; }
 .frag-gizmo-handle {
   position: absolute;
   right: -7px;

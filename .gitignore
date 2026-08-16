@@ -2,6 +2,7 @@ node_modules/
 out/
 dist/
 *.log
+.DS_Store
 .claude/
 *.autosave.kadr
 scripts/__pycache__/

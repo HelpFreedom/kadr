@@ -17,13 +17,15 @@ captions to this part», watch it happen live in the preview.
 
 - 🎬 **Real multi-track editing** — video/audio/text tracks, trimming,
   looping, fades, linked AV clips, ripple delete, full undo history.
-  Clip speed from ×0.02 to ×100 by Ctrl-dragging **either** clip edge
+  Clip speed from ×0.02 to ×100 by ⌘-dragging on macOS or Ctrl-dragging
+  on Windows/Linux over **either** clip edge
   (the left one anchors the right boundary), snapping to round
   multipliers and to neighbouring clips' edges, with a live ×N badge.
 - 📥 **Media from anywhere** — drop files onto any spot of the window
   (onto a track they land as clips back-to-back at the drop point, audio
   routes to an audio track), drag a picture straight out of a browser
-  (fetched by URL), or hit Ctrl+V — clipboard paste understands both
+  (fetched by URL), or hit ⌘V on macOS / Ctrl+V on Windows and Linux —
+  clipboard paste understands both
   copied files and "Copy image" (e.g. from Telegram, which won't let
   photos be dragged out at all). XDG-portal drags from sandboxed apps
   are supported too. The media bin gets multi-select and deletion that

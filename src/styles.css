@@ -1817,7 +1817,7 @@ button.danger:hover { background: #944; }
 .export-mb > input { flex: 0 0 auto; margin-top: 2px; }
 .export-mb-label { min-width: 0; overflow-wrap: anywhere; }
 
-/* live ×N readout during a Ctrl speed drag; lights up on a snapped value */
+/* live ×N readout during a modifier speed drag; lights up on a snapped value */
 .speed-badge {
   position: fixed;
   z-index: 300;

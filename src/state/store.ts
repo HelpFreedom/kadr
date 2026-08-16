@@ -457,7 +457,7 @@ interface EditorState {
   trimClip(clipId: string, edge: 'in' | 'out', time: number): void
   splitAtPlayhead(): void
   deleteSelection(): void
-  /** Close the gap between clips around `time` on a track (Ctrl+click). */
+  /** Close the gap around `time` (primary-modifier click). */
   closeGapAt(trackId: string, time: number): void
   copySelection(): void
   copyRange(): void

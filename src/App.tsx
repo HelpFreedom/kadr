@@ -15,6 +15,7 @@ import { useT, type TKey } from './i18n'
 import { create } from 'zustand'
 import { baseOf } from '@shared/paths'
 import type { Project } from '@shared/types'
+import { hasPrimaryModifier, IS_MAC, shortcut } from './shortcuts'
 
 // Save feedback: which project snapshot is on disk (→ the ● dirty dot) and
 // a transient "✓ saved" flash in the topbar.
@@ -75,6 +76,71 @@ async function openProject() {
 
 const TL_MIN = 160
 
+function handleEditorKey(e: KeyboardEvent) {
+  const tag = (e.target as HTMLElement)?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+  const s = useEditor.getState()
+  const primary = hasPrimaryModifier(e) && !e.altKey && (IS_MAC ? !e.ctrlKey : !e.metaKey)
+  const systemModified = e.ctrlKey || e.metaKey || e.altKey
+  // e.code is keyboard-layout independent (works for ru/en)
+  if (e.code === 'Space' && !systemModified) {
+    e.preventDefault()
+    s.setPlaying(!s.playing)
+  } else if (e.code === 'KeyS' && primary) {
+    e.preventDefault()
+    if (e.shiftKey) void saveProjectAs()
+    else void saveProject()
+  } else if (e.code === 'KeyZ' && primary) {
+    e.preventDefault()
+    if (e.shiftKey) s.redo()
+    else s.undo()
+  } else if (e.code === 'KeyY' && primary && !e.shiftKey && !IS_MAC) {
+    e.preventDefault()
+    s.redo()
+  } else if (e.code === 'KeyC' && primary && !e.shiftKey) {
+    if (s.selection.length || s.range) e.preventDefault()
+    if (s.selection.length) s.copySelection()
+    else if (s.range) s.copyRange()
+  } else if (e.code === 'KeyV' && primary && !e.shiftKey) {
+    e.preventDefault()
+    if (s.clipboard.length) {
+      s.pasteAtPlayhead()
+    } else {
+      // Nothing copied inside the editor — try the OS clipboard: copied
+      // files or an image from Telegram/the browser.
+      void window.kadr.clipboardMedia().then((paths) => {
+        if (paths.length) {
+          return importFiles(paths, { trackId: null, at: useEditor.getState().playhead })
+        }
+      }).catch((err) => console.error('clipboard paste failed', err))
+    }
+  } else if (systemModified) {
+    // Never turn an unknown system shortcut (for example ⌘D on macOS)
+    // into the editor's unmodified D/S/U action.
+    return
+  } else if (e.code === 'KeyS') {
+    s.splitAtPlayhead()
+  } else if (e.code === 'KeyD' || e.code === 'Delete' || e.code === 'Backspace') {
+    if (s.selection.length) s.deleteSelection()
+    else if (s.range) s.deleteRange()
+  } else if (e.code === 'KeyU') {
+    s.toggleLinkSelection()
+  } else if (e.code === 'ArrowLeft') {
+    // Step the playhead by frames; preventDefault keeps the timeline from scrolling.
+    e.preventDefault()
+    s.setPlayhead(s.playhead - (e.shiftKey ? 1 : 1 / s.project.fps))
+  } else if (e.code === 'ArrowRight') {
+    e.preventDefault()
+    s.setPlayhead(s.playhead + (e.shiftKey ? 1 : 1 / s.project.fps))
+  } else if (e.code === 'Home') {
+    e.preventDefault()
+    s.setPlayhead(0)
+  } else if (e.code === 'Escape') {
+    if (s.animClipId) s.setAnimClip(null)
+    else s.setRange(null)
+  }
+}
+
 export default function App() {
   const t = useT()
   const name = useEditor((s) => s.project.name)
@@ -118,64 +184,8 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-      const s = useEditor.getState()
-      // e.code is keyboard-layout independent (works for ru/en)
-      if (e.code === 'Space') {
-        e.preventDefault()
-        s.setPlaying(!s.playing)
-      } else if (e.code === 'KeyS') {
-        if (e.ctrlKey) {
-          e.preventDefault()
-          if (e.shiftKey) saveProjectAs()
-          else saveProject()
-        } else s.splitAtPlayhead()
-      } else if (e.code === 'KeyD' || e.code === 'Delete' || e.code === 'Backspace') {
-        if (s.selection.length) s.deleteSelection()
-        else if (s.range) s.deleteRange()
-      } else if (e.code === 'KeyZ' && e.ctrlKey) {
-        e.preventDefault()
-        if (e.shiftKey) s.redo()
-        else s.undo()
-      } else if (e.code === 'KeyY' && e.ctrlKey) {
-        e.preventDefault()
-        s.redo()
-      } else if (e.code === 'KeyC' && e.ctrlKey) {
-        if (s.selection.length) s.copySelection()
-        else if (s.range) s.copyRange()
-      } else if (e.code === 'KeyV' && e.ctrlKey) {
-        if (s.clipboard.length) {
-          s.pasteAtPlayhead()
-        } else {
-          // nothing copied inside the editor — try the OS clipboard:
-          // copied files or a copied image (e.g. from Telegram/browser)
-          void window.kadr.clipboardMedia().then((paths) => {
-            if (paths.length) {
-              return importFiles(paths, { trackId: null, at: useEditor.getState().playhead })
-            }
-          }).catch((err) => console.error('clipboard paste failed', err))
-        }
-      } else if (e.code === 'KeyU') {
-        s.toggleLinkSelection()
-      } else if (e.code === 'ArrowLeft') {
-        // step the playhead by frames; preventDefault keeps the timeline from scrolling
-        e.preventDefault()
-        s.setPlayhead(s.playhead - (e.shiftKey ? 1 : 1 / s.project.fps))
-      } else if (e.code === 'ArrowRight') {
-        e.preventDefault()
-        s.setPlayhead(s.playhead + (e.shiftKey ? 1 : 1 / s.project.fps))
-      } else if (e.code === 'Home') {
-        e.preventDefault()
-        s.setPlayhead(0)
-      } else if (e.code === 'Escape') {
-        if (s.animClipId) s.setAnimClip(null)
-        else s.setRange(null)
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', handleEditorKey)
+    return () => window.removeEventListener('keydown', handleEditorKey)
   }, [])
 
   const startSideResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -248,8 +258,8 @@ export default function App() {
           {t('newProject')}
         </button>
         <button onClick={openProject}>{t('open')}</button>
-        <button onClick={saveProject} title="Ctrl+S">{t('save')}</button>
-        <button onClick={saveProjectAs} title="Ctrl+Shift+S">{t('saveAs')}</button>
+        <button onClick={saveProject} title={shortcut('S')}>{t('save')}</button>
+        <button onClick={saveProjectAs} title={shortcut('S', true)}>{t('saveAs')}</button>
         <button className="primary" onClick={() => useEditor.getState().setExportOpen(true)}>
           {t('export')}
         </button>
@@ -267,6 +277,7 @@ export default function App() {
         <div className="h-resizer" onPointerDown={startSideResize} title="⇔" />
         <div className={previewDetached ? 'center-col preview-column-detached' : 'center-col'}>
           <PreviewWindow
+            onKeyDown={handleEditorKey}
             onDetachedChange={setPreviewDetached}
           />
         </div>

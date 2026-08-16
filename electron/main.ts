@@ -574,7 +574,7 @@ function registerIpc() {
     return paths
   })
 
-  // Clipboard paste (Ctrl+V with an empty editor clipboard): copied FILES
+  // Clipboard paste (platform paste shortcut with an empty editor clipboard): copied FILES
   // (file managers put text/uri-list on the clipboard) win over a copied
   // IMAGE (e.g. Telegram's «Копировать изображение» — photos can't even be
   // dragged out of tdesktop, paste is the ergonomic route into the editor).

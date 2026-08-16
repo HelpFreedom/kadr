@@ -86,7 +86,7 @@ mixes audio and muxes/transcodes per preset.
   x-moz-url / DownloadURL → portal key), `importDrop` (paths → URLs →
   raw blobs), window-level catch-all drop in App.tsx, drop forensics to
   `window.__dragLog` + `userData/drop-log.jsonl`.
-- Clip speed UX (`Timeline.tsx`): Ctrl-drag on either extend grip or
+- Clip speed UX (`Timeline.tsx`): primary-modifier drag on either extend grip or
   clip edge = 0.02–100× with ~16 px snapping to round multipliers AND
   neighbouring clip edges/playhead; a cursor-following ×N badge lights up
   when snapped. Preview clamps element playbackRate to Chromium's hard

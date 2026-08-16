@@ -50,6 +50,8 @@ async function writeAndConfirm(path: string) {
 
 async function saveProject() {
   const s = useEditor.getState()
+  const savedProject = useSaveUi.getState().savedProject
+  if (savedProject === null || s.project === savedProject) return
   let path = s.projectPath
   if (!path) {
     path = await window.kadr.saveProjectDialog(s.project.name)
@@ -258,7 +260,7 @@ export default function App() {
           {t('newProject')}
         </button>
         <button onClick={openProject}>{t('open')}</button>
-        <button onClick={saveProject} title={shortcut('S')}>{t('save')}</button>
+        <button disabled={!dirty} onClick={saveProject} title={shortcut('S')}>{t('save')}</button>
         <button onClick={saveProjectAs} title={shortcut('S', true)}>{t('saveAs')}</button>
         <button className="primary" onClick={() => useEditor.getState().setExportOpen(true)}>
           {t('export')}

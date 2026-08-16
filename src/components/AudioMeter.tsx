@@ -1,12 +1,17 @@
 // Vertical frequency meter next to the preview: low bands at the bottom,
 // green→yellow→red gradient by level, red border flash on clipping.
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getAnalyser } from '@/engine/audio'
+import { useT } from '@/i18n'
 
 const BANDS = 28
+const SIGNAL_THRESHOLD = 2
+const HIDE_AFTER_SILENCE_MS = 1200
 
 export function AudioMeter() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [visible, setVisible] = useState(false)
+  const t = useT()
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -16,6 +21,14 @@ export function AudioMeter() {
     const wave = new Uint8Array(analyser.fftSize)
     let raf = 0
     let clipUntil = 0
+    let lastSignalAt = 0
+    let meterVisible = false
+
+    const setMeterVisible = (next: boolean) => {
+      if (meterVisible === next) return
+      meterVisible = next
+      setVisible(next)
+    }
 
     const draw = () => {
       raf = requestAnimationFrame(draw)
@@ -25,14 +38,24 @@ export function AudioMeter() {
       analyser.getByteFrequencyData(freq)
       analyser.getByteTimeDomainData(wave)
 
+      let peak = 0
+      for (let i = 0; i < freq.length; i++) peak = Math.max(peak, freq[i])
+      const now = performance.now()
+      if (peak > SIGNAL_THRESHOLD) {
+        lastSignalAt = now
+        setMeterVisible(true)
+      } else if (meterVisible && now - lastSignalAt > HIDE_AFTER_SILENCE_MS) {
+        setMeterVisible(false)
+      }
+
       // overload detector: waveform samples touching the rails
       for (let i = 0; i < wave.length; i++) {
         if (wave[i] <= 1 || wave[i] >= 254) {
-          clipUntil = performance.now() + 600
+          clipUntil = now + 600
           break
         }
       }
-      const clipping = performance.now() < clipUntil
+      const clipping = now < clipUntil
 
       ctx.fillStyle = '#101216'
       ctx.fillRect(0, 0, W, H)
@@ -73,5 +96,13 @@ export function AudioMeter() {
     }
   }, [])
 
-  return <canvas ref={canvasRef} className="audio-meter" title="Audio spectrum / overload" />
+  return (
+    <canvas
+      ref={canvasRef}
+      className={`audio-meter${visible ? '' : ' is-silent'}`}
+      aria-hidden={!visible}
+      title={t('audioMeterTitle')}
+      aria-label={t('audioMeterTitle')}
+    />
+  )
 }

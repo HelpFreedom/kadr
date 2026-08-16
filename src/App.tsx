@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { SidePanel } from './components/SidePanel'
-import { Preview } from './components/Preview'
+import { PreviewWindow } from './components/PreviewWindow'
 import { Inspector } from './components/Inspector'
 import { Timeline } from './components/Timeline'
-import { TransportBar, LangSwitch } from './components/TransportBar'
+import { LangSwitch } from './components/TransportBar'
 import { ExportDialog } from './components/ExportDialog'
 import { ClaudePanel } from './components/ClaudePanel'
 import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
@@ -92,6 +92,7 @@ export default function App() {
     Math.min(Number(localStorage.getItem('kadr.tlh')) || 330, window.innerHeight - 220)
   )
   const [claudeOpen, setClaudeOpen] = useState(false)
+  const [previewDetached, setPreviewDetached] = useState(false)
   const [sideW, setSideW] = useState(() =>
     Math.min(640, Math.max(200, Number(localStorage.getItem('kadr.sidew')) || 280))
   )
@@ -261,12 +262,13 @@ export default function App() {
         </button>
         <LangSwitch />
       </div>
-      <div className="main-row">
+      <div className={previewDetached ? 'main-row preview-detached-layout' : 'main-row'}>
         <SidePanel width={sideW} />
         <div className="h-resizer" onPointerDown={startSideResize} title="⇔" />
-        <div className="center-col">
-          <Preview />
-          <TransportBar />
+        <div className={previewDetached ? 'center-col preview-column-detached' : 'center-col'}>
+          <PreviewWindow
+            onDetachedChange={setPreviewDetached}
+          />
         </div>
         <Inspector />
       </div>

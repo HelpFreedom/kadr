@@ -207,6 +207,12 @@ button.danger:hover { background: #944; }
   flex-direction: column;
   min-width: 0;
 }
+.center-col.preview-column-detached { display: none; }
+.main-row.preview-detached-layout .inspector {
+  flex: 1;
+  width: auto;
+  min-width: 260px;
+}
 .preview {
   flex: 1;
   display: flex;
@@ -216,6 +222,23 @@ button.danger:hover { background: #944; }
   min-height: 0;
   padding: 10px;
   position: relative;
+}
+.preview-host {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.preview-host.detached { flex-direction: column; height: 100%; }
+.detached-preview-body,
+.detached-preview-root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
 }
 .preview-canvas-wrap {
   flex: 1;
@@ -232,6 +255,7 @@ button.danger:hover { background: #944; }
   border-radius: 4px;
   background: #101216;
 }
+.audio-meter.is-silent { visibility: hidden; }
 /* the canvas keeps the exact project aspect ratio; everything around is chrome */
 .preview canvas {
   max-width: 100%;
@@ -280,6 +304,33 @@ button.danger:hover { background: #944; }
 }
 .transport .play { font-size: 15px; min-width: 44px; }
 .transport .time { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 14px; }
+.transport .preview-window-toggle {
+  display: grid;
+  place-items: center;
+  min-width: 34px;
+}
+.transport .preview-window-toggle.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.split-screen-icon {
+  position: relative;
+  display: block;
+  width: 18px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+}
+.split-screen-icon::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  border-left: 1.5px solid currentColor;
+  transform: translateX(-0.75px);
+}
 
 /* ---- inspector ---- */
 .inspector {

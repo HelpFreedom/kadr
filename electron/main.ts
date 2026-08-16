@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard, screen } from 'electron'
 import { join, dirname, basename, extname } from 'path'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -61,6 +61,33 @@ process.on('uncaughtException', (err) => {
 
 let win: BrowserWindow | null = null
 
+function safePreviewPosition(features: string): { x?: number; y?: number } {
+  const values = new Map(
+    features.split(',').map((part) => {
+      const [key, value = ''] = part.split('=', 2)
+      return [key.trim(), value.trim()]
+    })
+  )
+  const x = Number(values.get('left') ?? values.get('x'))
+  const y = Number(values.get('top') ?? values.get('y'))
+  const width = Number(values.get('width')) || 960
+  const height = Number(values.get('height')) || 540
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return {}
+
+  const visible = screen.getAllDisplays().some(({ workArea }) => {
+    const overlapW = Math.min(x + width, workArea.x + workArea.width) - Math.max(x, workArea.x)
+    const overlapH = Math.min(y + height, workArea.y + workArea.height) - Math.max(y, workArea.y)
+    return overlapW >= 80 && overlapH >= 40
+  })
+  if (visible) return {}
+
+  const { workArea } = screen.getPrimaryDisplay()
+  return {
+    x: Math.round(workArea.x + (workArea.width - width) / 2),
+    y: Math.round(workArea.y + (workArea.height - height) / 2)
+  }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1500,
@@ -80,6 +107,23 @@ function createWindow() {
     }
   })
   win.setMenuBarVisibility(false)
+  win.webContents.setWindowOpenHandler(({ frameName, features }) => {
+    if (frameName !== 'kadr-preview') return { action: 'allow' }
+    return {
+      action: 'allow',
+      overrideBrowserWindowOptions: {
+        minWidth: 480,
+        minHeight: 320,
+        backgroundColor: '#15171c',
+        autoHideMenuBar: true,
+        title: 'Kadr — Preview',
+        ...safePreviewPosition(features)
+      }
+    }
+  })
+  win.webContents.on('did-create-window', (child, details) => {
+    if (details.frameName === 'kadr-preview') child.setMenuBarVisibility(false)
+  })
   // a killed/crashed renderer leaves a dead window and an immortal main
   // process (the running project is lost either way — autosave has it);
   // exit cleanly so the next launch starts fresh instead of being blocked

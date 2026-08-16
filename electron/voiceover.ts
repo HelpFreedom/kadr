@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, ipcMain } from 'electron'
+import type { WebContents } from 'electron'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { promises as fs, existsSync } from 'fs'
 import { basename, dirname, join } from 'path'
@@ -43,6 +44,7 @@ let stderrTail = ''
 let current: {
   id: string
   clipId: string
+  target: WebContents
   resolve: (result: VoiceoverGenerateResult) => void
   reject: (err: Error) => void
 } | null = null
@@ -98,8 +100,8 @@ async function voiceoverStatus(settings: VoiceoverSettings): Promise<VoiceoverSt
   }
 }
 
-function sendProgress(getWin: () => BrowserWindow | null, progress: VoiceoverProgress) {
-  getWin()?.webContents.send('voiceover:progress', progress)
+function sendProgress(target: WebContents, progress: VoiceoverProgress) {
+  if (!target.isDestroyed()) target.send('voiceover:progress', progress)
 }
 
 function stopWorker(reason = 'Генерация отменена') {
@@ -117,7 +119,7 @@ function stopWorker(reason = 'Генерация отменена') {
   worker = null
 }
 
-function handleMessage(getWin: () => BrowserWindow | null, msg: WorkerMessage) {
+function handleMessage(msg: WorkerMessage) {
   if (msg.type === 'ready') {
     resolveReady?.()
     resolveReady = null
@@ -126,7 +128,7 @@ function handleMessage(getWin: () => BrowserWindow | null, msg: WorkerMessage) {
   }
   if (!current || msg.id !== current.id) return
   if (msg.type === 'progress') {
-    sendProgress(getWin, {
+    sendProgress(current.target, {
       clipId: current.clipId,
       stage: msg.stage,
       progress: msg.progress,
@@ -135,12 +137,12 @@ function handleMessage(getWin: () => BrowserWindow | null, msg: WorkerMessage) {
   } else if (msg.type === 'done') {
     const done = current
     current = null
-    sendProgress(getWin, { clipId: done.clipId, stage: 'done', progress: 1 })
+    sendProgress(done.target, { clipId: done.clipId, stage: 'done', progress: 1 })
     done.resolve({ path: msg.path, duration: msg.duration, seed: msg.seed })
   } else if (msg.type === 'error') {
     const failed = current
     current = null
-    sendProgress(getWin, {
+    sendProgress(failed.target, {
       clipId: failed.clipId,
       stage: 'error',
       progress: 0,
@@ -150,10 +152,7 @@ function handleMessage(getWin: () => BrowserWindow | null, msg: WorkerMessage) {
   }
 }
 
-function ensureWorker(
-  getWin: () => BrowserWindow | null,
-  runtime: VoiceoverRuntime
-): Promise<void> {
+function ensureWorker(runtime: VoiceoverRuntime): Promise<void> {
   const runtimeKey = JSON.stringify([
     runtime.pythonPath,
     runtime.modelPath,
@@ -180,7 +179,7 @@ function ensureWorker(
     stdoutBuffer = lines.pop() ?? ''
     for (const line of lines) {
       if (!line.trim()) continue
-      try { handleMessage(getWin, JSON.parse(line) as WorkerMessage) }
+      try { handleMessage(JSON.parse(line) as WorkerMessage) }
       catch { /* model libraries occasionally print to stdout; ignore it */ }
     }
   })
@@ -205,7 +204,7 @@ async function outputPath(req: VoiceoverGenerateRequest): Promise<string> {
 }
 
 async function generate(
-  getWin: () => BrowserWindow | null,
+  target: WebContents,
   req: VoiceoverGenerateRequest
 ): Promise<VoiceoverGenerateResult> {
   if (current) throw new Error('Дождитесь завершения текущей генерации')
@@ -215,13 +214,13 @@ async function generate(
   const status = await voiceoverStatus(req.settings)
   if (!status.ready) throw new Error(`${status.reason}. Настройте TTS по инструкции в README.md`)
   const runtime = await resolveRuntime(req.settings)
-  sendProgress(getWin, { clipId: req.clipId, stage: 'loading', progress: 0.04 })
-  await ensureWorker(getWin, runtime)
+  sendProgress(target, { clipId: req.clipId, stage: 'loading', progress: 0.04 })
+  await ensureWorker(runtime)
   const out = await outputPath(req)
-  sendProgress(getWin, { clipId: req.clipId, stage: 'generating', progress: 0.15 })
+  sendProgress(target, { clipId: req.clipId, stage: 'generating', progress: 0.15 })
 
   return new Promise<VoiceoverGenerateResult>((resolve, reject) => {
-    current = { id, clipId: req.clipId, resolve, reject }
+    current = { id, clipId: req.clipId, target, resolve, reject }
     worker!.stdin.write(JSON.stringify({
       id,
       text,
@@ -231,17 +230,18 @@ async function generate(
   })
 }
 
-export function registerVoiceoverIpc(getWin: () => BrowserWindow | null) {
+export function registerVoiceoverIpc() {
   ipcMain.handle('voiceover:status', (_e, settings: VoiceoverSettings) =>
     voiceoverStatus(settings)
   )
-  ipcMain.handle('voiceover:generate', (_e, req: VoiceoverGenerateRequest) =>
-    generate(getWin, req)
+  ipcMain.handle('voiceover:generate', (event, req: VoiceoverGenerateRequest) =>
+    generate(event.sender, req)
   )
-  ipcMain.handle('voiceover:cancel', () => {
-    const clipId = current?.clipId
+  ipcMain.handle('voiceover:cancel', (event) => {
+    if (!current || current.target.id !== event.sender.id) return
+    const { clipId, target } = current
     stopWorker()
-    if (clipId) sendProgress(getWin, {
+    if (clipId) sendProgress(target, {
       clipId,
       stage: 'error',
       progress: 0,

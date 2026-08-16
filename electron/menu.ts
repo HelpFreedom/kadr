@@ -6,13 +6,13 @@ const isMac = process.platform === 'darwin'
 
 const LABELS = {
   en: {
-    file: 'File', newProject: 'New Project', openProject: 'Open Project…',
+    file: 'File', newWindow: 'New Window', newProject: 'New Project', openProject: 'Open Project…',
     save: 'Save', saveAs: 'Save As…', export: 'Export…', edit: 'Edit',
     undo: 'Undo', redo: 'Redo', view: 'View', window: 'Window',
     help: 'Help', github: 'Kadr on GitHub'
   },
   ru: {
-    file: 'Файл', newProject: 'Новый проект', openProject: 'Открыть проект…',
+    file: 'Файл', newWindow: 'Новое окно', newProject: 'Новый проект', openProject: 'Открыть проект…',
     save: 'Сохранить', saveAs: 'Сохранить как…', export: 'Экспорт…', edit: 'Правка',
     undo: 'Отменить', redo: 'Повторить', view: 'Вид', window: 'Окно',
     help: 'Справка', github: 'Kadr на GitHub'
@@ -30,8 +30,15 @@ const LABELS = {
  * custom items (the app's real history lives in the zustand store, not the
  * DOM) and the renderer falls back to text undo when an input is focused.
  */
-export function buildMenu(getWin: () => BrowserWindow | null): Menu {
-  const labels = app.getLocale().toLowerCase().startsWith('ru') ? LABELS.ru : LABELS.en
+function localizedLabels() {
+  return app.getLocale().toLowerCase().startsWith('ru') ? LABELS.ru : LABELS.en
+}
+
+export function buildMenu(
+  getWin: () => BrowserWindow | null,
+  createWindow: () => BrowserWindow
+): Menu {
+  const labels = localizedLabels()
   const send = (cmd: MenuCommand) => () => getWin()?.webContents.send('menu:command', cmd)
 
   const template: MenuItemConstructorOptions[] = [
@@ -54,7 +61,8 @@ export function buildMenu(getWin: () => BrowserWindow | null): Menu {
     {
       label: labels.file,
       submenu: [
-        { label: labels.newProject, accelerator: 'CmdOrCtrl+N', click: send('new') },
+        { label: labels.newWindow, accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
+        { label: labels.newProject, accelerator: 'CmdOrCtrl+Shift+N', click: send('new') },
         { label: labels.openProject, accelerator: 'CmdOrCtrl+O', click: send('open') },
         { type: 'separator' },
         { label: labels.save, accelerator: 'CmdOrCtrl+S', click: send('save') },
@@ -118,4 +126,11 @@ export function buildMenu(getWin: () => BrowserWindow | null): Menu {
   ]
 
   return Menu.buildFromTemplate(template)
+}
+
+export function buildDockMenu(createWindow: () => BrowserWindow): Menu {
+  const labels = localizedLabels()
+  return Menu.buildFromTemplate([
+    { label: labels.newWindow, click: () => createWindow() }
+  ])
 }

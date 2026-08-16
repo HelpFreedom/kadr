@@ -39,6 +39,7 @@ interface Session {
   pty: IPty
   server: Server
   port: number
+  ownerId: number
 }
 
 let session: Session | null = null
@@ -252,7 +253,7 @@ async function openSession(
         session = null
       }
     })
-    session = { pty: p, server: bridge.server, port: bridge.port }
+    session = { pty: p, server: bridge.server, port: bridge.port, ownerId: win.webContents.id }
     return { ok: true, port: bridge.port }
   } catch (err) {
     bridge.server.close()
@@ -295,18 +296,23 @@ async function syncSkill(): Promise<void> {
   }
 }
 
-export function registerClaudeIpc(getWin: () => BrowserWindow | null) {
+export function registerClaudeIpc() {
   void sweepStaleSessions() // leftovers from a hard-killed previous run
   void syncSkill()
-  ipcMain.handle('claude:open', (_e, cols: number, rows: number, cwd: string | null) => {
-    const win = getWin()
+  ipcMain.handle('claude:open', (event, cols: number, rows: number, cwd: string | null) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return { ok: false, error: 'no window' }
     return openSession(win, cols, rows, cwd)
   })
-  ipcMain.on('claude:input', (_e, data: string) => session?.pty.write(data))
-  ipcMain.on('claude:resize', (_e, cols: number, rows: number) => {
+  ipcMain.on('claude:input', (event, data: string) => {
+    if (session?.ownerId === event.sender.id) session.pty.write(data)
+  })
+  ipcMain.on('claude:resize', (event, cols: number, rows: number) => {
+    if (session?.ownerId !== event.sender.id) return
     try { session?.pty.resize(Math.max(20, cols), Math.max(5, rows)) } catch { /* dying */ }
   })
-  ipcMain.handle('claude:close', () => closeSession())
+  ipcMain.handle('claude:close', (event) => {
+    if (session?.ownerId === event.sender.id) closeSession()
+  })
   app.on('before-quit', closeSession)
 }

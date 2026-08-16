@@ -10,7 +10,12 @@ import { homedir, tmpdir } from 'os'
 import { ExportMuxer } from './ffmpeg'
 import type { TranscribeRequest, TranscribeResult, TranscribeSegment } from '@shared/types'
 
-let current: { muxer: ExportMuxer | null; py: ChildProcess | null; cancelled: boolean } | null = null
+let current: {
+  ownerId: number
+  muxer: ExportMuxer | null
+  py: ChildProcess | null
+  cancelled: boolean
+} | null = null
 
 async function transcribePython(): Promise<string> {
   const configPath = join(homedir(), '.config', 'kadr', 'transcribe.json')
@@ -24,9 +29,14 @@ async function transcribePython(): Promise<string> {
 
 async function run(win: BrowserWindow, req: TranscribeRequest): Promise<TranscribeResult> {
   if (current) throw new Error('transcription already running')
-  const job = { muxer: null as ExportMuxer | null, py: null as ChildProcess | null, cancelled: false }
+  const job = {
+    ownerId: win.webContents.id,
+    muxer: null as ExportMuxer | null,
+    py: null as ChildProcess | null,
+    cancelled: false
+  }
   current = job
-  const wav = join(tmpdir(), `kadr-transcribe-${Date.now()}.wav`)
+  const wav = join(tmpdir(), `kadr-transcribe-${job.ownerId}-${Date.now()}.wav`)
   const send = (progress: number, text: string) =>
     win.webContents.send('transcribe:progress', { progress, text })
 
@@ -112,14 +122,14 @@ async function run(win: BrowserWindow, req: TranscribeRequest): Promise<Transcri
   }
 }
 
-export function registerTranscribeIpc(getWin: () => BrowserWindow | null) {
-  ipcMain.handle('transcribe:run', (_e, req: TranscribeRequest) => {
-    const win = getWin()
+export function registerTranscribeIpc() {
+  ipcMain.handle('transcribe:run', (event, req: TranscribeRequest) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) throw new Error('no window')
     return run(win, req)
   })
-  ipcMain.handle('transcribe:cancel', () => {
-    if (!current) return
+  ipcMain.handle('transcribe:cancel', (event) => {
+    if (!current || current.ownerId !== event.sender.id) return
     current.cancelled = true
     current.muxer?.cancel()
     current.py?.kill('SIGKILL')

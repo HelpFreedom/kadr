@@ -68,12 +68,19 @@ async function saveProjectAs() {
   await writeAndConfirm(path)
 }
 
+async function openProjectPath(path: string) {
+  try {
+    const p = await window.kadr.readProject(path)
+    useEditor.getState().setProject(p, path)
+    markProjectSaved(useEditor.getState().project)
+  } catch (err) {
+    flashSave('openError', String(err), true)
+  }
+}
+
 async function openProject() {
   const path = await window.kadr.openProjectDialog()
-  if (!path) return
-  const p = await window.kadr.readProject(path)
-  useEditor.getState().setProject(p, path)
-  markProjectSaved(useEditor.getState().project)
+  if (path) await openProjectPath(path)
 }
 
 const TL_MIN = 160
@@ -147,6 +154,7 @@ export default function App() {
   const t = useT()
   const name = useEditor((s) => s.project.name)
   const project = useEditor((s) => s.project)
+  const projectPath = useEditor((s) => s.projectPath)
   const savedProject = useSaveUi((s) => s.savedProject)
   const flash = useSaveUi((s) => s.flash)
   // a fresh (empty) session isn't "unsaved work" yet
@@ -154,6 +162,20 @@ export default function App() {
     if (useSaveUi.getState().savedProject === null) markProjectSaved(useEditor.getState().project)
   }, [])
   const dirty = savedProject !== null && project !== savedProject
+
+  useEffect(() => {
+    let active = true
+    void window.kadr.takeInitialProjectPath().then((path) => {
+      if (active && path) return openProjectPath(path)
+    }).catch((err) => {
+      if (active) flashSave('openError', String(err), true)
+    })
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    window.kadr.setWindowProjectState({ path: projectPath, name, dirty })
+  }, [projectPath, name, dirty])
   const undoLabel = useEditor((s) => s.past[s.past.length - 1]?.label)
   const redoLabel = useEditor((s) => s.future[0]?.label)
   const [tlHeight, setTlHeight] = useState(() =>

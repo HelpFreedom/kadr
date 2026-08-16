@@ -4,6 +4,7 @@
 // iteration); `remotion render` runs exactly once per fragment content hash
 // at export time.
 import { app, ipcMain, BrowserWindow } from 'electron'
+import type { WebContents } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import { promises as fs, existsSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
@@ -601,16 +602,19 @@ async function renderFragment(
 // where the fragment becomes a regular compositor layer.
 
 const captures = new Map<string, BrowserWindow>()
+const captureKey = (ownerId: number, id: string) => `${ownerId}:${id}`
 
 async function captureStart(
-  getWin: () => BrowserWindow | null,
+  target: WebContents,
   id: string,
   url: string,
   w: number,
   h: number,
   fps: number
 ): Promise<void> {
-  if (captures.has(id)) return
+  const ownerId = target.id
+  const key = captureKey(ownerId, id)
+  if (captures.has(key)) return
   const cw = Math.max(64, Math.round(w))
   const ch = Math.max(36, Math.round(h))
   const win = new BrowserWindow({
@@ -625,27 +629,29 @@ async function captureStart(
     enableLargerThanScreen: true,
     webPreferences: { offscreen: true }
   })
-  captures.set(id, win)
+  captures.set(key, win)
+  target.once('destroyed', () => captureStop(ownerId, id))
   win.setContentSize(cw, ch) // re-assert: creation may still have clamped
   win.webContents.setFrameRate(Math.max(10, Math.min(60, Math.round(fps))))
   win.webContents.on('paint', (_ev, _dirty, image) => {
     const size = image.getSize()
     // BGRA, premultiplied — the compositor shader undoes both
-    getWin()?.webContents.send('fragment:frame', {
+    if (!target.isDestroyed()) target.send('fragment:frame', {
       id, w: size.width, h: size.height, data: image.getBitmap()
     })
   })
   await win.loadURL(url)
 }
 
-function captureStop(id: string) {
-  const win = captures.get(id)
-  captures.delete(id)
+function captureStop(ownerId: number, id: string) {
+  const key = captureKey(ownerId, id)
+  const win = captures.get(key)
+  captures.delete(key)
   if (win && !win.isDestroyed()) win.destroy()
 }
 
-function captureSync(id: string, msg: unknown) {
-  const win = captures.get(id)
+function captureSync(ownerId: number, id: string, msg: unknown) {
+  const win = captures.get(captureKey(ownerId, id))
   if (!win || win.isDestroyed()) return
   win.webContents
     .executeJavaScript(`window.postMessage(${JSON.stringify(msg)}, '*'); 0`, true)
@@ -653,29 +659,35 @@ function captureSync(id: string, msg: unknown) {
 }
 
 function stopAllCaptures() {
-  for (const id of [...captures.keys()]) captureStop(id)
+  for (const win of captures.values()) {
+    if (!win.isDestroyed()) win.destroy()
+  }
+  captures.clear()
 }
 
 // ---------------------------------------------------------------------- IPC
 
-export function registerFragmentIpc(getWin: () => BrowserWindow | null) {
-  const send = (id: string, phase: string, progress: number) =>
-    getWin()?.webContents.send('fragment:progress', { id, phase, progress })
+export function registerFragmentIpc() {
+  const send = (target: WebContents, id: string, phase: string, progress: number) => {
+    if (!target.isDestroyed()) target.send('fragment:progress', { id, phase, progress })
+  }
 
-  ipcMain.handle('fragment:ensure', () =>
-    ensureWorkspace((phase, p) => send('workspace', phase, p))
+  ipcMain.handle('fragment:ensure', (event) =>
+    ensureWorkspace((phase, p) => send(event.sender, 'workspace', phase, p))
   )
   ipcMain.handle('fragment:server', () => ensureServer())
   ipcMain.handle('fragment:create', (_e, spec: FragmentSpec) => createFragment(spec))
   ipcMain.handle('fragment:delete', (_e, id: string) => deleteFragment(id))
-  ipcMain.handle('fragment:render', (_e, id: string, opts?: { transparent?: boolean }) =>
-    renderFragment(id, opts, (p) => send(id, 'render', p))
+  ipcMain.handle('fragment:render', (event, id: string, opts?: { transparent?: boolean }) =>
+    renderFragment(id, opts, (p) => send(event.sender, id, 'render', p))
   )
-  ipcMain.handle('fragment:capture-start', (_e, id: string, url: string, w: number, h: number, fps: number) =>
-    captureStart(getWin, id, url, w, h, fps)
+  ipcMain.handle('fragment:capture-start', (event, id: string, url: string, w: number, h: number, fps: number) =>
+    captureStart(event.sender, id, url, w, h, fps)
   )
-  ipcMain.handle('fragment:capture-stop', (_e, id: string) => captureStop(id))
-  ipcMain.on('fragment:capture-sync', (_e, id: string, msg: unknown) => captureSync(id, msg))
+  ipcMain.handle('fragment:capture-stop', (event, id: string) => captureStop(event.sender.id, id))
+  ipcMain.on('fragment:capture-sync', (event, id: string, msg: unknown) =>
+    captureSync(event.sender.id, id, msg)
+  )
   app.on('before-quit', () => {
     stopServer()
     stopAllCaptures()

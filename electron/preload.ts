@@ -80,6 +80,9 @@ const api: KadrApi = {
 
   saveProjectDialog: (name) => ipcRenderer.invoke('project:save-dialog', name),
   openProjectDialog: () => ipcRenderer.invoke('project:open-dialog'),
+  newEditorWindow: () => ipcRenderer.send('window:new'),
+  takeInitialProjectPath: () => ipcRenderer.invoke('window:initial-project'),
+  setWindowProjectState: (state) => ipcRenderer.send('window:project-state', state),
   readProject: (path) => ipcRenderer.invoke('project:read', path),
   writeProject: (path, project) => ipcRenderer.invoke('project:write', path, project),
   autosaveProject: (project, mainPath) => ipcRenderer.invoke('project:autosave', project, mainPath),

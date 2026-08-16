@@ -25,6 +25,14 @@ files:
   - scripts/voiceover_worker.py
   - package.json
 
+fileAssociations:
+  - ext: kadr
+    name: Kadr Project
+    description: Kadr video editing project
+    role: Editor
+    rank: Owner
+    icon: icon.icns
+
 mac:
   category: public.app-category.video
   icon: build/icon.icns

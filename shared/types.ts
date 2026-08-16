@@ -477,6 +477,9 @@ export interface KadrApi {
 
   saveProjectDialog(currentName: string): Promise<string | null>
   openProjectDialog(): Promise<string | null>
+  newEditorWindow(): void
+  takeInitialProjectPath(): Promise<string | null>
+  setWindowProjectState(state: { path: string | null; name: string; dirty: boolean }): void
   readProject(path: string): Promise<Project>
   writeProject(path: string, project: Project): Promise<void>
   /** write <name>.autosave.kadr next to the project (atomic); returns path */

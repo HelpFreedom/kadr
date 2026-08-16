@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard, Menu, screen } from 'electron'
-import { join, dirname, basename, extname } from 'path'
-import { buildMenu } from './menu'
+import type { WebContents } from 'electron'
+import { join, dirname, basename, extname, resolve } from 'path'
+import { buildDockMenu, buildMenu } from './menu'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
 import { tmpdir, homedir } from 'os'
 import { createHash } from 'crypto'
@@ -95,7 +96,47 @@ process.on('uncaughtException', (err) => {
   console.error('[kadr] uncaught exception in main:', err)
 })
 
-let win: BrowserWindow | null = null
+const editorWindows = new Set<BrowserWindow>()
+const initialProjects = new Map<number, string>()
+const windowProjects = new Map<BrowserWindow, string>()
+const pendingProjectPaths: string[] = []
+
+function focusedEditorWindow(): BrowserWindow | null {
+  const focused = BrowserWindow.getFocusedWindow()
+  if (focused && editorWindows.has(focused)) return focused
+  return [...editorWindows].at(-1) ?? null
+}
+
+function senderWindow(sender: WebContents): BrowserWindow {
+  const owner = BrowserWindow.fromWebContents(sender)
+  if (!owner || !editorWindows.has(owner)) throw new Error('no editor window')
+  return owner
+}
+
+function sendTo(sender: WebContents, channel: string, ...args: unknown[]) {
+  if (!sender.isDestroyed()) sender.send(channel, ...args)
+}
+
+function projectKey(path: string): string {
+  return resolve(path)
+}
+
+function focusWindow(win: BrowserWindow) {
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+function openProjectWindow(path: string): BrowserWindow {
+  const key = projectKey(path)
+  app.addRecentDocument(key)
+  const existing = [...windowProjects].find(([win, current]) => !win.isDestroyed() && current === key)?.[0]
+  if (existing) {
+    focusWindow(existing)
+    return existing
+  }
+  return createWindow(key)
+}
 
 function safePreviewPosition(features: string): { x?: number; y?: number } {
   const values = new Map(
@@ -124,8 +165,8 @@ function safePreviewPosition(features: string): { x?: number; y?: number } {
   }
 }
 
-function createWindow() {
-  win = new BrowserWindow({
+function createWindow(initialProjectPath?: string): BrowserWindow {
+  const win = new BrowserWindow({
     width: 1500,
     height: 900,
     minWidth: 1000,
@@ -141,6 +182,20 @@ function createWindow() {
       contextIsolation: false,
       sandbox: false
     }
+  })
+  const windowId = win.webContents.id
+  editorWindows.add(win)
+  if (initialProjectPath) {
+    const key = projectKey(initialProjectPath)
+    initialProjects.set(windowId, key)
+    windowProjects.set(win, key)
+  }
+  win.on('closed', () => {
+    editorWindows.delete(win)
+    initialProjects.delete(windowId)
+    windowProjects.delete(win)
+    htmlExportAborts.get(windowId)?.abort()
+    void cleanupExport(windowId)
   })
   win.setMenuBarVisibility(false)
   win.webContents.setWindowOpenHandler(({ frameName, features }) => {
@@ -160,21 +215,31 @@ function createWindow() {
   win.webContents.on('did-create-window', (child, details) => {
     if (details.frameName === 'kadr-preview') child.setMenuBarVisibility(false)
   })
-  // a killed/crashed renderer leaves a dead window and an immortal main
-  // process (the running project is lost either way — autosave has it);
-  // exit cleanly so the next launch starts fresh instead of being blocked
+  // A renderer crash should close only its editor window. Other projects are
+  // independent and must keep running.
   win.webContents.on('render-process-gone', (_e, details) => {
     if (details.reason !== 'clean-exit') {
-      console.error('[kadr] renderer gone:', details.reason, '— exiting')
-      app.exit(1)
+      console.error('[kadr] renderer gone:', details.reason, '— closing window')
+      if (!win.isDestroyed()) win.destroy()
     }
   })
   if (process.env.ELECTRON_RENDERER_URL) {
-    win.loadURL(process.env.ELECTRON_RENDERER_URL)
+    void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    win.loadFile(join(__dirname, '../renderer/index.html'))
+    void win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  return win
 }
+
+// Finder and LaunchServices reuse the running process on macOS. Register the
+// handler before `ready`, otherwise a project dropped on the Dock or opened
+// while Kadr is closed can be lost.
+app.on('open-file', (event, path) => {
+  event.preventDefault()
+  if (extname(path).toLowerCase() !== '.kadr') return
+  if (!app.isReady()) pendingProjectPaths.push(projectKey(path))
+  else openProjectWindow(path)
+})
 
 /**
  * Wrap a Node read stream into a Web ReadableStream with guarded
@@ -282,15 +347,21 @@ app.whenReady().then(() => {
       return new Response('not found', { status: 404 })
     }
   })
-  Menu.setApplicationMenu(buildMenu(() => win))
+  Menu.setApplicationMenu(buildMenu(focusedEditorWindow, createWindow))
+  app.dock?.setMenu(buildDockMenu(createWindow))
   registerIpc()
-  registerClaudeIpc(() => win)
-  registerTranscribeIpc(() => win)
-  registerFragmentIpc(() => win)
-  registerVoiceoverIpc(() => win)
-  createWindow()
+  registerClaudeIpc()
+  registerTranscribeIpc()
+  registerFragmentIpc()
+  registerVoiceoverIpc()
+  if (pendingProjectPaths.length) {
+    for (const path of [...new Set(pendingProjectPaths)]) openProjectWindow(path)
+    pendingProjectPaths.length = 0
+  } else {
+    createWindow()
+  }
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (!editorWindows.size) createWindow()
   })
 })
 
@@ -305,9 +376,11 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  htmlExportAbort?.abort()
-  exportState?.muxer?.cancel()
-  void cleanupExport()
+  for (const controller of htmlExportAborts.values()) controller.abort()
+  for (const [windowId, state] of exportStates) {
+    state.muxer?.cancel()
+    void cleanupExport(windowId)
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -318,7 +391,7 @@ const MEDIA_FILTERS = [
 ]
 const PROJECT_FILTERS = [{ name: 'Kadr project', extensions: ['kadr'] }]
 
-let exportState: {
+type ExportState = {
   job: ExportJob
   videoTemp: string
   fh: fs.FileHandle | null
@@ -331,11 +404,12 @@ let exportState: {
   rawWss: import('ws').WebSocketServer | null
   rawChain: Promise<void>
   rawErr: Error | null
-} | null = null
-let htmlExportAbort: AbortController | null = null
+}
+const exportStates = new Map<number, ExportState>()
+const htmlExportAborts = new Map<number, AbortController>()
 
-function sendProgress(p: import('@shared/types').ExportProgress) {
-  win?.webContents.send('export:progress', p)
+function sendProgress(sender: WebContents, p: import('@shared/types').ExportProgress) {
+  sendTo(sender, 'export:progress', p)
 }
 
 // app-wide JSON stores (presets etc.) in userData — independent of the
@@ -347,7 +421,7 @@ const userStorePath = (name: string) =>
 const proxyDir = () => join(app.getPath('userData'), 'proxies')
 let proxyChain: Promise<unknown> = Promise.resolve()
 
-async function requestProxy(srcPath: string, duration: number): Promise<string> {
+async function requestProxy(sender: WebContents, srcPath: string, duration: number): Promise<string> {
   const stat = statSync(srcPath)
   const key = createHash('sha1')
     .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
@@ -367,7 +441,7 @@ async function requestProxy(srcPath: string, duration: number): Promise<string> 
     const tmp = join(proxyDir(), `${key}.part.mp4`)
     try {
       await makeProxy(srcPath, tmp, duration, (p) => {
-        win?.webContents.send('proxy:progress', { path: srcPath, progress: p })
+        sendTo(sender, 'proxy:progress', { path: srcPath, progress: p })
       })
       await fs.rename(tmp, out)
     } catch (err) {
@@ -377,7 +451,7 @@ async function requestProxy(srcPath: string, duration: number): Promise<string> 
   })
   proxyChain = job.catch(() => { /* keep the queue alive */ })
   await job
-  win?.webContents.send('proxy:progress', { path: srcPath, progress: 1 })
+  sendTo(sender, 'proxy:progress', { path: srcPath, progress: 1 })
   return out
 }
 
@@ -387,7 +461,7 @@ async function requestProxy(srcPath: string, duration: number): Promise<string> 
 const decodedDir = () => join(app.getPath('userData'), 'decoded')
 let decodedChain: Promise<unknown> = Promise.resolve()
 
-async function requestDecoded(srcPath: string, duration: number): Promise<string> {
+async function requestDecoded(sender: WebContents, srcPath: string, duration: number): Promise<string> {
   const stat = statSync(srcPath)
   const key = createHash('sha1')
     .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
@@ -407,7 +481,7 @@ async function requestDecoded(srcPath: string, duration: number): Promise<string
     const tmp = join(decodedDir(), `${key}.part.mp4`)
     try {
       await makeDecoded(srcPath, tmp, duration, (p) => {
-        win?.webContents.send('proxy:progress', { path: srcPath, progress: p })
+        sendTo(sender, 'proxy:progress', { path: srcPath, progress: p })
       })
       await fs.rename(tmp, out)
     } catch (err) {
@@ -417,7 +491,7 @@ async function requestDecoded(srcPath: string, duration: number): Promise<string
   })
   decodedChain = job.catch(() => { /* keep the queue alive */ })
   await job
-  win?.webContents.send('proxy:progress', { path: srcPath, progress: 1 })
+  sendTo(sender, 'proxy:progress', { path: srcPath, progress: 1 })
   return out
 }
 
@@ -426,6 +500,7 @@ const reverseDir = () => join(app.getPath('userData'), 'reversed')
 let reverseChain: Promise<unknown> = Promise.resolve()
 
 async function requestReversed(
+  sender: WebContents,
   srcPath: string,
   start: number,
   duration: number,
@@ -450,7 +525,7 @@ async function requestReversed(
     const tmp = join(reverseDir(), `${key}.part.${info.kind === 'video' ? 'mp4' : 'wav'}`)
     try {
       await makeReversed(srcPath, start, duration, tmp, info, join(reverseDir(), `${key}.tmp`), (p) => {
-        win?.webContents.send('reverse:progress', { path: srcPath, start, duration, progress: p })
+        sendTo(sender, 'reverse:progress', { path: srcPath, start, duration, progress: p })
       })
       await fs.rename(tmp, out)
     } catch (err) {
@@ -460,7 +535,7 @@ async function requestReversed(
   })
   reverseChain = job.catch(() => { /* keep the queue alive */ })
   await job
-  win?.webContents.send('reverse:progress', { path: srcPath, start, duration, progress: 1 })
+  sendTo(sender, 'reverse:progress', { path: srcPath, start, duration, progress: 1 })
   return out
 }
 
@@ -497,12 +572,46 @@ async function rememberDir(kind: string, filePath: string) {
 }
 
 function registerIpc() {
-  ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number) =>
-    requestProxy(srcPath, duration)
+  ipcMain.on('window:new', (event) => {
+    senderWindow(event.sender)
+    createWindow()
+  })
+
+  ipcMain.handle('window:initial-project', (event) => {
+    const path = initialProjects.get(event.sender.id) ?? null
+    initialProjects.delete(event.sender.id)
+    return path
+  })
+
+  ipcMain.on('window:project-state', (event, state: {
+    path: string | null
+    name: string
+    dirty: boolean
+  }) => {
+    const win = senderWindow(event.sender)
+    const path = typeof state.path === 'string' && state.path ? projectKey(state.path) : null
+    const name = typeof state.name === 'string' && state.name.trim() ? state.name.trim() : 'Untitled'
+    if (path) {
+      const changed = windowProjects.get(win) !== path
+      windowProjects.set(win, path)
+      if (changed) {
+        if (process.platform === 'darwin') win.setRepresentedFilename(path)
+        app.addRecentDocument(path)
+      }
+    } else {
+      windowProjects.delete(win)
+      if (process.platform === 'darwin') win.setRepresentedFilename('')
+    }
+    if (process.platform === 'darwin') win.setDocumentEdited(Boolean(state.dirty))
+    win.setTitle(`${name} — Kadr`)
+  })
+
+  ipcMain.handle('proxy:request', (event, srcPath: string, duration: number) =>
+    requestProxy(event.sender, srcPath, duration)
   )
 
-  ipcMain.handle('media:decoded', (_e, srcPath: string, duration: number) =>
-    requestDecoded(srcPath, duration)
+  ipcMain.handle('media:decoded', (event, srcPath: string, duration: number) =>
+    requestDecoded(event.sender, srcPath, duration)
   )
 
   ipcMain.handle('media:loudness', (_e, srcPath: string, start: number, duration: number) =>
@@ -511,9 +620,9 @@ function registerIpc() {
 
   ipcMain.handle(
     'media:reverse',
-    (_e, srcPath: string, start: number, duration: number, info: {
+    (event, srcPath: string, start: number, duration: number, info: {
       kind: string; hasAudio: boolean; width: number; height: number; fps: number
-    }) => requestReversed(srcPath, start, duration, info)
+    }) => requestReversed(event.sender, srcPath, start, duration, info)
   )
 
   ipcMain.handle('store:read', async (_e, name: string) => {
@@ -528,8 +637,8 @@ function registerIpc() {
     await fs.writeFile(userStorePath(name), JSON.stringify(data, null, 1))
   })
 
-  ipcMain.handle('media:open-dialog', async () => {
-    const r = await dialog.showOpenDialog(win!, {
+  ipcMain.handle('media:open-dialog', async (event) => {
+    const r = await dialog.showOpenDialog(senderWindow(event.sender), {
       properties: ['openFile', 'multiSelections'],
       defaultPath: await lastDir('media'),
       filters: MEDIA_FILTERS
@@ -666,8 +775,8 @@ function registerIpc() {
     return writeImported(out, buf)
   })
 
-  ipcMain.handle('dialog:pick-dir', async (_e, title?: string) => {
-    const r = await dialog.showOpenDialog(win!, {
+  ipcMain.handle('dialog:pick-dir', async (event, title?: string) => {
+    const r = await dialog.showOpenDialog(senderWindow(event.sender), {
       title: title || undefined,
       properties: ['openDirectory', 'createDirectory']
     })
@@ -699,8 +808,8 @@ function registerIpc() {
     return out
   })
 
-  ipcMain.handle('project:save-dialog', async (_e, currentName: string) => {
-    const r = await dialog.showSaveDialog(win!, {
+  ipcMain.handle('project:save-dialog', async (event, currentName: string) => {
+    const r = await dialog.showSaveDialog(senderWindow(event.sender), {
       defaultPath: join(await lastDir('project'), `${currentName}.kadr`),
       filters: PROJECT_FILTERS
     })
@@ -709,8 +818,8 @@ function registerIpc() {
     return r.filePath
   })
 
-  ipcMain.handle('project:open-dialog', async () => {
-    const r = await dialog.showOpenDialog(win!, {
+  ipcMain.handle('project:open-dialog', async (event) => {
+    const r = await dialog.showOpenDialog(senderWindow(event.sender), {
       properties: ['openFile'],
       defaultPath: await lastDir('project'),
       filters: PROJECT_FILTERS
@@ -731,11 +840,11 @@ function registerIpc() {
   // periodic safety net: <name>.autosave.kadr next to the saved project
   // (Downloads for never-saved ones); tmp+rename so a crash mid-write can
   // never leave a torn file
-  ipcMain.handle('project:autosave', async (_e, project: Project, mainPath: string | null) => {
+  ipcMain.handle('project:autosave', async (event, project: Project, mainPath: string | null) => {
     const dir = mainPath ? dirname(mainPath) : app.getPath('downloads')
     const base = mainPath
       ? basename(mainPath, '.kadr')
-      : (project.name || 'Untitled').replace(/[^\p{L}\p{N}._ -]/gu, '').trim() || 'Untitled'
+      : `${(project.name || 'Untitled').replace(/[^\p{L}\p{N}._ -]/gu, '').trim() || 'Untitled'}.${event.sender.id}`
     const out = join(dir, `${base}.autosave.kadr`)
     const tmp = `${out}.tmp`
     await fs.writeFile(tmp, JSON.stringify(project, null, 1), 'utf-8')
@@ -743,8 +852,8 @@ function registerIpc() {
     return out
   })
 
-  ipcMain.handle('export:dialog', async (_e, defaultName: string, ext: string) => {
-    const r = await dialog.showSaveDialog(win!, {
+  ipcMain.handle('export:dialog', async (event, defaultName: string, ext: string) => {
+    const r = await dialog.showSaveDialog(senderWindow(event.sender), {
       defaultPath: join(await lastDir('export'), `${defaultName}.${ext}`),
       filters: [{ name: ext.toUpperCase(), extensions: [ext] }]
     })
@@ -753,55 +862,60 @@ function registerIpc() {
     return r.filePath
   })
 
-  ipcMain.handle('html-player:export', async (_e, request: HtmlPlayerExportRequest) => {
-    htmlExportAbort?.abort()
+  ipcMain.handle('html-player:export', async (event, request: HtmlPlayerExportRequest) => {
+    const windowId = event.sender.id
+    htmlExportAborts.get(windowId)?.abort()
     const controller = new AbortController()
-    htmlExportAbort = controller
+    htmlExportAborts.set(windowId, controller)
     try {
       const output = await writeHtmlPlayerExport(request, {
         bundlePath: join(__dirname, '..', 'html-player', 'player.js'),
         signal: controller.signal,
         bundleFragments,
-        onProgress: (progress) => sendProgress({ phase: 'files', progress: 0.15 + progress * 0.85 })
+        onProgress: (progress) => sendProgress(event.sender, {
+          phase: 'files', progress: 0.15 + progress * 0.85
+        })
       })
-      sendProgress({ phase: 'done', progress: 1 })
+      sendProgress(event.sender, { phase: 'done', progress: 1 })
       return output
     } catch (error: any) {
       const cancelled = controller.signal.aborted || error?.message === 'cancelled'
-      sendProgress({
+      sendProgress(event.sender, {
         phase: cancelled ? 'cancelled' : 'error',
         progress: 0,
         message: String(error?.message ?? error)
       })
       throw error
     } finally {
-      if (htmlExportAbort === controller) htmlExportAbort = null
+      if (htmlExportAborts.get(windowId) === controller) htmlExportAborts.delete(windowId)
     }
   })
 
-  ipcMain.handle('export:begin', async (_e, job: ExportJob) => {
-    await cleanupExport()
-    const videoTemp = join(tmpdir(), `kadr-export-${Date.now()}.mp4`)
+  ipcMain.handle('export:begin', async (event, job: ExportJob) => {
+    const windowId = event.sender.id
+    await cleanupExport(windowId)
+    const videoTemp = join(tmpdir(), `kadr-export-${windowId}-${Date.now()}.mp4`)
     const fh = job.preset.audioOnly ? null : await fs.open(videoTemp, 'w')
-    exportState = {
+    exportStates.set(windowId, {
       job, videoTemp, fh, muxer: null, raw: null, rawEncoded: false,
       rawWss: null, rawChain: Promise.resolve(), rawErr: null
-    }
+    })
   })
 
-  ipcMain.handle('export:video-chunk', async (_e, data: ArrayBuffer, position: number) => {
-    if (!exportState?.fh) throw new Error('no export in progress')
-    await exportState.fh.write(Buffer.from(data), 0, data.byteLength, position)
+  ipcMain.handle('export:video-chunk', async (event, data: ArrayBuffer, position: number) => {
+    const state = exportStates.get(event.sender.id)
+    if (!state?.fh) throw new Error('no export in progress')
+    await state.fh.write(Buffer.from(data), 0, data.byteLength, position)
   })
 
   // direct ffmpeg encode: raw RGBA frames from the renderer over stdin;
   // returns a local WebSocket port for the frame stream (0 = use IPC)
   ipcMain.handle('export:raw-begin', async (
-    _e, width: number, height: number, fps: number,
+    event, width: number, height: number, fps: number,
     outWidth?: number, outHeight?: number
   ) => {
-    if (!exportState) throw new Error('no export in progress')
-    const st = exportState
+    const st = exportStates.get(event.sender.id)
+    if (!st) throw new Error('no export in progress')
     await st.fh?.close()
     st.fh = null
     const preset = st.job.preset
@@ -840,9 +954,9 @@ function registerIpc() {
   })
 
   // preload encoded the video itself — adopt its file for the mux stage
-  ipcMain.handle('export:use-video', async (_e, path: string) => {
-    if (!exportState) throw new Error('no export in progress')
-    const st = exportState
+  ipcMain.handle('export:use-video', async (event, path: string) => {
+    const st = exportStates.get(event.sender.id)
+    if (!st) throw new Error('no export in progress')
     await st.fh?.close()
     st.fh = null
     if (st.videoTemp !== path) {
@@ -852,14 +966,15 @@ function registerIpc() {
     st.rawEncoded = true
   })
 
-  ipcMain.handle('export:raw-frame', async (_e, data: ArrayBuffer) => {
-    if (!exportState?.raw) throw new Error('no raw encoder')
-    await exportState.raw.write(Buffer.from(data))
+  ipcMain.handle('export:raw-frame', async (event, data: ArrayBuffer) => {
+    const st = exportStates.get(event.sender.id)
+    if (!st?.raw) throw new Error('no raw encoder')
+    await st.raw.write(Buffer.from(data))
   })
 
-  ipcMain.handle('export:raw-end', async () => {
-    if (!exportState?.raw) throw new Error('no raw encoder')
-    const st = exportState
+  ipcMain.handle('export:raw-end', async (event) => {
+    const st = exportStates.get(event.sender.id)
+    if (!st?.raw) throw new Error('no raw encoder')
     await st.rawChain
     if (st.rawErr) throw st.rawErr
     st.rawWss?.close()
@@ -868,9 +983,10 @@ function registerIpc() {
     st.raw = null
   })
 
-  ipcMain.handle('export:video-done', async () => {
-    if (!exportState) throw new Error('no export in progress')
-    const st = exportState
+  ipcMain.handle('export:video-done', async (event) => {
+    const windowId = event.sender.id
+    const st = exportStates.get(windowId)
+    if (!st) throw new Error('no export in progress')
     await st.fh?.close()
     st.fh = null
     st.muxer = new ExportMuxer()
@@ -879,34 +995,36 @@ function registerIpc() {
       const job = st.rawEncoded
         ? { ...st.job, preset: { ...st.job.preset, ffmpegVideo: 'copy' as const } }
         : st.job
-      await st.muxer.run(job, st.videoTemp, sendProgress)
-      sendProgress({ phase: 'done', progress: 1 })
+      await st.muxer.run(job, st.videoTemp, (progress) => sendProgress(event.sender, progress))
+      sendProgress(event.sender, { phase: 'done', progress: 1 })
     } catch (err: any) {
-      sendProgress({
+      sendProgress(event.sender, {
         phase: err?.message === 'cancelled' ? 'cancelled' : 'error',
         progress: 0,
         message: String(err?.message ?? err)
       })
     } finally {
-      await cleanupExport()
+      await cleanupExport(windowId)
     }
   })
 
-  ipcMain.handle('export:cancel', async () => {
-    htmlExportAbort?.abort()
-    exportState?.raw?.kill()
-    exportState?.muxer?.cancel()
-    if (exportState && !exportState.muxer) {
-      await cleanupExport()
-      sendProgress({ phase: 'cancelled', progress: 0 })
+  ipcMain.handle('export:cancel', async (event) => {
+    const windowId = event.sender.id
+    htmlExportAborts.get(windowId)?.abort()
+    const st = exportStates.get(windowId)
+    st?.raw?.kill()
+    st?.muxer?.cancel()
+    if (st && !st.muxer) {
+      await cleanupExport(windowId)
+      sendProgress(event.sender, { phase: 'cancelled', progress: 0 })
     }
   })
 }
 
-async function cleanupExport() {
-  if (!exportState) return
-  const st = exportState
-  exportState = null
+async function cleanupExport(windowId: number) {
+  const st = exportStates.get(windowId)
+  if (!st) return
+  exportStates.delete(windowId)
   st.raw?.kill()
   st.rawWss?.close()
   try { await st.fh?.close() } catch { /* already closed */ }

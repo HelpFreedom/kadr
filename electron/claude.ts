@@ -187,6 +187,16 @@ function startBridge(
 
 function which(cmd: string): Promise<string | null> {
   return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      // `where` lists every PATH match; prefer something Windows can actually
+      // exec (npm ships an extensionless sh shim next to claude.cmd)
+      execFile('where.exe', [cmd], (err, stdout) => {
+        if (err) return resolve(null)
+        const lines = stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+        resolve(lines.find((l) => /\.(exe|cmd|bat)$/i.test(l)) ?? lines[0] ?? null)
+      })
+      return
+    }
     execFile('/bin/sh', ['-c', `command -v ${cmd}`], (err, stdout) => {
       resolve(err ? null : stdout.trim() || null)
     })
@@ -307,21 +317,33 @@ async function spawnSession(
   try {
     // lazy import: node-pty is native — a load failure must not break the app
     const pty = await import('node-pty')
-    // Watchdog wrapper: claude runs exec'd in the pty foreground (same pid
-    // as the wrapper, TUI unaffected); a background subshell nukes the whole
-    // process group if this Electron process dies hard — otherwise a busy
-    // claude tree survives holding inherited Chromium sockets (CDP port)
-    // and blocks the next launch.
-    const wrapper =
-      `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
-      `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
-    const p = pty.spawn('/bin/bash', ['-c', wrapper, bin, ...args], {
+    const ptyOpts = {
       name: 'xterm-256color',
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
       cwd: dir,
       env: sessionEnv(cfg.env)
-    })
+    }
+    let p: IPty
+    if (process.platform === 'win32') {
+      // ConPTY: no bash watchdog — closing the pty tears down the attached
+      // console tree, so a hard Electron death takes claude with it. npm's
+      // .cmd shim can't be CreateProcess'd directly; route through cmd.exe.
+      const viaCmd = /\.(cmd|bat)$/i.test(bin)
+      p = viaCmd
+        ? pty.spawn(process.env.ComSpec || 'cmd.exe', ['/c', bin, ...args], ptyOpts)
+        : pty.spawn(bin, args, ptyOpts)
+    } else {
+      // Watchdog wrapper: claude runs exec'd in the pty foreground (same pid
+      // as the wrapper, TUI unaffected); a background subshell nukes the whole
+      // process group if this Electron process dies hard — otherwise a busy
+      // claude tree survives holding inherited Chromium sockets (CDP port)
+      // and blocks the next launch.
+      const wrapper =
+        `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
+        `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
+      p = pty.spawn('/bin/bash', ['-c', wrapper, bin, ...args], ptyOpts)
+    }
     // publish BEFORE wiring the handlers: data emitted between spawn and the
     // assignment would otherwise be dropped by the identity guard below
     const mine: Session = { pty: p, server: bridge.server, port: bridge.port }
@@ -351,13 +373,19 @@ function killSession() {
   if (!session) return
   const s = session
   session = null
-  // HUP the whole process group (claude + its MCP server children), then
-  // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
-  const pid = s.pty.pid
-  try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
-  setTimeout(() => {
-    try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
-  }, 1500)
+  if (process.platform === 'win32') {
+    // ConPTY teardown kills the attached console tree; group signals with a
+    // negative pid are a POSIX-only concept and throw on Windows
+    try { s.pty.kill() } catch { /* dead */ }
+  } else {
+    // HUP the whole process group (claude + its MCP server children), then
+    // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
+    const pid = s.pty.pid
+    try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
+    setTimeout(() => {
+      try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
+    }, 1500)
+  }
   s.server.close()
 }
 

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useT } from '@/i18n'
-import { useEditor } from '@/state/store'
 import { Preview } from './Preview'
 import { TransportBar } from './TransportBar'
 
@@ -71,28 +70,11 @@ function preparePopup(popup: Window, title: string) {
   return root
 }
 
-function handlePreviewKeys(e: KeyboardEvent) {
-  const tag = (e.target as HTMLElement | null)?.tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-  const state = useEditor.getState()
-  if (e.code === 'Space') {
-    e.preventDefault()
-    state.setPlaying(!state.playing)
-  } else if (e.code === 'ArrowLeft') {
-    e.preventDefault()
-    state.setPlayhead(state.playhead - (e.shiftKey ? 1 : 1 / state.project.fps))
-  } else if (e.code === 'ArrowRight') {
-    e.preventDefault()
-    state.setPlayhead(state.playhead + (e.shiftKey ? 1 : 1 / state.project.fps))
-  } else if (e.code === 'Home') {
-    e.preventDefault()
-    state.setPlayhead(0)
-  }
-}
-
 export function PreviewWindow({
+  onKeyDown,
   onDetachedChange
 }: {
+  onKeyDown: (e: KeyboardEvent) => void
   onDetachedChange: (detached: boolean) => void
 }) {
   const t = useT()
@@ -134,7 +116,7 @@ export function PreviewWindow({
 
     const root = preparePopup(popup, t('previewWindowTitle'))
     popupRef.current = popup
-    popup.addEventListener('keydown', handlePreviewKeys)
+    popup.addEventListener('keydown', onKeyDown)
     popup.addEventListener('beforeunload', () => {
       rememberBounds(popup)
       if (popupRef.current === popup) popupRef.current = null
@@ -142,7 +124,7 @@ export function PreviewWindow({
     }, { once: true })
     setPortalRoot(root)
     popup.focus()
-  }, [t])
+  }, [onKeyDown, t])
 
   useEffect(() => {
     const popup = popupRef.current

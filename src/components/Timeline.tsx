@@ -15,6 +15,7 @@ import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/medi
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
 import { useVoiceoverUi } from './VoiceoverStudio'
+import { hasPrimaryModifier } from '@/shortcuts'
 
 /** Transcribe the selected range (Shift-drag on the ruler) into SRT/TXT. */
 function TranscribeRangeButton() {
@@ -778,7 +779,7 @@ interface ViewWindow {
 // groups a burst of wheel notches over one gain slider into a single undo entry
 const gainWheelMark = { id: '', ts: 0 }
 
-// Ctrl-drag speed range and the round multipliers the drag snaps to.
+// Primary-modifier drag speed range and the round multipliers it snaps to.
 // Preview playback is clamped to Chromium's 0.0625–16× element range and
 // relies on resync seeks beyond it; export is exact at any speed.
 const SPEED_MIN = 0.02
@@ -847,7 +848,7 @@ function TrackRow({
 
   const onLaneDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return
-    if (e.ctrlKey) {
+    if (hasPrimaryModifier(e)) {
       const rect = e.currentTarget.getBoundingClientRect()
       const time = (e.clientX - rect.left) / useEditor.getState().zoom
       useEditor.getState().closeGapAt(track.id, time)
@@ -1084,7 +1085,7 @@ function ClipView({
   const drag = useRef<DragState | null>(null)
   const waveRef = useRef<HTMLCanvasElement>(null)
   const [levelDrag, setLevelDrag] = useState<number | null>(null)
-  // live ×N readout during a Ctrl speed drag; highlighted when snapped
+  // live ×N readout during a modifier speed drag; highlighted when snapped
   const [speedBadge, setSpeedBadge] =
     useState<{ x: number; y: number; speed: number; snapped: boolean } | null>(null)
 
@@ -1146,8 +1147,8 @@ function ClipView({
     e.stopPropagation()
     const st = useEditor.getState()
     const linkedIds = withLinked(st.project, [clip.id])
-    if (e.ctrlKey) {
-      // Ctrl+drag near EITHER edge = speed (Vegas-style time stretch) —
+    if (hasPrimaryModifier(e)) {
+      // Primary-modifier drag near EITHER edge = speed (Vegas-style time stretch) —
       // the same gesture as the extend handles, but forgiving about where
       // exactly the clip is grabbed
       const rect = e.currentTarget.getBoundingClientRect()
@@ -1306,8 +1307,8 @@ function ClipView({
 
   // ---------------------------------------------------- extend/speed drag
   // Works from BOTH clip ends. Right: the start stays put (resize = loop-
-  // extend, Ctrl = speed). Left: the RIGHT edge stays anchored (resize =
-  // trim-in, Ctrl = speed with the start moving instead).
+  // extend, primary modifier = speed). Left: the RIGHT edge stays anchored
+  // (resize = trim-in, primary modifier = speed with the start moving).
   const startExtendDrag = (edge: 'left' | 'right') =>
     (e: React.PointerEvent<HTMLDivElement>) => {
     if (track.locked || e.button !== 0) return
@@ -1315,7 +1316,7 @@ function ClipView({
     e.preventDefault()
     const st = useEditor.getState()
     if (!selected) st.select([clip.id])
-    const speedMode = e.ctrlKey && !!asset && asset.kind !== 'image'
+    const speedMode = hasPrimaryModifier(e) && !!asset && asset.kind !== 'image'
     const leftTrim = edge === 'left' && !speedMode
     st.pushHistory(speedMode ? 'hSpeed' : leftTrim ? 'hTrim' : 'hResize')
     const origStart = clip.start
@@ -1530,12 +1531,12 @@ function ClipView({
           />
           <div
             className="extend-handle"
-            title="Drag: resize/loop · Ctrl: speed"
+            title={t('clipResizeLoopHint')}
             onPointerDown={startExtendDrag('right')}
           />
           <div
             className="extend-handle left"
-            title="Drag: resize · Ctrl: speed"
+            title={t('clipResizeHint')}
             onPointerDown={startExtendDrag('left')}
           />
         </>

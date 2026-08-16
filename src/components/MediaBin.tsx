@@ -4,6 +4,7 @@ import { useProxyProgress } from '@/engine/proxy'
 import { importFiles, dropPayload, dragHasMedia, dropUsable, importDrop, useImportUi } from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useT } from '@/i18n'
+import { hasPrimaryModifier } from '@/shortcuts'
 
 export function MediaBin() {
   const t = useT()
@@ -43,9 +44,9 @@ export function MediaBin() {
     void importDrop(payload, null)
   }
 
-  // click selects, Ctrl toggles, Shift extends from the last clicked tile
+  // Click selects, the platform modifier toggles, Shift extends a range.
   const clickTile = (e: React.MouseEvent, id: string) => {
-    if (e.ctrlKey || e.metaKey) {
+    if (hasPrimaryModifier(e)) {
       setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
     } else if (e.shiftKey && lastClick.current) {
       const order = assets.map((a) => a.id)

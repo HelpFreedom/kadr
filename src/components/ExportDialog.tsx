@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ExportProgress } from '@shared/types'
+import { DEFAULT_HTML_PLAYER_SETTINGS } from '@shared/types'
+import type { ExportProgress, HtmlPlayerSettings } from '@shared/types'
 import { PRESETS } from '@/presets'
 import { startExport, type ExportHandle } from '@/engine/exporter'
 import { useEditor, useSettings } from '@/state/store'
@@ -24,6 +25,9 @@ export function ExportDialog() {
   const [motionBlur, setMotionBlur] = useState(true)
   const [frameBlending, setFrameBlending] = useState(true)
   const [fastEncoder, setFastEncoder] = useState(false)
+  const [htmlPlayerSettings, setHtmlPlayerSettings] = useState<HtmlPlayerSettings>(
+    () => ({ ...DEFAULT_HTML_PLAYER_SETTINGS })
+  )
   const [status, setStatus] = useState<Status>({ kind: 'idle' })
   const handle = useRef<ExportHandle | null>(null)
 
@@ -53,6 +57,7 @@ export function ExportDialog() {
           s.project,
           parentDir,
           lang,
+          htmlPlayerSettings,
           (progress) => setStatus({ kind: 'running', ...progress })
         )
         setStatus({ kind: 'done', path })
@@ -136,6 +141,41 @@ export function ExportDialog() {
         {htmlPlayer
           ? <div className="dim html-player-description">{t('htmlPlayerDescription')}</div>
           : !range && <div className="dim">{t('rangeHint')}</div>}
+        {htmlPlayer && (
+          <fieldset className="html-player-settings" disabled={running}>
+            <legend>{t('htmlPlayerSettings')}</legend>
+            <label className="anim-check export-mb">
+              <input
+                type="checkbox"
+                checked={htmlPlayerSettings.showTimeline}
+                onChange={(e) => setHtmlPlayerSettings((current) => ({
+                  ...current, showTimeline: e.target.checked
+                }))}
+              />
+              <span className="export-mb-label">{t('htmlPlayerShowTimeline')}</span>
+            </label>
+            <label className="anim-check export-mb">
+              <input
+                type="checkbox"
+                checked={htmlPlayerSettings.allowSeeking}
+                onChange={(e) => setHtmlPlayerSettings((current) => ({
+                  ...current, allowSeeking: e.target.checked
+                }))}
+              />
+              <span className="export-mb-label">{t('htmlPlayerAllowSeeking')}</span>
+            </label>
+            <label className="anim-check export-mb">
+              <input
+                type="checkbox"
+                checked={htmlPlayerSettings.showControls}
+                onChange={(e) => setHtmlPlayerSettings((current) => ({
+                  ...current, showControls: e.target.checked
+                }))}
+              />
+              <span className="export-mb-label">{t('htmlPlayerShowControls')}</span>
+            </label>
+          </fieldset>
+        )}
         {!htmlPlayer && <label className="anim-check export-mb">
           <input
             type="checkbox"

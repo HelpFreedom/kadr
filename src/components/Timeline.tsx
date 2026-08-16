@@ -11,7 +11,11 @@ import { EDGE_TRANSITIONS } from '@/gl/edges'
 import { CtxMenu } from './CtxMenu'
 import { reverseClip, useReverseUi } from '@/engine/reverse'
 import { normalizeClip, useNormalizeUi } from '@/engine/normalize'
-import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/mediaImport'
+import {
+  clearMediaDropPreview, dragHasMedia, dropPayload, dropUsable,
+  getInternalMediaDragAssetId, importDrop, showMediaDropPreview, useMediaDropUi,
+  type MediaDropGhost
+} from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
 import { useVoiceoverUi } from './VoiceoverStudio'
@@ -160,9 +164,10 @@ export function Timeline({ height }: { height: number }) {
   const timelineRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [view, setView] = useState({ start: 0, end: 60 })
+  const [viewportW, setViewportW] = useState(800)
   const [menu, setMenu] = useState<MenuState | null>(null)
 
-  const contentW = Math.max(800, (duration + 30) * zoom)
+  const contentW = Math.max(800, viewportW, (duration + 30) * zoom)
 
   useEffect(() => {
     const el = scrollRef.current
@@ -173,10 +178,12 @@ export function Timeline({ height }: { height: number }) {
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const z = useEditor.getState().zoom
+        const visibleW = Math.max(0, el.clientWidth - useSettings.getState().trackHeaderW)
         const next = {
           start: el.scrollLeft / z,
-          end: (el.scrollLeft + el.clientWidth - useSettings.getState().trackHeaderW) / z
+          end: (el.scrollLeft + visibleW) / z
         }
+        setViewportW((prev) => Math.abs(prev - visibleW) < 0.5 ? prev : visibleW)
         setView((prev) =>
           Math.abs(prev.start - next.start) < 0.001 && Math.abs(prev.end - next.end) < 0.001
             ? prev
@@ -243,9 +250,11 @@ export function Timeline({ height }: { height: number }) {
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
+    const visibleW = Math.max(0, el.clientWidth - headerW)
+    setViewportW((prev) => Math.abs(prev - visibleW) < 0.5 ? prev : visibleW)
     setView({
       start: el.scrollLeft / zoom,
-      end: (el.scrollLeft + el.clientWidth - headerW) / zoom
+      end: (el.scrollLeft + visibleW) / zoom
     })
   }, [zoom, headerW])
 
@@ -282,11 +291,13 @@ export function Timeline({ height }: { height: number }) {
   const onAnyDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     if (e.defaultPrevented) return
     if (e.dataTransfer.types.includes('kadr/asset') || dragHasMedia(e)) {
+      clearMediaDropPreview()
       e.preventDefault()
       e.dataTransfer.dropEffect = 'copy'
     }
   }
   const onAnyDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    clearMediaDropPreview()
     if (e.defaultPrevented) return
     const sc = e.currentTarget
     const rect = sc.getBoundingClientRect()
@@ -802,6 +813,7 @@ function TrackRow({
   const t = useT()
   const reorder = useRef<{ pushed: boolean } | null>(null)
   const gainRef = useRef<HTMLInputElement>(null)
+  const dropGhost = useMediaDropUi((s) => s.ghosts.find((ghost) => ghost.trackId === track.id))
 
   // Option+wheel over the volume/opacity slider: precise ±1%. A plain
   // two-finger gesture must keep scrolling the timeline on macOS.
@@ -828,6 +840,7 @@ function TrackRow({
   }, [track.id, trackH < 46]) // the slider row mounts only when tall enough
 
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    clearMediaDropPreview()
     const rect = e.currentTarget.getBoundingClientRect()
     const time = Math.max(0, (e.clientX - rect.left) / useEditor.getState().zoom)
     const assetId = e.dataTransfer.getData('kadr/asset')
@@ -888,7 +901,7 @@ function TrackRow({
   }
 
   return (
-    <div className="tl-row" style={{ height: trackH }}>
+    <div className={dropGhost ? 'tl-row media-drop-target' : 'tl-row'} style={{ height: trackH }}>
       <div
         className={`tl-head track-head ${track.kind}`}
         style={{ width: headerW, height: trackH }}
@@ -951,18 +964,93 @@ function TrackRow({
         )}
       </div>
       <div
-        className={`lane ${track.kind}`}
+        className={`lane ${track.kind}${dropGhost ? ' media-drop-target' : ''}`}
         data-lane={track.id}
         style={{ width: contentW, height: trackH }}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes('kadr/asset') || dragHasMedia(e)) {
             e.preventDefault()
             e.dataTransfer.dropEffect = 'copy'
+            const rect = e.currentTarget.getBoundingClientRect()
+            const state = useEditor.getState()
+            const start = Math.max(0, (e.clientX - rect.left) / state.zoom)
+            const assetId = getInternalMediaDragAssetId() || e.dataTransfer.getData('kadr/asset')
+            const asset = assetId ? state.project.assets.find((item) => item.id === assetId) : null
+
+            if (!asset) {
+              showMediaDropPreview([{
+                trackId: track.id,
+                start,
+                duration: Math.max(1, 96 / state.zoom),
+                label: t('dropImportPreview'),
+                kind: 'external',
+                blocked: track.locked
+              }])
+              return
+            }
+
+            const wantKind = asset.kind === 'audio' ? 'audio' : 'video'
+            const primaryTrack = track.kind === wantKind && !track.locked
+              ? track
+              : state.project.tracks.find((candidate) => candidate.kind === wantKind && !candidate.locked)
+            const duration = asset.kind === 'image' ? 5 : asset.duration
+            if (!primaryTrack) {
+              showMediaDropPreview([{
+                trackId: track.id,
+                start,
+                duration,
+                label: asset.name,
+                kind: wantKind,
+                blocked: true
+              }])
+              return
+            }
+
+            const ghosts: MediaDropGhost[] = [{
+              trackId: primaryTrack.id,
+              start,
+              duration,
+              label: asset.name,
+              kind: wantKind
+            }]
+            if (asset.kind === 'video' && asset.hasAudio) {
+              const audioTrack = state.project.tracks.find(
+                (candidate) => candidate.kind === 'audio' && !candidate.locked
+              )
+              if (audioTrack) ghosts.push({
+                trackId: audioTrack.id,
+                start,
+                duration,
+                label: `🔗 ${asset.name}`,
+                kind: 'audio',
+                secondary: true
+              })
+            }
+            showMediaDropPreview(ghosts)
           }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) clearMediaDropPreview()
         }}
         onDrop={onDrop}
         onPointerDown={onLaneDown}
       >
+        {dropGhost && (
+          <div
+            className={[
+              'media-drop-preview', dropGhost.kind,
+              dropGhost.secondary ? 'secondary' : '',
+              dropGhost.blocked ? 'blocked' : ''
+            ].filter(Boolean).join(' ')}
+            style={{
+              left: dropGhost.start * useEditor.getState().zoom,
+              width: Math.max(24, dropGhost.duration * useEditor.getState().zoom)
+            }}
+          >
+            <span>{dropGhost.blocked ? '⛔ ' : ''}{dropGhost.label}</span>
+            <small>{tickLabel(dropGhost.start)}</small>
+          </div>
+        )}
         {track.clips.map((c) => (
           <ClipView key={c.id} clip={c} track={track} laneHeight={trackH} view={view} onMenu={onMenu} />
         ))}

@@ -1,7 +1,10 @@
 import { useRef, useState } from 'react'
 import { useEditor } from '@/state/store'
 import { useProxyProgress } from '@/engine/proxy'
-import { importFiles, dropPayload, dragHasMedia, dropUsable, importDrop, useImportUi } from '@/engine/mediaImport'
+import {
+  beginInternalMediaDrag, endInternalMediaDrag, importFiles, dropPayload,
+  dragHasMedia, dropUsable, importDrop, useImportUi
+} from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useT } from '@/i18n'
 import { hasPrimaryModifier } from '@/shortcuts'
@@ -116,9 +119,11 @@ export function MediaBin() {
             title={a.path}
             draggable
             onDragStart={(e) => {
+              beginInternalMediaDrag(a.id)
               e.dataTransfer.setData('kadr/asset', a.id)
               e.dataTransfer.effectAllowed = 'copy'
             }}
+            onDragEnd={endInternalMediaDrag}
             onClick={(e) => clickTile(e, a.id)}
             onDoubleClick={() => {
               const s = useEditor.getState()

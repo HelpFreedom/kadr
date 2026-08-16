@@ -6,8 +6,9 @@
   "author": "Black Triangle",
   "license": "GPL-3.0",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "dev": "npm run build:html-player && electron-vite dev",
+    "build": "electron-vite build && npm run build:html-player",
+    "build:html-player": "vite build --config vite.html-player.config.ts",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
     "postinstall": "electron-rebuild -f -w node-pty"

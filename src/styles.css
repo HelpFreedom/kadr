@@ -1699,6 +1699,8 @@ button.danger:hover { background: #944; }
 .modal h2 { margin: 0 0 14px; font-size: 16px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 .export-progress progress { width: 100%; }
+.html-player-description { margin: 8px 0 12px; line-height: 1.4; }
+.export-output-path { margin-top: 5px; overflow-wrap: anywhere; font-size: 11px; }
 .export-ok { color: #7fce8a; margin-top: 10px; }
 .export-err { color: #ff7a7a; margin-top: 10px; word-break: break-word; }
 

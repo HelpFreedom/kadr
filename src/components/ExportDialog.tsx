@@ -2,19 +2,23 @@ import { useEffect, useRef, useState } from 'react'
 import type { ExportProgress } from '@shared/types'
 import { PRESETS } from '@/presets'
 import { startExport, type ExportHandle } from '@/engine/exporter'
-import { useEditor } from '@/state/store'
+import { useEditor, useSettings } from '@/state/store'
 import { useT } from '@/i18n'
+import { exportHtmlPlayer } from '@/features/htmlPlayer/export'
+
+const HTML_PLAYER_ID = 'html-player'
 
 type Status =
   | { kind: 'idle' }
   | { kind: 'running'; phase: ExportProgress['phase']; progress: number }
-  | { kind: 'done' }
+  | { kind: 'done'; path?: string }
   | { kind: 'error'; message: string }
   | { kind: 'cancelled' }
 
 export function ExportDialog() {
   const t = useT()
   const open = useEditor((s) => s.exportOpen)
+  const lang = useSettings((s) => s.lang)
   const range = useEditor((s) => s.range)
   const [presetId, setPresetId] = useState(PRESETS[0].id)
   const [motionBlur, setMotionBlur] = useState(true)
@@ -34,10 +38,31 @@ export function ExportDialog() {
 
   if (!open) return null
   const running = status.kind === 'running'
+  const htmlPlayer = presetId === HTML_PLAYER_ID
 
   async function begin() {
-    const preset = PRESETS.find((p) => p.id === presetId)!
     const s = useEditor.getState()
+    if (htmlPlayer) {
+      const parentDir = await window.kadr.pickDirectory(t('htmlPlayerPickFolder'))
+      if (!parentDir) return
+      s.setPlaying(false)
+      handle.current = null
+      setStatus({ kind: 'running', phase: 'files', progress: 0 })
+      try {
+        const path = await exportHtmlPlayer(
+          s.project,
+          parentDir,
+          lang,
+          (progress) => setStatus({ kind: 'running', ...progress })
+        )
+        setStatus({ kind: 'done', path })
+      } catch (err: any) {
+        if (String(err?.message).includes('cancelled')) setStatus({ kind: 'cancelled' })
+        else setStatus({ kind: 'error', message: String(err?.message ?? err) })
+      }
+      return
+    }
+    const preset = PRESETS.find((p) => p.id === presetId)!
     const ext = preset.container
     const out = await window.kadr.exportDialog(s.project.name, ext)
     if (!out) return
@@ -73,9 +98,11 @@ export function ExportDialog() {
     status.kind === 'running'
       ? status.phase === 'fragments'
         ? t('renderingFragments')
-        : status.phase === 'video'
-          ? t('renderingVideo')
-          : t('mixingAudio')
+        : status.phase === 'files'
+          ? t('copyingPlayerFiles')
+          : status.phase === 'video'
+            ? t('renderingVideo')
+            : t('mixingAudio')
       : ''
 
   return (
@@ -84,22 +111,32 @@ export function ExportDialog() {
         <h2>{t('export')}</h2>
         <label className="insp-field">
           <span>{t('preset')}</span>
-          <select value={presetId} disabled={running} onChange={(e) => setPresetId(e.target.value)}>
+          <select
+            value={presetId}
+            disabled={running}
+            onChange={(e) => {
+              setPresetId(e.target.value)
+              setStatus({ kind: 'idle' })
+            }}
+          >
             {PRESETS.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
+            <option value={HTML_PLAYER_ID}>{t('htmlPlayerPreset')}</option>
           </select>
         </label>
         <div className="insp-field">
           <span>{t('duration')}</span>
           <span>
-            {range
+            {!htmlPlayer && range
               ? `${t('exportRange')}: ${range.start.toFixed(2)}–${range.end.toFixed(2)} c`
               : t('wholeProject')}
           </span>
         </div>
-        {!range && <div className="dim">{t('rangeHint')}</div>}
-        <label className="anim-check export-mb">
+        {htmlPlayer
+          ? <div className="dim html-player-description">{t('htmlPlayerDescription')}</div>
+          : !range && <div className="dim">{t('rangeHint')}</div>}
+        {!htmlPlayer && <label className="anim-check export-mb">
           <input
             type="checkbox"
             checked={motionBlur}
@@ -107,8 +144,8 @@ export function ExportDialog() {
             onChange={(e) => setMotionBlur(e.target.checked)}
           />
           <span className="export-mb-label">{t('motionBlur')}</span>
-        </label>
-        <label className="anim-check export-mb" title={t('frameBlendingHint')}>
+        </label>}
+        {!htmlPlayer && <label className="anim-check export-mb" title={t('frameBlendingHint')}>
           <input
             type="checkbox"
             checked={frameBlending}
@@ -116,8 +153,8 @@ export function ExportDialog() {
             onChange={(e) => setFrameBlending(e.target.checked)}
           />
           <span className="export-mb-label">{t('frameBlending')}</span>
-        </label>
-        <label className="anim-check export-mb" title={t('fastEncoderHint')}>
+        </label>}
+        {!htmlPlayer && <label className="anim-check export-mb" title={t('fastEncoderHint')}>
           <input
             type="checkbox"
             checked={fastEncoder}
@@ -125,7 +162,7 @@ export function ExportDialog() {
             onChange={(e) => setFastEncoder(e.target.checked)}
           />
           <span className="export-mb-label">{t('fastEncoder')}</span>
-        </label>
+        </label>}
 
         {status.kind === 'running' && (
           <div className="export-progress">
@@ -134,7 +171,12 @@ export function ExportDialog() {
             <div className="dim">{Math.round(status.progress * 100)}%</div>
           </div>
         )}
-        {status.kind === 'done' && <div className="export-ok">✓ {t('exportDone')}</div>}
+        {status.kind === 'done' && (
+          <div className="export-ok">
+            ✓ {htmlPlayer ? t('htmlPlayerExportDone') : t('exportDone')}
+            {status.path && <div className="dim export-output-path">{status.path}</div>}
+          </div>
+        )}
         {status.kind === 'cancelled' && <div className="dim">{t('exportCancelled')}</div>}
         {status.kind === 'error' && (
           <div className="export-err">{t('exportError')}: {status.message}</div>

@@ -522,7 +522,7 @@ function undecodableFallback(asset: MediaAsset): Promise<MediaAsset | null> {
  * (or cache-hit) fragment file — full resolution and fps, alpha kept for
  * transparent fragments. WYSIWYG: this clone is what gets exported.
  */
-async function materializeFragments(
+export async function materializeFragments(
   project: Project,
   onProgress: (p: ExportProgress) => void
 ): Promise<Project> {

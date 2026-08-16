@@ -6,6 +6,26 @@ import type { TextDoc } from '@shared/types'
 /** files/URLs currently being imported (drop or dialog) — drives the '…' hint */
 export const useImportUi = create<{ active: number }>(() => ({ active: 0 }))
 
+export interface MediaDropGhost {
+  trackId: string
+  start: number
+  duration: number
+  label: string
+  kind: 'video' | 'audio' | 'external'
+  secondary?: boolean
+  blocked?: boolean
+}
+
+export const useMediaDropUi = create<{ ghosts: MediaDropGhost[] }>(() => ({ ghosts: [] }))
+
+export function showMediaDropPreview(ghosts: MediaDropGhost[]): void {
+  useMediaDropUi.setState({ ghosts })
+}
+
+export function clearMediaDropPreview(): void {
+  if (useMediaDropUi.getState().ghosts.length) useMediaDropUi.setState({ ghosts: [] })
+}
+
 /**
  * Import files by absolute path: probe each into a bin asset (paths already
  * in the bin are reused, not duplicated), register srt/txt as text docs, and
@@ -123,6 +143,21 @@ export function dragHasMedia(e: { dataTransfer: DataTransfer }): boolean {
   return t.includes('Files') || t.includes('text/uri-list') ||
     t.includes('text/x-moz-url') || t.includes('DownloadURL') ||
     t.includes('application/vnd.portal.filetransfer')
+}
+
+let internalDragAssetId: string | null = null
+
+export function beginInternalMediaDrag(assetId: string): void {
+  internalDragAssetId = assetId
+}
+
+export function endInternalMediaDrag(): void {
+  internalDragAssetId = null
+  clearMediaDropPreview()
+}
+
+export function getInternalMediaDragAssetId(): string | null {
+  return internalDragAssetId
 }
 
 /** Is there anything for importDrop to work with? */

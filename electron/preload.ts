@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import type { KadrApi, ExportProgress } from '@shared/types'
+import type { KadrApi, ExportProgress, MenuCommand } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
 
 // Direct export encoder: ffmpeg is spawned HERE, in the renderer process
@@ -177,7 +177,7 @@ const api: KadrApi = {
     return () => ipcRenderer.removeListener('claude:exit', handler)
   },
   onMenuCommand: (cb) => {
-    const handler = (_e: unknown, cmd: string) => cb(cmd)
+    const handler = (_e: unknown, cmd: MenuCommand) => cb(cmd)
     ipcRenderer.on('menu:command', handler)
     return () => ipcRenderer.removeListener('menu:command', handler)
   }

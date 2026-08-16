@@ -445,6 +445,8 @@ export interface HtmlPlayerExportRequest {
   player: HtmlPlayerSettings
 }
 
+export type MenuCommand = 'new' | 'open' | 'save' | 'saveAs' | 'export' | 'undo' | 'redo'
+
 // ---------------------------------------------------------------------------
 // IPC surface exposed by the preload script
 
@@ -580,5 +582,5 @@ export interface KadrApi {
   onClaudeExit(cb: (code: number) => void): () => void
 
   /** Native menu commands (File/Edit) forwarded from the main process. */
-  onMenuCommand(cb: (cmd: string) => void): () => void
+  onMenuCommand(cb: (cmd: MenuCommand) => void): () => void
 }

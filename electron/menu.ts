@@ -1,7 +1,23 @@
 import { app, Menu, shell, BrowserWindow } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
+import type { MenuCommand } from '@shared/types'
 
 const isMac = process.platform === 'darwin'
+
+const LABELS = {
+  en: {
+    file: 'File', newProject: 'New Project', openProject: 'Open Project…',
+    save: 'Save', saveAs: 'Save As…', export: 'Export…', edit: 'Edit',
+    undo: 'Undo', redo: 'Redo', view: 'View', window: 'Window',
+    help: 'Help', github: 'Kadr on GitHub'
+  },
+  ru: {
+    file: 'Файл', newProject: 'Новый проект', openProject: 'Открыть проект…',
+    save: 'Сохранить', saveAs: 'Сохранить как…', export: 'Экспорт…', edit: 'Правка',
+    undo: 'Отменить', redo: 'Повторить', view: 'Вид', window: 'Окно',
+    help: 'Справка', github: 'Kadr на GitHub'
+  }
+} as const
 
 /**
  * The application menu. File/Edit project commands are forwarded to the
@@ -15,7 +31,8 @@ const isMac = process.platform === 'darwin'
  * DOM) and the renderer falls back to text undo when an input is focused.
  */
 export function buildMenu(getWin: () => BrowserWindow | null): Menu {
-  const send = (cmd: string) => () => getWin()?.webContents.send('menu:command', cmd)
+  const labels = app.getLocale().toLowerCase().startsWith('ru') ? LABELS.ru : LABELS.en
+  const send = (cmd: MenuCommand) => () => getWin()?.webContents.send('menu:command', cmd)
 
   const template: MenuItemConstructorOptions[] = [
     ...(isMac
@@ -35,24 +52,24 @@ export function buildMenu(getWin: () => BrowserWindow | null): Menu {
         }]
       : []),
     {
-      label: 'File',
+      label: labels.file,
       submenu: [
-        { label: 'New Project', accelerator: 'CmdOrCtrl+N', click: send('new') },
-        { label: 'Open Project…', accelerator: 'CmdOrCtrl+O', click: send('open') },
+        { label: labels.newProject, accelerator: 'CmdOrCtrl+N', click: send('new') },
+        { label: labels.openProject, accelerator: 'CmdOrCtrl+O', click: send('open') },
         { type: 'separator' },
-        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: send('save') },
-        { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: send('saveAs') },
+        { label: labels.save, accelerator: 'CmdOrCtrl+S', click: send('save') },
+        { label: labels.saveAs, accelerator: 'CmdOrCtrl+Shift+S', click: send('saveAs') },
         { type: 'separator' },
-        { label: 'Export…', accelerator: 'CmdOrCtrl+E', click: send('export') },
+        { label: labels.export, accelerator: 'CmdOrCtrl+E', click: send('export') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' }
       ]
     },
     {
-      label: 'Edit',
+      label: labels.edit,
       submenu: [
-        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: send('undo') },
-        { label: 'Redo', accelerator: 'CmdOrCtrl+Shift+Z', click: send('redo') },
+        { label: labels.undo, accelerator: 'CmdOrCtrl+Z', click: send('undo') },
+        { label: labels.redo, accelerator: 'CmdOrCtrl+Shift+Z', click: send('redo') },
         { type: 'separator' },
         { role: 'cut' },
         { role: 'copy' },
@@ -61,12 +78,16 @@ export function buildMenu(getWin: () => BrowserWindow | null): Menu {
       ]
     },
     {
-      label: 'View',
+      label: labels.view,
       submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
-        { role: 'toggleDevTools' },
-        { type: 'separator' },
+        ...(app.isPackaged
+          ? []
+          : [
+              { role: 'reload' as const },
+              { role: 'forceReload' as const },
+              { role: 'toggleDevTools' as const },
+              { type: 'separator' as const }
+            ]),
         { role: 'resetZoom' },
         { role: 'zoomIn' },
         { role: 'zoomOut' },
@@ -75,7 +96,7 @@ export function buildMenu(getWin: () => BrowserWindow | null): Menu {
       ]
     },
     {
-      label: 'Window',
+      label: labels.window,
       submenu: [
         { role: 'minimize' },
         { role: 'zoom' },
@@ -85,10 +106,11 @@ export function buildMenu(getWin: () => BrowserWindow | null): Menu {
       ]
     },
     {
+      label: labels.help,
       role: 'help',
       submenu: [
         {
-          label: 'Kadr on GitHub',
+          label: labels.github,
           click: () => shell.openExternal('https://github.com/HelpFreedom/kadr')
         }
       ]

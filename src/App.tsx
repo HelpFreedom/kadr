@@ -195,16 +195,21 @@ export default function App() {
     return window.kadr.onMenuCommand((cmd) => {
       const s = useEditor.getState()
       switch (cmd) {
-        case 'new': s.setProject(newProject()); break
-        case 'open': openProject(); break
-        case 'save': saveProject(); break
-        case 'saveAs': saveProjectAs(); break
+        case 'new': {
+          s.setProject(newProject())
+          markProjectSaved(useEditor.getState().project)
+          break
+        }
+        case 'open': void openProject(); break
+        case 'save': void saveProject(); break
+        case 'saveAs': void saveProjectAs(); break
         case 'export': s.setExportOpen(true); break
         case 'undo':
         case 'redo': {
           // Defer to native text undo/redo while editing in a field.
-          const tag = (document.activeElement as HTMLElement)?.tagName
-          if (tag === 'INPUT' || tag === 'TEXTAREA') document.execCommand(cmd)
+          const active = document.activeElement as HTMLElement | null
+          const editsText = active?.matches('input, textarea') || active?.isContentEditable
+          if (editsText) document.execCommand(cmd)
           else if (cmd === 'undo') s.undo()
           else s.redo()
           break

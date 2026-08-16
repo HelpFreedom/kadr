@@ -98,6 +98,12 @@ npm install        # postinstall rebuilds node-pty for Electron
 npm run dev
 ```
 
+For an Apple Silicon macOS build, run `npm run package:mac`, open the DMG,
+and move Kadr to Applications. The installed app registers `.kadr` files:
+double-clicking one in Finder opens that project in its own window. Create a
+blank window with File → New Window (`⌘N`) or the matching Kadr Dock menu item;
+`⇧⌘N` resets the project in the current window.
+
 Import media, edit, press Export. For the AI assistant press 🤖 (the
 `claude` CLI must be installed and logged in). If your network needs a
 proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:

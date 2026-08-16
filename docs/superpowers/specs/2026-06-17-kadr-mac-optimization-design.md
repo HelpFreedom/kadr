@@ -52,12 +52,14 @@ with a placeholder icon. No Developer ID / notarization (out of scope).
 - `main.ts`: VAAPI hardware-codec switches (`ignore-gpu-blocklist`,
   `VaapiVideo*`) are **Linux-only** now — macOS uses native VideoToolbox; the
   flags were Linux/Intel-specific and only risked the GPU sandbox off-platform.
-- `menu.ts` (new): real macOS application menu. File (New/Open/Save/Save As/
-  Export) and project Undo/Redo are custom items with `CmdOrCtrl` accelerators
+- `menu.ts` (new): real macOS application and Dock menus. File (New Window,
+  New Project/Open/Save/Save As/Export) and project Undo/Redo are custom items with `CmdOrCtrl` accelerators
   forwarded to the renderer over `menu:command`; clipboard/selection keep
   standard roles so text fields + the Claude terminal stay native.
-- `main.ts`: `Menu.setApplicationMenu(buildMenu(...))`; removed
-  `setMenuBarVisibility(false)`.
+- `main.ts`: each editor project owns a `BrowserWindow`; Finder `open-file`,
+  the application menu, and the Dock menu all create or focus the correct window.
+- Background progress, dialogs, exports, captures, transcription, voiceover,
+  and Claude terminal input are routed back to their originating window.
 - `preload.ts` + `shared/types.ts`: `onMenuCommand` IPC bridge.
 - `src/App.tsx`: dispatch menu commands to the existing toolbar handlers
   (undo/redo defer to native text undo when an input is focused); the in-app
@@ -68,7 +70,8 @@ with a placeholder icon. No Developer ID / notarization (out of scope).
 - `build/make-icon.mjs` (new): generates `build/icon.png` + `build/icon.icns`
   (geometric "K", no external image tooling). `npm run icon`.
 - `electron-builder.yml`: `asar: false`, `npmRebuild: false`, arm64 dmg+zip,
-  explicit ad-hoc signing (`mac.identity: "-"`), aux files included in `files`.
+  explicit ad-hoc signing (`mac.identity: "-"`), `.kadr` file association,
+  aux files included in `files`.
 - `package.json`: `icon`, `package:mac` scripts; `electron-builder` devDep.
 - electron-builder applies the explicit ad-hoc signature during packaging.
 

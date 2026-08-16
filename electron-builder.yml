@@ -9,9 +9,8 @@ copyright: Copyright © Black Triangle (GPL-3.0)
 # from node_modules with zero path rewriting.
 asar: false
 
-# node-pty is already rebuilt for Electron 31 (arm64) by the postinstall
-# electron-rebuild step, so skip electron-builder's own rebuild (and its
-# network round-trip for headers).
+# node-pty is rebuilt for the installed Electron version by the postinstall
+# electron-rebuild step, so skip electron-builder's duplicate rebuild.
 npmRebuild: false
 
 directories:
@@ -21,15 +20,18 @@ directories:
 files:
   - out/**/*
   - electron/mcp-bridge.cjs
+  - electron/kadr-skill.md
   - scripts/transcribe.py
+  - scripts/voiceover_worker.py
   - package.json
 
 mac:
   category: public.app-category.video
   icon: build/icon.icns
-  # Local, unsigned distribution: no Developer ID. electron-builder applies
-  # an ad-hoc signature so the arm64 bundle is runnable on this machine.
-  identity: null
+  # Local distribution without a Developer ID: explicitly ad-hoc sign the
+  # bundle. identity:null would skip signing entirely.
+  identity: "-"
+  hardenedRuntime: false
   target:
     - target: dmg
       arch: arm64

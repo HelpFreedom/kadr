@@ -1,7 +1,7 @@
 # Kadr — macOS bring-up, native polish & packaging
 
 **Date:** 2026-06-17
-**Target:** Apple Silicon (arm64), macOS · Node v25 host · Electron 31
+**Target:** Apple Silicon (arm64), macOS · Node v24 host · Electron 42
 
 ## Goal
 
@@ -15,10 +15,10 @@ with a placeholder icon. No Developer ID / notarization (out of scope).
 |---|---|
 | Scope | Full Mac polish: run + native menu + packaged bundle |
 | Missing deps | Install via Homebrew (already satisfied: ffmpeg 8.1, python3, claude) |
-| Node version | Try v25 first — rebuild succeeded, no pin needed |
+| Node version | Node v24 — rebuild succeeded, no extra pin needed |
 | Code signing | Local unsigned → ad-hoc `codesign -s -` (runs on this Mac) |
 | App icon | Generated placeholder ("K", `build/make-icon.mjs`) |
-| Packaging tool | electron-builder (best fit for the electron-vite `out/` layout) |
+| Packaging tool | electron-builder 26 (best fit for the electron-vite `out/` layout) |
 | asar | **Disabled** — the app spawns `node electron/mcp-bridge.cjs` and `python3 scripts/transcribe.py` by absolute path; unpacked = zero path rewriting |
 
 ## Environment gotchas (not project bugs)
@@ -68,9 +68,9 @@ with a placeholder icon. No Developer ID / notarization (out of scope).
 - `build/make-icon.mjs` (new): generates `build/icon.png` + `build/icon.icns`
   (geometric "K", no external image tooling). `npm run icon`.
 - `electron-builder.yml`: `asar: false`, `npmRebuild: false`, arm64 dmg+zip,
-  `mac.identity: null`, aux files included in `files`.
+  explicit ad-hoc signing (`mac.identity: "-"`), aux files included in `files`.
 - `package.json`: `icon`, `package:mac` scripts; `electron-builder` devDep.
-- Build → ad-hoc sign the bundle (`codesign --force --deep -s -`).
+- electron-builder applies the explicit ad-hoc signature during packaging.
 
 ## Verification (evidence)
 

@@ -1,4 +1,5 @@
 import type { AssetKind, Project } from '@shared/types'
+import type { FileAssetBridge } from './fileAssets'
 
 interface UsageWindow {
   start: number
@@ -6,6 +7,7 @@ interface UsageWindow {
 }
 
 interface PreloadEntry {
+  path: string
   url: string
   kind: AssetKind | 'file'
   windows: UsageWindow[]
@@ -65,6 +67,7 @@ function entriesFor(project: Project, fragmentAssets: FragmentAssetRef[]): Prelo
   }
 
   const entries = project.assets.map((asset): PreloadEntry => ({
+    path: asset.path,
     url: new URL(asset.path, document.baseURI).href,
     kind: asset.kind,
     windows: windowsByAsset.get(asset.id) ?? []
@@ -72,6 +75,7 @@ function entriesFor(project: Project, fragmentAssets: FragmentAssetRef[]): Prelo
   const allFragmentWindows = [...windowsByFragment.values()].flat()
   for (const asset of fragmentAssets) {
     entries.push({
+      path: asset.path,
       url: new URL(asset.path, document.baseURI).href,
       kind: inferredKind(asset.path),
       windows: asset.fragmentId ? windowsByFragment.get(asset.fragmentId) ?? [] : allFragmentWindows
@@ -179,8 +183,16 @@ async function consumeResponse(response: Response, signal: AbortSignal): Promise
   if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
 }
 
-async function load(entry: PreloadEntry, signal: AbortSignal): Promise<void> {
+async function load(
+  entry: PreloadEntry,
+  signal: AbortSignal,
+  fileAssets?: FileAssetBridge
+): Promise<void> {
   if (location.protocol === 'file:') {
+    if (fileAssets?.has(entry.path)) {
+      await fileAssets.load(entry.path, signal)
+      return
+    }
     if (entry.kind === 'file') await waitForFile(entry, signal)
     else await waitForMedia(entry, signal)
     return
@@ -196,7 +208,8 @@ async function load(entry: PreloadEntry, signal: AbortSignal): Promise<void> {
 
 export function createAssetPreloader(
   project: Project,
-  fragmentAssets: FragmentAssetRef[]
+  fragmentAssets: FragmentAssetRef[],
+  fileAssets?: FileAssetBridge
 ): AssetPreloader {
   const entries = entriesFor(project, fragmentAssets)
   const byUrl = new Map(entries.map((entry) => [entry.url, entry]))
@@ -219,7 +232,7 @@ export function createAssetPreloader(
       if (!entry) break
       const controller = new AbortController()
       inFlight.set(entry.url, controller)
-      void load(entry, controller.signal).then(
+      void load(entry, controller.signal, fileAssets).then(
         () => finished.add(entry.url),
         (error: unknown) => {
           if (!(error instanceof DOMException && error.name === 'AbortError')) finished.add(entry.url)

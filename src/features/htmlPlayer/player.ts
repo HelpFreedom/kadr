@@ -4,6 +4,7 @@ import { Player } from '@/engine/player'
 import { setMasterGain } from '@/engine/audio'
 import { createFragmentRuntime, type FragmentRuntime } from './fragments'
 import { createAssetPreloader, type FragmentAssetRef } from './preloader'
+import { createFileAssetBridge } from './fileAssets'
 
 interface PlayerState {
   project: Project
@@ -105,7 +106,8 @@ function start(): void {
     const settings = playerSettings()
     const duration = projectDuration(project)
     const state: PlayerState = { project, playhead: 0, playing: false, loading: false }
-    const preloader = createAssetPreloader(project, fragmentAssetPaths())
+    const fileAssets = createFileAssetBridge()
+    const preloader = createAssetPreloader(project, fragmentAssetPaths(), fileAssets)
 
     root.innerHTML = `
       <div class="kadr-stage">
@@ -189,7 +191,7 @@ function start(): void {
       duration: () => duration
     }, {
       proxy: false,
-      resolveUrl: (path) => new URL(path, document.baseURI).href,
+      resolveUrl: (path) => fileAssets.resolveUrl(path),
       crossOrigin: false,
       webAudio: useWebAudio,
       outputGain: () => muted ? 0 : lastVolume
@@ -292,6 +294,7 @@ function start(): void {
     window.addEventListener('beforeunload', () => {
       resizeObserver.disconnect()
       preloader.destroy()
+      fileAssets.destroy()
       fragmentRuntime?.destroy()
       player.detach()
     }, { once: true })

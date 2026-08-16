@@ -12,6 +12,15 @@ interface HtmlPlayerWriterOptions {
   ) => Promise<Array<{ path: string; fragmentId?: string }>>
 }
 
+interface FileAssetManifestEntry {
+  path: string
+  kind: 'image' | 'video'
+  mime: string
+  chunks: string[]
+}
+
+const FILE_ASSET_CHUNK_SIZE = 2 * 1024 * 1024
+
 const PLAYER_CSS = `
 :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 *{box-sizing:border-box}html,body,#kadr-player{width:100%;height:100%;margin:0;overflow:hidden;background:#080a0e;color:#eef1f6}
@@ -53,6 +62,56 @@ function embeddedScript(value: string): string {
   return value.replace(/<\/script/gi, '<\\/script')
 }
 
+function mediaMime(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case '.png': return 'image/png'
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg'
+    case '.webp': return 'image/webp'
+    case '.gif': return 'image/gif'
+    case '.svg': return 'image/svg+xml'
+    case '.avif': return 'image/avif'
+    case '.mp4':
+    case '.m4v': return 'video/mp4'
+    case '.webm': return 'video/webm'
+    case '.mov': return 'video/quicktime'
+    default: return 'application/octet-stream'
+  }
+}
+
+async function writeFileAssetChunks(
+  source: string,
+  relativePath: string,
+  kind: 'image' | 'video',
+  partialDir: string,
+  assetIndex: number,
+  signal: AbortSignal
+): Promise<FileAssetManifestEntry> {
+  const chunkDir = `file-assets/${String(assetIndex + 1).padStart(4, '0')}`
+  await fs.mkdir(join(partialDir, chunkDir), { recursive: true })
+  const chunks: string[] = []
+  const file = await fs.open(source, 'r')
+  let position = 0
+  let chunkIndex = 0
+  try {
+    while (true) {
+      if (signal.aborted) throw new Error('cancelled')
+      const buffer = Buffer.allocUnsafe(FILE_ASSET_CHUNK_SIZE)
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, position)
+      if (!bytesRead) break
+      const chunkPath = `${chunkDir}/${String(chunkIndex + 1).padStart(4, '0')}.js`
+      const script = `globalThis.__kadrFileAssetChunk?.(${JSON.stringify(relativePath)},${chunkIndex},${JSON.stringify(mediaMime(source))},${JSON.stringify(buffer.subarray(0, bytesRead).toString('base64'))});\n`
+      await fs.writeFile(join(partialDir, chunkPath), script, 'utf8')
+      chunks.push(chunkPath)
+      position += bytesRead
+      chunkIndex++
+    }
+  } finally {
+    await file.close()
+  }
+  return { path: relativePath, kind, mime: mediaMime(source), chunks }
+}
+
 async function unusedDirectory(parent: string, baseName: string): Promise<string> {
   for (let index = 1; index < 10_000; index++) {
     const candidate = join(parent, index === 1 ? baseName : `${baseName}-${index}`)
@@ -88,7 +147,8 @@ function indexHtml(
   lang: 'ru' | 'en',
   playerCode: string,
   playerSettings: HtmlPlayerSettings,
-  fragmentAssets: Array<{ path: string; fragmentId?: string }>
+  fragmentAssets: Array<{ path: string; fragmentId?: string }>,
+  fileAssets: FileAssetManifestEntry[]
 ): string {
   const title = escapeHtml(project.name)
   return `<!doctype html>
@@ -104,6 +164,7 @@ function indexHtml(
   <script id="kadr-project" type="application/json">${embeddedJson(project)}</script>
   <script id="kadr-player-settings" type="application/json">${embeddedJson(playerSettings)}</script>
   <script id="kadr-fragment-assets" type="application/json">${embeddedJson(fragmentAssets)}</script>
+  <script id="kadr-file-assets" type="application/json">${embeddedJson(fileAssets)}</script>
   <script>${embeddedScript(playerCode)}</script>
 </body>
 </html>`
@@ -137,6 +198,8 @@ export async function writeHtmlPlayerExport(
   )
   let complete = 0
   let fragmentAssets: Array<{ path: string; fragmentId?: string }> = []
+  const fileAssets: FileAssetManifestEntry[] = []
+  const fileAssetsByPath = new Map<string, FileAssetManifestEntry>()
 
   try {
     await fs.mkdir(assetsDir, { recursive: true })
@@ -165,6 +228,21 @@ export async function writeHtmlPlayerExport(
       asset.path = relativePath
       delete asset.proxyPath
       assetPaths.set(asset.id, relativePath)
+      if (asset.kind === 'image' || asset.kind === 'video') {
+        let fileAsset = fileAssetsByPath.get(relativePath)
+        if (!fileAsset) {
+          fileAsset = await writeFileAssetChunks(
+            source,
+            relativePath,
+            asset.kind,
+            partialDir,
+            index,
+            signal
+          )
+          fileAssetsByPath.set(relativePath, fileAsset)
+          fileAssets.push(fileAsset)
+        }
+      }
       complete++
       onProgress(complete / total)
     }
@@ -195,7 +273,8 @@ export async function writeHtmlPlayerExport(
         request.lang,
         playerCode,
         request.player ?? DEFAULT_HTML_PLAYER_SETTINGS,
-        fragmentAssets
+        fragmentAssets,
+        fileAssets
       ),
       'utf8'
     )

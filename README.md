@@ -109,6 +109,54 @@ Claude/npm нужен прокси — создайте `~/.config/kadr/claude-e
 { "env": { "HTTPS_PROXY": "http://127.0.0.1:1080", "NO_PROXY": "127.0.0.1,localhost" } }
 ```
 
+## Локальная транскрибация
+
+Распознавание речи и авто-субтитры используют локальный
+[`faster-whisper`](https://github.com/SYSTRAN/faster-whisper). На macOS Kadr
+работает в CPU-режиме `int8`; CUDA не требуется. Модель (`large-v3` по
+умолчанию) скачается при первом распознавании и останется в кэше Hugging Face.
+
+Не устанавливайте пакет случайному `pip`: Kadr должен запускать тот же Python,
+в котором он установлен. Надёжный вариант — отдельное окружение:
+
+```bash
+TRANSCRIBE_VENV="$HOME/.local/share/kadr/transcribe-venv"
+python3 -m venv "$TRANSCRIBE_VENV"
+"$TRANSCRIBE_VENV/bin/python" -m pip install --upgrade pip
+"$TRANSCRIBE_VENV/bin/python" -m pip install --upgrade faster-whisper
+"$TRANSCRIBE_VENV/bin/python" -c "from faster_whisper import WhisperModel; print('faster-whisper: OK')"
+```
+
+Затем создайте `~/.config/kadr/transcribe.json`, обязательно указав абсолютный
+путь (переменные вроде `$HOME` внутри JSON не раскрываются):
+
+```json
+{
+  "pythonPath": "/Users/имя/.local/share/kadr/transcribe-venv/bin/python"
+}
+```
+
+На Windows путь внутри окружения обычно заканчивается на
+`Scripts\\python.exe`. Вместо файла конфигурации можно передать переменную
+окружения `KADR_TRANSCRIBE_PYTHON`. После настройки повторите транскрибацию;
+перезапуск Kadr не требуется. Для обработки аудио также должен быть доступен
+`ffmpeg`.
+
+Если удобнее поручить установку агенту, скопируйте ему этот промпт:
+
+```text
+Ты работаешь в локальном репозитории Kadr. Полностью настрой локальную
+транскрибацию: прочитай README.md, electron/transcribe.ts и
+scripts/transcribe.py; создай отдельный Python 3.10–3.12 venv вне git; установи
+в него актуальный faster-whisper; проверь импорт WhisperModel; создай
+~/.config/kadr/transcribe.json с абсолютным pythonPath; проверь ffmpeg. Затем
+запусти scripts/transcribe.py этим Python на коротком аудиофайле, дождись
+корректного JSONL done и выполни npm run typecheck и npm run build. Не
+ограничивайся инструкциями и не устанавливай зависимости в случайный системный
+Python. Не удаляй существующие окружения, модели и пользовательские файлы. В
+финале сообщи путь к Python, результат smoke-теста и готовность Kadr.
+```
+
 ## Как устроена ИИ-интеграция
 
 Kadr поднимает локальный мост в рендерер и отдаёт Claude MCP-сервер с

@@ -6,11 +6,21 @@ import { app, ipcMain, BrowserWindow } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
+import { homedir, tmpdir } from 'os'
 import { ExportMuxer } from './ffmpeg'
 import type { TranscribeRequest, TranscribeResult, TranscribeSegment } from '@shared/types'
 
 let current: { muxer: ExportMuxer | null; py: ChildProcess | null; cancelled: boolean } | null = null
+
+async function transcribePython(): Promise<string> {
+  const configPath = join(homedir(), '.config', 'kadr', 'transcribe.json')
+  try {
+    const config = JSON.parse(await fs.readFile(configPath, 'utf8')) as { pythonPath?: string }
+    return process.env.KADR_TRANSCRIBE_PYTHON || config.pythonPath || 'python3'
+  } catch {
+    return process.env.KADR_TRANSCRIBE_PYTHON || 'python3'
+  }
+}
 
 async function run(win: BrowserWindow, req: TranscribeRequest): Promise<TranscribeResult> {
   if (current) throw new Error('transcription already running')
@@ -47,8 +57,9 @@ async function run(win: BrowserWindow, req: TranscribeRequest): Promise<Transcri
     const segments: TranscribeSegment[] = []
     let language = req.language
     let liveText = ''
+    const python = await transcribePython()
     await new Promise<void>((resolve, reject) => {
-      const py = spawn('python3', [
+      const py = spawn(python, [
         join(app.getAppPath(), 'scripts', 'transcribe.py'),
         '--audio', wav,
         '--model', req.model,
@@ -78,11 +89,18 @@ async function run(win: BrowserWindow, req: TranscribeRequest): Promise<Transcri
         }
       })
       py.stderr.on('data', (c) => { err += c })
-      py.on('error', reject)
+      py.on('error', (error) => reject(new Error(
+        `Не удалось запустить Python для транскрибации (${python}): ${error.message}. ` +
+        'См. раздел «Локальная транскрибация» в README.md'
+      )))
       py.on('close', (code) => {
         job.py = null
         if (job.cancelled) reject(new Error('cancelled'))
         else if (code === 0) resolve()
+        else if (err.includes("No module named 'faster_whisper'")) reject(new Error(
+          `В Python ${python} не установлен faster-whisper. ` +
+          'Настройте окружение по разделу «Локальная транскрибация» в README.md'
+        ))
         else reject(new Error(err.slice(0, 800) || `transcribe.py exited ${code}`))
       })
     })

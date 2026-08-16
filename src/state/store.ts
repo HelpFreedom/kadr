@@ -201,13 +201,24 @@ interface SettingsState {
   lang: 'ru' | 'en'
   /** uniform lane height for all tracks, px */
   trackH: number
+  /** width of the sticky track-controls column, px */
+  trackHeaderW: number
   setLang(l: 'ru' | 'en'): void
   setTrackH(h: number): void
+  setTrackHeaderW(w: number): void
 }
+
+export const TRACK_HEADER_MIN = 160
+export const TRACK_HEADER_MAX = 520
+export const TRACK_HEADER_DEFAULT = 240
 
 export const useSettings = create<SettingsState>((set) => ({
   lang: (localStorage.getItem('kadr.lang') as 'ru' | 'en') || 'ru',
   trackH: Math.min(140, Math.max(32, Number(localStorage.getItem('kadr.trackh')) || 56)),
+  trackHeaderW: Math.min(
+    TRACK_HEADER_MAX,
+    Math.max(TRACK_HEADER_MIN, Number(localStorage.getItem('kadr.trackHeaderW')) || TRACK_HEADER_DEFAULT)
+  ),
   setLang: (lang) => {
     localStorage.setItem('kadr.lang', lang)
     set({ lang })
@@ -216,6 +227,11 @@ export const useSettings = create<SettingsState>((set) => ({
     const trackH = Math.min(140, Math.max(32, h))
     localStorage.setItem('kadr.trackh', String(trackH))
     set({ trackH })
+  },
+  setTrackHeaderW: (w) => {
+    const trackHeaderW = Math.min(TRACK_HEADER_MAX, Math.max(TRACK_HEADER_MIN, Math.round(w)))
+    localStorage.setItem('kadr.trackHeaderW', String(trackHeaderW))
+    set({ trackHeaderW })
   }
 }))
 

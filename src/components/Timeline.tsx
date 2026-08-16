@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
 import type { Clip, MediaAsset, Track, VoiceoverStatus } from '@shared/types'
 import {
-  useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM
+  useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM,
+  TRACK_HEADER_MIN, TRACK_HEADER_MAX, TRACK_HEADER_DEFAULT
 } from '@/state/store'
 import { useT } from '@/i18n'
 import { TRANSITIONS } from '@/gl/transitions'
@@ -13,8 +14,8 @@ import { normalizeClip, useNormalizeUi } from '@/engine/normalize'
 import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
-
 import { useVoiceoverUi } from './VoiceoverStudio'
+
 /** Transcribe the selected range (Shift-drag on the ruler) into SRT/TXT. */
 function TranscribeRangeButton() {
   const t = useT()
@@ -33,7 +34,6 @@ function TranscribeRangeButton() {
   )
 }
 
-const HEADER_W = 150
 const RULER_H = 28
 
 function niceStep(zoom: number): number {
@@ -153,7 +153,10 @@ export function Timeline({ height }: { height: number }) {
   const tracks = useEditor((s) => s.project.tracks)
   const zoom = useEditor((s) => s.zoom)
   const trackH = useSettings((s) => s.trackH)
+  const headerW = useSettings((s) => s.trackHeaderW)
   const duration = useEditor((s) => projectDuration(s.project))
+  const selectedId = useEditor((s) => s.selection[0])
+  const timelineRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [view, setView] = useState({ start: 0, end: 60 })
   const [menu, setMenu] = useState<MenuState | null>(null)
@@ -162,16 +165,22 @@ export function Timeline({ height }: { height: number }) {
 
   useEffect(() => {
     const el = scrollRef.current
-    if (!el) return
+    const timeline = timelineRef.current
+    if (!el || !timeline) return
     let raf = 0
     const updateView = () => {
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const z = useEditor.getState().zoom
-        setView({
+        const next = {
           start: el.scrollLeft / z,
-          end: (el.scrollLeft + el.clientWidth - HEADER_W) / z
-        })
+          end: (el.scrollLeft + el.clientWidth - useSettings.getState().trackHeaderW) / z
+        }
+        setView((prev) =>
+          Math.abs(prev.start - next.start) < 0.001 && Math.abs(prev.end - next.end) < 0.001
+            ? prev
+            : next
+        )
       })
     }
     updateView()
@@ -180,26 +189,50 @@ export function Timeline({ height }: { height: number }) {
     ro.observe(el)
 
     const onWheel = (e: WheelEvent) => {
-      // plain wheel (and Ctrl+wheel) zooms around the cursor; Shift+wheel pans
-      if (e.shiftKey) return
-      // the gain/opacity slider row has its own precise ±1% wheel
-      if ((e.target as HTMLElement).closest?.('.track-gain-row')) return
+      // macOS trackpads send ordinary two-finger navigation as deltaX/deltaY.
+      // Let the native overflow container consume both axes. Pinch gestures are
+      // reported by Chromium as Ctrl+wheel; Cmd/Ctrl+wheel is the keyboard form.
+      const zoomGesture = e.ctrlKey || e.metaKey
+      if (!zoomGesture) {
+        // A mouse has no horizontal wheel, so Shift maps its vertical delta to
+        // the time axis. Native trackpad deltaX keeps working without this path.
+        if (el.contains(e.target as Node) && e.shiftKey && Math.abs(e.deltaX) < Math.abs(e.deltaY)) {
+          e.preventDefault()
+          el.scrollLeft += e.deltaY
+          updateView()
+        }
+        return
+      }
       e.preventDefault()
+      e.stopPropagation()
       const s = useEditor.getState()
       const rect = el.getBoundingClientRect()
-      const cx = e.clientX - rect.left - HEADER_W + el.scrollLeft
+      const pointerX = Math.max(0, e.clientX - rect.left - useSettings.getState().trackHeaderW)
+      const cx = pointerX + el.scrollLeft
       const tAtCursor = cx / s.zoom
-      const nz = Math.min(MAX_ZOOM, Math.max(4, s.zoom * Math.exp(-e.deltaY * 0.0015)))
+      const modeScale = e.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? el.clientHeight
+          : 1
+      const delta = Math.max(-40, Math.min(40, e.deltaY * modeScale))
+      // Chromium synthesizes Ctrl+wheel for a trackpad pinch and deliberately
+      // uses a positive delta for pinch-out (zoom in). Cmd+wheel is a manual
+      // shortcut and follows the conventional wheel direction instead.
+      const exponent = e.ctrlKey && !e.metaKey ? delta * 0.01 : -delta * 0.008
+      const nz = Math.min(MAX_ZOOM, Math.max(4, s.zoom * Math.exp(exponent)))
       // commit the new content width NOW: scrollLeft set against the stale
       // (narrower) width gets clamped by the browser, so zooming near the
       // end of a long timeline used to anchor somewhere left of the cursor
       flushSync(() => s.setZoom(nz))
-      el.scrollLeft = tAtCursor * nz - (e.clientX - rect.left - HEADER_W)
+      el.scrollLeft = tAtCursor * nz - pointerX
       updateView()
     }
-    el.addEventListener('wheel', onWheel, { passive: false })
+    // Capture on the whole timeline: macOS may target a pinch at the ruler,
+    // sticky track header or toolbar rather than the scrolling lane itself.
+    timeline.addEventListener('wheel', onWheel, { passive: false, capture: true })
     return () => {
-      el.removeEventListener('wheel', onWheel)
+      timeline.removeEventListener('wheel', onWheel, true)
       el.removeEventListener('scroll', updateView)
       ro.disconnect()
       cancelAnimationFrame(raf)
@@ -211,9 +244,29 @@ export function Timeline({ height }: { height: number }) {
     if (!el) return
     setView({
       start: el.scrollLeft / zoom,
-      end: (el.scrollLeft + el.clientWidth - HEADER_W) / zoom
+      end: (el.scrollLeft + el.clientWidth - headerW) / zoom
     })
-  }, [zoom])
+  }, [zoom, headerW])
+
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller || !selectedId) return
+    const raf = requestAnimationFrame(() => {
+      const clip = scroller.querySelector<HTMLElement>(
+        `[data-clip-id="${CSS.escape(selectedId)}"]`
+      )
+      if (!clip) return
+      const viewport = scroller.getBoundingClientRect()
+      const bounds = clip.getBoundingClientRect()
+      const topEdge = viewport.top + RULER_H
+      const leftEdge = viewport.left + headerW
+      if (bounds.top < topEdge) scroller.scrollTop -= topEdge - bounds.top + 6
+      else if (bounds.bottom > viewport.bottom) scroller.scrollTop += bounds.bottom - viewport.bottom + 6
+      if (bounds.left < leftEdge) scroller.scrollLeft -= leftEdge - bounds.left + 12
+      else if (bounds.right > viewport.right) scroller.scrollLeft += bounds.right - viewport.right + 12
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [selectedId, headerW])
 
   useEffect(() => {
     if (!menu) return
@@ -237,7 +290,7 @@ export function Timeline({ height }: { height: number }) {
     const sc = e.currentTarget
     const rect = sc.getBoundingClientRect()
     const time = Math.max(0,
-      (e.clientX - rect.left + sc.scrollLeft - HEADER_W) / useEditor.getState().zoom)
+      (e.clientX - rect.left + sc.scrollLeft - headerW) / useEditor.getState().zoom)
     const assetId = e.dataTransfer.getData('kadr/asset')
     if (assetId) {
       e.preventDefault()
@@ -252,7 +305,7 @@ export function Timeline({ height }: { height: number }) {
   }
 
   return (
-    <div className="timeline" style={{ height }}>
+    <div className="timeline" ref={timelineRef} style={{ height }}>
       <div className="tl-toolbar">
         <button onClick={() => useEditor.getState().addTrack('video')}>{t('addVideoTrack')}</button>
         <button onClick={() => useEditor.getState().addTrack('audio')}>{t('addAudioTrack')}</button>
@@ -288,23 +341,27 @@ export function Timeline({ height }: { height: number }) {
           />
         </label>
       </div>
-      <div className="tl-scroll" ref={scrollRef} onDragOver={onAnyDragOver} onDrop={onAnyDrop}>
-        <div className="tl-content" style={{ width: HEADER_W + contentW }}>
-          <RulerRow contentW={contentW} />
-          {tracks.map((track) => (
-            <TrackRow
-              key={track.id}
-              track={track}
-              trackH={trackH}
-              contentW={contentW}
-              view={view}
-              onMenu={setMenu}
-            />
-          ))}
-          <RangeOverlay />
-          <KfMarker />
-          <Playhead />
+      <div className="tl-scroll-shell">
+        <div className="tl-scroll" ref={scrollRef} onDragOver={onAnyDragOver} onDrop={onAnyDrop}>
+          <div className="tl-content" style={{ width: headerW + contentW }}>
+            <RulerRow contentW={contentW} headerW={headerW} />
+            {tracks.map((track) => (
+              <TrackRow
+                key={track.id}
+                track={track}
+                trackH={trackH}
+                headerW={headerW}
+                contentW={contentW}
+                view={view}
+                onMenu={setMenu}
+              />
+            ))}
+            <RangeOverlay headerW={headerW} />
+            <KfMarker headerW={headerW} />
+            <Playhead headerW={headerW} />
+          </div>
         </div>
+        <TrackHeaderResizer width={headerW} />
       </div>
       {menu && <TrackMenu menu={menu} onClose={() => setMenu(null)} />}
     </div>
@@ -470,6 +527,32 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
               </button>
             )
           )}
+          {(() => {
+            const f = findClip(useEditor.getState().project, menu.clipId!)
+            if (f?.track.kind !== 'audio' || !f.clip.voiceover) return null
+            const ready = voiceStatus?.ready === true
+            return (
+              <>
+                <button
+                  className="voice-menu-item"
+                  disabled={!ready}
+                  title={ready ? 'Создать новый дубль' : voiceStatus?.reason ?? 'Проверяю TTS…'}
+                  onClick={() => {
+                    useVoiceoverUi.getState().open(menu.clipId!)
+                    onClose()
+                  }}
+                >
+                  <span className="ctx-voice-mark">●</span>{' '}
+                  {voiceStatus ? 'Переозвучить…' : 'Проверяю TTS…'}
+                </button>
+                {voiceStatus && !ready && (
+                  <div className="ctx-voice-disabled-note">
+                    {voiceStatus.reason}. Как включить — раздел «Локальная переозвучка» в README.md.
+                  </div>
+                )}
+              </>
+            )
+          })()}
           <button
             onClick={() => {
               const st = useEditor.getState()
@@ -527,32 +610,6 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
               st.select(withLinked(st.project, [menu.clipId!]))
               st.deleteSelection()
               onClose()
-          {(() => {
-            const f = findClip(useEditor.getState().project, menu.clipId!)
-            if (f?.track.kind !== 'audio' || !f.clip.voiceover) return null
-            const ready = voiceStatus?.ready === true
-            return (
-              <>
-                <button
-                  className="voice-menu-item"
-                  disabled={!ready}
-                  title={ready ? 'Создать новый дубль' : voiceStatus?.reason ?? 'Проверяю TTS…'}
-                  onClick={() => {
-                    useVoiceoverUi.getState().open(menu.clipId!)
-                    onClose()
-                  }}
-                >
-                  <span className="ctx-voice-mark">●</span>{' '}
-                  {voiceStatus ? 'Переозвучить…' : 'Проверяю TTS…'}
-                </button>
-                {voiceStatus && !ready && (
-                  <div className="ctx-voice-disabled-note">
-                    {voiceStatus.reason}. Как включить — раздел «Локальная переозвучка» в README.md.
-                  </div>
-                )}
-              </>
-            )
-          })()}
             }}
           >
             {t('clipDelete')}
@@ -563,7 +620,53 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
   )
 }
 
-function RulerRow({ contentW }: { contentW: number }) {
+function TrackHeaderResizer({ width }: { width: number }) {
+  const t = useT()
+  const drag = useRef<{ startX: number; startWidth: number } | null>(null)
+  useEffect(() => () => document.body.classList.remove('track-header-resizing'), [])
+  const stop = () => {
+    drag.current = null
+    document.body.classList.remove('track-header-resizing')
+  }
+  return (
+    <div
+      className="track-header-resizer"
+      style={{ left: width - 5 }}
+      role="separator"
+      aria-label={t('trackHeaderResize')}
+      aria-orientation="vertical"
+      aria-valuemin={TRACK_HEADER_MIN}
+      aria-valuemax={TRACK_HEADER_MAX}
+      aria-valuenow={width}
+      tabIndex={0}
+      title={t('trackHeaderResizeHint')}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return
+        e.preventDefault()
+        e.stopPropagation()
+        e.currentTarget.setPointerCapture(e.pointerId)
+        drag.current = { startX: e.clientX, startWidth: width }
+        document.body.classList.add('track-header-resizing')
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current
+        if (d) useSettings.getState().setTrackHeaderW(d.startWidth + e.clientX - d.startX)
+      }}
+      onPointerUp={stop}
+      onPointerCancel={stop}
+      onLostPointerCapture={stop}
+      onDoubleClick={() => useSettings.getState().setTrackHeaderW(TRACK_HEADER_DEFAULT)}
+      onKeyDown={(e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+        e.preventDefault()
+        const step = e.shiftKey ? 20 : 5
+        useSettings.getState().setTrackHeaderW(width + (e.key === 'ArrowRight' ? step : -step))
+      }}
+    />
+  )
+}
+
+function RulerRow({ contentW, headerW }: { contentW: number; headerW: number }) {
   const zoom = useEditor((s) => s.zoom)
   const step = niceStep(zoom)
   const ticks = useMemo(() => {
@@ -573,8 +676,8 @@ function RulerRow({ contentW }: { contentW: number }) {
   }, [step, zoom, contentW])
 
   return (
-    <div className="tl-row" style={{ height: RULER_H }}>
-      <div className="tl-head" style={{ width: HEADER_W, height: RULER_H }} />
+    <div className="tl-row tl-ruler-row" style={{ height: RULER_H }}>
+      <div className="tl-head" style={{ width: headerW, height: RULER_H }} />
       <div
         className="ruler"
         style={{ width: contentW, backgroundSize: `${step * zoom}px 100%` }}
@@ -583,30 +686,45 @@ function RulerRow({ contentW }: { contentW: number }) {
         {ticks.map((tt) => (
           <span key={tt} style={{ left: tt * zoom }}>{tickLabel(tt)}</span>
         ))}
+        <RulerCursors />
       </div>
     </div>
   )
 }
 
-function Playhead() {
+function RulerCursors() {
+  const playhead = useEditor((s) => s.playhead)
+  const kfMarker = useEditor((s) => s.kfMarker)
+  const zoom = useEditor((s) => s.zoom)
+  return (
+    <>
+      <div className="ruler-playhead" style={{ left: playhead * zoom }} />
+      {kfMarker !== null && (
+        <div className="ruler-kf-marker" style={{ left: kfMarker * zoom }}>
+          <div className="ruler-kf-diamond" />
+        </div>
+      )}
+    </>
+  )
+}
+
+function Playhead({ headerW }: { headerW: number }) {
   const playhead = useEditor((s) => s.playhead)
   const zoom = useEditor((s) => s.zoom)
-  return <div className="playhead" style={{ left: HEADER_W + playhead * zoom }} />
+  return <div className="playhead" style={{ left: headerW + playhead * zoom }} />
 }
 
 /** Yellow marker mirroring a keyframe being dragged in a mini-timeline. */
-function KfMarker() {
+function KfMarker({ headerW }: { headerW: number }) {
   const kfMarker = useEditor((s) => s.kfMarker)
   const zoom = useEditor((s) => s.zoom)
   if (kfMarker === null) return null
   return (
-    <div className="kf-marker" style={{ left: HEADER_W + kfMarker * zoom }}>
-      <div className="kf-marker-diamond" />
-    </div>
+    <div className="kf-marker" style={{ left: headerW + kfMarker * zoom }} />
   )
 }
 
-function RangeOverlay() {
+function RangeOverlay({ headerW }: { headerW: number }) {
   const range = useEditor((s) => s.range)
   const zoom = useEditor((s) => s.zoom)
   if (!range) return null
@@ -623,7 +741,7 @@ function RangeOverlay() {
       const r = s.range
       if (!r) return
       const time = snapTime(
-        Math.max(0, (ev.clientX - contentLeft - HEADER_W) / s.zoom),
+        Math.max(0, (ev.clientX - contentLeft - headerW) / s.zoom),
         points,
         s.zoom
       )
@@ -636,7 +754,7 @@ function RangeOverlay() {
   return (
     <div
       className="range-overlay"
-      style={{ left: HEADER_W + range.start * zoom, width: (range.end - range.start) * zoom }}
+      style={{ left: headerW + range.start * zoom, width: (range.end - range.start) * zoom }}
     >
       <div className="range-edge left" onPointerDown={dragEdge('start')} />
       <div className="range-edge right" onPointerDown={dragEdge('end')} />
@@ -671,10 +789,11 @@ const SPEED_SNAPS = [
 ]
 
 function TrackRow({
-  track, trackH, contentW, view, onMenu
+  track, trackH, headerW, contentW, view, onMenu
 }: {
   track: Track
   trackH: number
+  headerW: number
   contentW: number
   view: ViewWindow
   onMenu: (m: MenuState) => void
@@ -683,12 +802,13 @@ function TrackRow({
   const reorder = useRef<{ pushed: boolean } | null>(null)
   const gainRef = useRef<HTMLInputElement>(null)
 
-  // wheel over the volume/opacity slider: precise ±1% per notch (a drag can't
-  // hit exact values); consecutive notches merge into one history entry
+  // Option+wheel over the volume/opacity slider: precise ±1%. A plain
+  // two-finger gesture must keep scrolling the timeline on macOS.
   useEffect(() => {
     const el = gainRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
+      if (!e.altKey) return
       e.preventDefault()
       e.stopPropagation() // the timeline zoom listener must not see this
       const st = useEditor.getState()
@@ -770,7 +890,7 @@ function TrackRow({
     <div className="tl-row" style={{ height: trackH }}>
       <div
         className={`tl-head track-head ${track.kind}`}
-        style={{ width: HEADER_W, height: trackH }}
+        style={{ width: headerW, height: trackH }}
         data-trackhead={track.id}
         onPointerDown={onHeadDown}
         onPointerMove={onHeadMove}
@@ -781,7 +901,7 @@ function TrackRow({
         }}
       >
         <div className="track-head-row">
-          <span className="track-name">{track.name}</span>
+          <span className="track-name" title={track.name}>{track.name}</span>
           {track.kind === 'video' && (
             <button
               className={track.motion ? 'toggled-on' : ''}
@@ -816,7 +936,7 @@ function TrackRow({
               max={track.kind === 'audio' ? 2 : 1}
               step={0.01}
               value={track.gain}
-              title={track.kind === 'audio' ? t('volume') : t('opacity')}
+              title={`${track.kind === 'audio' ? t('volume') : t('opacity')} · ⌥ + scroll: ±1%`}
               onPointerDown={(e) => {
                 e.stopPropagation()
                 useEditor.getState().pushHistory('hEdit')
@@ -1310,6 +1430,7 @@ function ClipView({
   return (
     <div
       className={cls}
+      data-clip-id={clip.id}
       style={{ left: clip.start * zoom, width: Math.max(4, w) }}
       onPointerDown={onPointerDown}
       onDoubleClick={(e) => {

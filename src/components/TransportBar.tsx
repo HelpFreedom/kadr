@@ -15,7 +15,13 @@ export function formatTime(t: number, fps: number): string {
   return `${sign}${pad(h)}:${pad(m)}:${pad(s)}.${pad(f)}`
 }
 
-export function TransportBar() {
+export function TransportBar({
+  previewDetached = false,
+  onPreviewToggle
+}: {
+  previewDetached?: boolean
+  onPreviewToggle?: () => void
+}) {
   const t = useT()
   const [shot, setShot] = useState<'idle' | 'busy' | 'ok' | 'fail'>('idle')
   const playing = useEditor((s) => s.playing)
@@ -82,6 +88,17 @@ export function TransportBar() {
           <span> / {Math.floor(duration * fps + 1e-6)}</span>
         </span>
       </span>
+      {onPreviewToggle && (
+        <button
+          className={`preview-window-toggle${previewDetached ? ' active' : ''}`}
+          title={t(previewDetached ? 'previewDockHint' : 'previewDetachHint')}
+          aria-label={t(previewDetached ? 'previewDockHint' : 'previewDetachHint')}
+          aria-pressed={previewDetached}
+          onClick={onPreviewToggle}
+        >
+          <span className="split-screen-icon" aria-hidden="true" />
+        </button>
+      )}
     </div>
   )
 }

@@ -8,6 +8,7 @@ import { ExportDialog } from './components/ExportDialog'
 import { ClaudePanel } from './components/ClaudePanel'
 import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
 import { CaptionsDialog } from './components/CaptionsDialog'
+import { VoiceoverStudio } from './components/VoiceoverStudio'
 import { useEditor, newProject } from './state/store'
 import { dropPayload, dropUsable, importDrop, importFiles } from './engine/mediaImport'
 import { useT, type TKey } from './i18n'
@@ -275,6 +276,7 @@ export default function App() {
       <TranscribeDialog />
       <SubtitlePanel />
       <CaptionsDialog />
+      <VoiceoverStudio />
       {claudeOpen && <ClaudePanel onClose={() => setClaudeOpen(false)} />}
     </div>
   )

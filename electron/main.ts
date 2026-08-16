@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'electron'
-import { join, dirname, basename } from 'path'
+import { join, dirname, basename, extname } from 'path'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
@@ -8,6 +8,7 @@ import { probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, Expo
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerFragmentIpc } from './fragments'
+import { registerVoiceoverIpc } from './voiceover'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -137,9 +138,30 @@ function streamBody(stream: ReturnType<typeof createReadStream>): ReadableStream
   })
 }
 
+function mediaContentType(filePath: string): string {
+  switch (extname(filePath).toLowerCase()) {
+    case '.wav': return 'audio/wav'
+    case '.mp3': return 'audio/mpeg'
+    case '.m4a': return 'audio/mp4'
+    case '.aac': return 'audio/aac'
+    case '.flac': return 'audio/flac'
+    case '.ogg': return 'audio/ogg'
+    case '.mp4': return 'video/mp4'
+    case '.mov': return 'video/quicktime'
+    case '.webm': return 'video/webm'
+    case '.png': return 'image/png'
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg'
+    case '.webp': return 'image/webp'
+    case '.gif': return 'image/gif'
+    default: return 'application/octet-stream'
+  }
+}
+
 function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   const stat = statSync(filePath)
   const size = stat.size
+  const contentType = mediaContentType(filePath)
   const m = rangeHeader?.match(/bytes=(\d*)-(\d*)/)
   // CORS header keeps WebAudio (MediaElementSource) from silencing the stream
   if (m && (m[1] || m[2])) {
@@ -148,6 +170,7 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
     return new Response(streamBody(createReadStream(filePath, { start, end })), {
       status: 206,
       headers: {
+        'Content-Type': contentType,
         'Content-Range': `bytes ${start}-${end}/${size}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': String(end - start + 1),
@@ -158,6 +181,7 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   return new Response(streamBody(createReadStream(filePath)), {
     status: 200,
     headers: {
+      'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
       'Content-Length': String(size),
       'Access-Control-Allow-Origin': '*'
@@ -182,6 +206,7 @@ app.whenReady().then(() => {
   registerClaudeIpc(() => win)
   registerTranscribeIpc(() => win)
   registerFragmentIpc(() => win)
+  registerVoiceoverIpc(() => win)
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

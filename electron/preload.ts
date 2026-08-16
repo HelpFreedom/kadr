@@ -152,6 +152,15 @@ const api: KadrApi = {
   writeTextFile: (path, content) => ipcRenderer.invoke('file:write-text', path, content),
   statFile: (path) => ipcRenderer.invoke('file:stat', path),
 
+  voiceoverStatus: (settings) => ipcRenderer.invoke('voiceover:status', settings),
+  voiceoverGenerate: (req) => ipcRenderer.invoke('voiceover:generate', req),
+  voiceoverCancel: () => ipcRenderer.invoke('voiceover:cancel'),
+  onVoiceoverProgress: (cb) => {
+    const handler = (_e: unknown, p: Parameters<typeof cb>[0]) => cb(p)
+    ipcRenderer.on('voiceover:progress', handler)
+    return () => ipcRenderer.removeListener('voiceover:progress', handler)
+  },
+
   claudeOpen: (cols, rows, cwd) => ipcRenderer.invoke('claude:open', cols, rows, cwd),
   claudeInput: (data) => ipcRenderer.send('claude:input', data),
   claudeResize: (cols, rows) => ipcRenderer.send('claude:resize', cols, rows),

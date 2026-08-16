@@ -106,6 +106,7 @@ const api: KadrApi = {
   },
 
   exportDialog: (name, ext) => ipcRenderer.invoke('export:dialog', name, ext),
+  htmlPlayerExport: (request) => ipcRenderer.invoke('html-player:export', request),
   exportBegin: (job) => ipcRenderer.invoke('export:begin', job),
   exportVideoChunk: (data, position) => ipcRenderer.invoke('export:video-chunk', data, position),
   exportRawBegin: (width, height, fps, outWidth, outHeight) =>

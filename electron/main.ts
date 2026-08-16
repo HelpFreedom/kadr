@@ -8,9 +8,10 @@ import { execFile, execFileSync } from 'child_process'
 import { probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, ExportMuxer, RawVideoEncoder } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
-import { registerFragmentIpc } from './fragments'
+import { bundleFragments, registerFragmentIpc } from './fragments'
 import { registerVoiceoverIpc } from './voiceover'
-import type { ExportJob, Project } from '@shared/types'
+import { writeHtmlPlayerExport } from './html-player'
+import type { ExportJob, HtmlPlayerExportRequest, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
 // file content regardless of its own origin (http in dev, file in prod).
@@ -304,6 +305,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  htmlExportAbort?.abort()
   exportState?.muxer?.cancel()
   void cleanupExport()
 })
@@ -330,6 +332,7 @@ let exportState: {
   rawChain: Promise<void>
   rawErr: Error | null
 } | null = null
+let htmlExportAbort: AbortController | null = null
 
 function sendProgress(p: import('@shared/types').ExportProgress) {
   win?.webContents.send('export:progress', p)
@@ -750,6 +753,32 @@ function registerIpc() {
     return r.filePath
   })
 
+  ipcMain.handle('html-player:export', async (_e, request: HtmlPlayerExportRequest) => {
+    htmlExportAbort?.abort()
+    const controller = new AbortController()
+    htmlExportAbort = controller
+    try {
+      const output = await writeHtmlPlayerExport(request, {
+        bundlePath: join(__dirname, '..', 'html-player', 'player.js'),
+        signal: controller.signal,
+        bundleFragments,
+        onProgress: (progress) => sendProgress({ phase: 'files', progress: 0.15 + progress * 0.85 })
+      })
+      sendProgress({ phase: 'done', progress: 1 })
+      return output
+    } catch (error: any) {
+      const cancelled = controller.signal.aborted || error?.message === 'cancelled'
+      sendProgress({
+        phase: cancelled ? 'cancelled' : 'error',
+        progress: 0,
+        message: String(error?.message ?? error)
+      })
+      throw error
+    } finally {
+      if (htmlExportAbort === controller) htmlExportAbort = null
+    }
+  })
+
   ipcMain.handle('export:begin', async (_e, job: ExportJob) => {
     await cleanupExport()
     const videoTemp = join(tmpdir(), `kadr-export-${Date.now()}.mp4`)
@@ -864,6 +893,7 @@ function registerIpc() {
   })
 
   ipcMain.handle('export:cancel', async () => {
+    htmlExportAbort?.abort()
     exportState?.raw?.kill()
     exportState?.muxer?.cancel()
     if (exportState && !exportState.muxer) {

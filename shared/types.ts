@@ -420,10 +420,16 @@ export interface AudioSegment {
 }
 
 export interface ExportProgress {
-  phase: 'fragments' | 'video' | 'audio' | 'mux' | 'done' | 'error' | 'cancelled'
+  phase: 'fragments' | 'video' | 'audio' | 'mux' | 'files' | 'done' | 'error' | 'cancelled'
   /** 0..1 within the current phase */
   progress: number
   message?: string
+}
+
+export interface HtmlPlayerExportRequest {
+  parentDir: string
+  project: Project
+  lang: 'ru' | 'en'
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +497,7 @@ export interface KadrApi {
   measureLoudness(path: string, start: number, duration: number): Promise<{ i: number; tp: number }>
 
   exportDialog(defaultName: string, ext: string): Promise<string | null>
+  htmlPlayerExport(request: HtmlPlayerExportRequest): Promise<string>
   exportBegin(job: ExportJob): Promise<void>
   exportVideoChunk(data: ArrayBuffer, position: number): Promise<void>
   /** Direct encode in the renderer process: preload spawns ffmpeg and pipes

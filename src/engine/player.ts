@@ -117,6 +117,10 @@ export interface MediaPoolOptions {
   audio?: boolean
   /** decode preview proxies instead of the originals when available */
   proxy?: boolean
+  /** Convert a project asset path into a URL understood by this runtime. */
+  resolveUrl?: (path: string) => string
+  /** Electron's kadr:// protocol needs CORS; local standalone files do not. */
+  crossOrigin?: boolean
 }
 
 export class MediaPool {
@@ -132,17 +136,18 @@ export class MediaPool {
     let el = this.items.get(clipId)
     const useProxy = this.opts.proxy && !!asset.proxyPath &&
       (!this.sourceQuality || !chromiumCanDecode(asset.codec))
-    const url = window.kadr.fileUrl(useProxy ? asset.proxyPath! : asset.path)
+    const path = useProxy ? asset.proxyPath! : asset.path
+    const url = this.opts.resolveUrl?.(path) ?? window.kadr.fileUrl(path)
     if (!el) {
       if (asset.kind === 'image') {
         el = new Image()
         // without CORS the kadr:// image is tainted on modern Chromium and
         // texImage2D refuses it — the clip simply vanishes from the preview
-        el.crossOrigin = 'anonymous'
+        if (this.opts.crossOrigin !== false) el.crossOrigin = 'anonymous'
       } else {
         el = document.createElement('video')
         el.preload = 'auto'
-        el.crossOrigin = 'anonymous'
+        if (this.opts.crossOrigin !== false) el.crossOrigin = 'anonymous'
         if (this.opts.audio) attachAudio(el)
       }
       this.items.set(clipId, el)
@@ -455,10 +460,17 @@ interface PlayerHooks {
   duration(): number
 }
 
+export interface PlayerOptions {
+  /** Standalone exports use rewritten asset paths, never editor proxies. */
+  proxy?: boolean
+  resolveUrl?: (path: string) => string
+  crossOrigin?: boolean
+}
+
 /** Live preview: master clock + media element sync + GPU composite. */
 export class Player {
   private comp: Compositor | null = null
-  private pool = new MediaPool({ audio: true, proxy: true })
+  private pool: MediaPool
   private raf = 0
   private gcCounter = 0
   private wasLoading = false
@@ -469,7 +481,14 @@ export class Player {
   private anchor: { ts: number; t: number } | null = null
   private lastSet = -1
 
-  constructor(private hooks: PlayerHooks) {}
+  constructor(private hooks: PlayerHooks, opts: PlayerOptions = {}) {
+    this.pool = new MediaPool({
+      audio: true,
+      proxy: opts.proxy ?? true,
+      resolveUrl: opts.resolveUrl,
+      crossOrigin: opts.crossOrigin
+    })
+  }
 
   /** Frame snapshots: decode originals instead of preview proxies while on. */
   setSourceQuality(on: boolean) {

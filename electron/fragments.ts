@@ -7,7 +7,7 @@ import { app, ipcMain, BrowserWindow } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import { promises as fs, existsSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { homedir } from 'os'
 import type { FragmentSpec, FragmentInfo } from '@shared/types'
 
@@ -296,6 +296,108 @@ async function ensureWorkspace(
     onProgress?.('install', 1)
   }
   return { dir: WORKSPACE, installed }
+}
+
+async function inlineFragmentBundle(outputDir: string): Promise<void> {
+  const indexPath = join(outputDir, 'index.html')
+  let html = await fs.readFile(indexPath, 'utf8')
+  const scriptTag = html.match(/<script type="module"[^>]*\ssrc="\.\/([^"]+)"[^>]*><\/script>/)
+  if (!scriptTag) throw new Error('Fragment bundle entry script was not generated')
+  const scriptPath = join(outputDir, scriptTag[1])
+  const script = (await fs.readFile(scriptPath, 'utf8')).replace(/<\/script/gi, '<\\/script')
+  html = html.replace(scriptTag[0], () => `<script type="module">${script}</script>`)
+  await fs.rm(scriptPath, { force: true })
+
+  const stylePattern = /<link\b[^>]*href="\.\/([^"]+\.css)"[^>]*>/g
+  for (const match of [...html.matchAll(stylePattern)]) {
+    const stylePath = join(outputDir, match[1])
+    const style = (await fs.readFile(stylePath, 'utf8')).replace(/<\/style/gi, '<\\/style')
+    html = html.replace(match[0], () => `<style>${style}</style>`)
+    await fs.rm(stylePath, { force: true })
+  }
+  await fs.writeFile(indexPath, html, 'utf8')
+}
+
+/** Build the selected live compositions as a portable browser runtime.
+ * This compiles TSX once; it never renders timeline frames. */
+export async function bundleFragments(
+  fragmentIds: string[],
+  outputDir: string,
+  signal: AbortSignal
+): Promise<void> {
+  if (!fragmentIds.length) return
+  await ensureWorkspace()
+  const ids = [...new Set(fragmentIds)].sort()
+  for (const id of ids) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid fragment id: ${id}`)
+    await fs.access(join(FRAG_DIR(), id, 'index.tsx'))
+  }
+  if (signal.aborted) throw new Error('cancelled')
+
+  const tempDir = join(WORKSPACE, `.kadr-html-export-${process.pid}-${randomUUID()}`)
+  try {
+    await fs.mkdir(tempDir, { recursive: true })
+    const imports = ids.map((id, index) =>
+      `import { fragment as f${index} } from '../src/fragments/${id}'`
+    )
+    const registry = [
+      ...imports,
+      '',
+      'export const fragments = {',
+      ...ids.map((id, index) => `  ${JSON.stringify(id)}: f${index},`),
+      '}',
+      ''
+    ].join('\n')
+    const player = PLAYER_TSX.replace(
+      "import { fragments } from './src/fragments'",
+      "import { fragments } from './registry'"
+    )
+    const config = `import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+export default defineConfig({
+  root: ${JSON.stringify(tempDir)},
+  plugins: [react()],
+  base: './',
+  build: {
+    outDir: ${JSON.stringify(outputDir)},
+    emptyOutDir: true,
+    assetsDir: '.',
+    rollupOptions: { output: { inlineDynamicImports: true } }
+  }
+})
+`
+    await Promise.all([
+      fs.writeFile(join(tempDir, 'registry.ts'), registry, 'utf8'),
+      fs.writeFile(join(tempDir, 'player.tsx'), player, 'utf8'),
+      fs.writeFile(join(tempDir, 'index.html'), INDEX_HTML.replace('src="/player.tsx"', 'src="./player.tsx"'), 'utf8'),
+      fs.writeFile(join(tempDir, 'vite.config.ts'), config, 'utf8')
+    ])
+
+    const vite = join(WORKSPACE, 'node_modules', '.bin', 'vite')
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(vite, ['build', '--config', join(tempDir, 'vite.config.ts')], {
+        cwd: tempDir,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+      let output = ''
+      const onData = (chunk: Buffer) => { output += chunk }
+      child.stdout.on('data', onData)
+      child.stderr.on('data', onData)
+      const cancel = () => child.kill('SIGTERM')
+      signal.addEventListener('abort', cancel, { once: true })
+      child.on('error', reject)
+      child.on('close', (code) => {
+        signal.removeEventListener('abort', cancel)
+        if (signal.aborted) reject(new Error('cancelled'))
+        else if (code === 0) resolve()
+        else reject(new Error(`Fragment bundle failed (${code}): ${output.slice(-1200)}`))
+      })
+    })
+    await inlineFragmentBundle(outputDir)
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true })
+  }
 }
 
 // --------------------------------------------------------------- dev server

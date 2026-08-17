@@ -637,12 +637,13 @@ button.danger:hover { background: #944; }
 .tl-scroll {
   position: absolute;
   inset: 0 0 var(--tl-scrollbar-size);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   scrollbar-color: color-mix(in srgb, var(--dim) 52%, transparent) var(--panel);
 }
-.tl-scroll::-webkit-scrollbar { width: var(--tl-scrollbar-size); height: 0; }
+.tl-scroll::-webkit-scrollbar { width: var(--tl-scrollbar-size); }
 .tl-scroll::-webkit-scrollbar-track { background: var(--panel); }
 .tl-scroll::-webkit-scrollbar-thumb {
   min-width: 34px;

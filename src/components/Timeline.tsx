@@ -214,17 +214,28 @@ export function Timeline({ height }: { height: number }) {
 
     const onWheel = (e: WheelEvent) => {
       // macOS trackpads send ordinary two-finger navigation as deltaX/deltaY.
-      // Let the native overflow container consume both axes. Pinch gestures are
-      // reported by Chromium as Ctrl+wheel; Cmd/Ctrl+wheel is the keyboard form.
+      // The visible horizontal scrollbar is a separate synchronized element, so
+      // forward horizontal gestures to the hidden x-axis of the main scroller.
+      // Pinch gestures are reported by Chromium as Ctrl+wheel; Cmd/Ctrl+wheel is
+      // the keyboard form.
       const zoomGesture = e.ctrlKey || e.metaKey
+      const modeScale = e.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? el.clientHeight
+          : 1
       if (!zoomGesture) {
+        if (!el.contains(e.target as Node)) return
+        const dx = e.deltaX * modeScale
+        const dy = e.deltaY * modeScale
         // A mouse has no horizontal wheel, so Shift maps its vertical delta to
-        // the time axis. Native trackpad deltaX keeps working without this path.
-        if (el.contains(e.target as Node) && e.shiftKey && Math.abs(e.deltaX) < Math.abs(e.deltaY)) {
-          e.preventDefault()
-          el.scrollLeft += e.deltaY
-          updateView()
-        }
+        // the time axis. Trackpad gestures keep both axes for diagonal movement.
+        const horizontalDelta = e.shiftKey && Math.abs(dx) < Math.abs(dy) ? dy : dx
+        if (Math.abs(horizontalDelta) < 0.01) return
+        e.preventDefault()
+        el.scrollLeft += horizontalDelta
+        if (!e.shiftKey) el.scrollTop += dy
+        updateView()
         return
       }
       e.preventDefault()
@@ -234,11 +245,6 @@ export function Timeline({ height }: { height: number }) {
       const pointerX = Math.max(0, e.clientX - rect.left - useSettings.getState().trackHeaderW)
       const cx = pointerX + el.scrollLeft
       const tAtCursor = cx / s.zoom
-      const modeScale = e.deltaMode === WheelEvent.DOM_DELTA_LINE
-        ? 16
-        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
-          ? el.clientHeight
-          : 1
       const delta = Math.max(-40, Math.min(40, e.deltaY * modeScale))
       // Chromium synthesizes Ctrl+wheel for a trackpad pinch and deliberately
       // uses a positive delta for pinch-out (zoom in). Cmd+wheel is a manual

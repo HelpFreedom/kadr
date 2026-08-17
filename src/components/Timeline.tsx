@@ -163,6 +163,7 @@ export function Timeline({ height }: { height: number }) {
   const selectedId = useEditor((s) => s.selection[0])
   const timelineRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const horizontalScrollRef = useRef<HTMLDivElement>(null)
   const [view, setView] = useState({ start: 0, end: 60 })
   const [viewportW, setViewportW] = useState(800)
   const [menu, setMenu] = useState<MenuState | null>(null)
@@ -171,8 +172,9 @@ export function Timeline({ height }: { height: number }) {
 
   useEffect(() => {
     const el = scrollRef.current
+    const horizontal = horizontalScrollRef.current
     const timeline = timelineRef.current
-    if (!el || !timeline) return
+    if (!el || !horizontal || !timeline) return
     let raf = 0
     const updateView = () => {
       cancelAnimationFrame(raf)
@@ -191,8 +193,21 @@ export function Timeline({ height }: { height: number }) {
         )
       })
     }
+    const onTimelineScroll = () => {
+      if (Math.abs(horizontal.scrollLeft - el.scrollLeft) > 0.5) {
+        horizontal.scrollLeft = el.scrollLeft
+      }
+      updateView()
+    }
+    const onHorizontalScroll = () => {
+      if (Math.abs(el.scrollLeft - horizontal.scrollLeft) > 0.5) {
+        el.scrollLeft = horizontal.scrollLeft
+      }
+    }
+    horizontal.scrollLeft = el.scrollLeft
     updateView()
-    el.addEventListener('scroll', updateView)
+    el.addEventListener('scroll', onTimelineScroll)
+    horizontal.addEventListener('scroll', onHorizontalScroll)
     const ro = new ResizeObserver(updateView)
     ro.observe(el)
 
@@ -241,7 +256,8 @@ export function Timeline({ height }: { height: number }) {
     timeline.addEventListener('wheel', onWheel, { passive: false, capture: true })
     return () => {
       timeline.removeEventListener('wheel', onWheel, true)
-      el.removeEventListener('scroll', updateView)
+      el.removeEventListener('scroll', onTimelineScroll)
+      horizontal.removeEventListener('scroll', onHorizontalScroll)
       ro.disconnect()
       cancelAnimationFrame(raf)
     }
@@ -373,6 +389,15 @@ export function Timeline({ height }: { height: number }) {
             <Playhead headerW={headerW} />
           </div>
         </div>
+        <div
+          className="tl-horizontal-scroll"
+          ref={horizontalScrollRef}
+          style={{ left: headerW }}
+          aria-hidden="true"
+        >
+          <div className="tl-horizontal-scroll-content" style={{ width: contentW }} />
+        </div>
+        <div className="tl-scrollbar-corner" aria-hidden="true" />
         <TrackHeaderResizer width={headerW} />
       </div>
       {menu && <TrackMenu menu={menu} onClose={() => setMenu(null)} />}

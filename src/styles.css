@@ -610,6 +610,7 @@ button.danger:hover { background: #944; }
 
 /* ---- timeline ---- */
 .timeline {
+  --tl-scrollbar-size: 11px;
   display: flex;
   flex-direction: column;
   background: var(--panel);
@@ -635,13 +636,13 @@ button.danger:hover { background: #944; }
 }
 .tl-scroll {
   position: absolute;
-  inset: 0;
+  inset: 0 0 var(--tl-scrollbar-size);
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   scrollbar-color: color-mix(in srgb, var(--dim) 52%, transparent) var(--panel);
 }
-.tl-scroll::-webkit-scrollbar { width: 11px; height: 11px; }
+.tl-scroll::-webkit-scrollbar { width: var(--tl-scrollbar-size); height: 0; }
 .tl-scroll::-webkit-scrollbar-track { background: var(--panel); }
 .tl-scroll::-webkit-scrollbar-thumb {
   min-width: 34px;
@@ -654,10 +655,40 @@ button.danger:hover { background: #944; }
   background: color-mix(in srgb, var(--accent) 68%, var(--dim));
 }
 .tl-scroll::-webkit-scrollbar-corner { background: var(--panel); }
+.tl-horizontal-scroll {
+  position: absolute;
+  right: var(--tl-scrollbar-size);
+  bottom: 0;
+  height: var(--tl-scrollbar-size);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-color: color-mix(in srgb, var(--dim) 52%, transparent) var(--panel);
+}
+.tl-horizontal-scroll-content { height: 1px; }
+.tl-horizontal-scroll::-webkit-scrollbar { height: var(--tl-scrollbar-size); }
+.tl-horizontal-scroll::-webkit-scrollbar-track { background: var(--panel); }
+.tl-horizontal-scroll::-webkit-scrollbar-thumb {
+  min-width: 34px;
+  border: 3px solid var(--panel);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dim) 48%, transparent);
+}
+.tl-horizontal-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent) 68%, var(--dim));
+}
+.tl-scrollbar-corner {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: var(--tl-scrollbar-size);
+  height: var(--tl-scrollbar-size);
+  background: var(--panel);
+}
 .track-header-resizer {
   position: absolute;
   top: 0;
-  bottom: 11px;
+  bottom: var(--tl-scrollbar-size);
   z-index: 50;
   width: 10px;
   cursor: col-resize;

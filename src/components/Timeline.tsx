@@ -169,6 +169,7 @@ export function Timeline({ height }: { height: number }) {
   const [menu, setMenu] = useState<MenuState | null>(null)
 
   const contentW = Math.max(800, viewportW, (duration + 30) * zoom)
+  const trackAreaH = tracks.length * trackH
 
   useEffect(() => {
     const el = scrollRef.current
@@ -385,8 +386,8 @@ export function Timeline({ height }: { height: number }) {
               />
             ))}
             <RangeOverlay headerW={headerW} />
-            <KfMarker headerW={headerW} />
-            <Playhead headerW={headerW} />
+            <KfMarker headerW={headerW} trackAreaH={trackAreaH} />
+            <Playhead headerW={headerW} trackAreaH={trackAreaH} />
           </div>
         </div>
         <div
@@ -745,19 +746,27 @@ function RulerCursors() {
   )
 }
 
-function Playhead({ headerW }: { headerW: number }) {
+function Playhead({ headerW, trackAreaH }: { headerW: number; trackAreaH: number }) {
   const playhead = useEditor((s) => s.playhead)
   const zoom = useEditor((s) => s.zoom)
-  return <div className="playhead" style={{ left: headerW + playhead * zoom }} />
+  return (
+    <div
+      className="playhead"
+      style={{ left: headerW + playhead * zoom, height: trackAreaH }}
+    />
+  )
 }
 
 /** Yellow marker mirroring a keyframe being dragged in a mini-timeline. */
-function KfMarker({ headerW }: { headerW: number }) {
+function KfMarker({ headerW, trackAreaH }: { headerW: number; trackAreaH: number }) {
   const kfMarker = useEditor((s) => s.kfMarker)
   const zoom = useEditor((s) => s.zoom)
   if (kfMarker === null) return null
   return (
-    <div className="kf-marker" style={{ left: headerW + kfMarker * zoom }} />
+    <div
+      className="kf-marker"
+      style={{ left: headerW + kfMarker * zoom, height: trackAreaH }}
+    />
   )
 }
 

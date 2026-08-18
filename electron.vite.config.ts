@@ -26,6 +26,13 @@ export default defineConfig({
   },
   renderer: {
     root: '.',
+    // Bind the dev server to the IPv4 loopback explicitly. On Windows with
+    // Node >= 17 'localhost' resolves to [::1] first, so Vite can listen on
+    // IPv6 only — then Electron's renderer (which connects via 127.0.0.1)
+    // gets ERR_CONNECTION_REFUSED and the window stays blank.
+    server: {
+      host: '127.0.0.1'
+    },
     build: {
       outDir: 'out/renderer',
       rollupOptions: { input: resolve(__dirname, 'index.html') }

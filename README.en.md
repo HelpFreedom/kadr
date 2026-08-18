@@ -96,6 +96,18 @@ npm install        # postinstall rebuilds node-pty for Electron
 npm run dev
 ```
 
+> **Windows: MSB8040 / “Spectre” error during `npm install`.** When built
+> from source, `node-pty` links the MSVC Spectre-mitigated runtime
+> libraries. If Visual Studio lacks the
+> “MSVC v143 – C++ x64/x86 **Spectre-mitigated libs**” component,
+> `electron-rebuild` fails with MSB8040. The project works around it
+> automatically: `postinstall` flips `SpectreMitigation` to `false` in
+> `node-pty/binding.gyp` and `deps/winpty/src/winpty.gyp` before the
+> rebuild (see `scripts/fix-spectre.js`). To build manually instead,
+> install that component via “Visual Studio Installer → Modify →
+> Individual components”, or set
+> `<SpectreMitigation>false</SpectreMitigation>` in the vcxproj.
+
 Import media, edit, press Export. For the AI assistant press 🤖 (the
 `claude` CLI must be installed and logged in). If your network needs a
 proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:

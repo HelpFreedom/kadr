@@ -10,7 +10,7 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
-    "postinstall": "electron-rebuild -f -w node-pty"
+    "postinstall": "node scripts/fix-spectre.js && electron-rebuild -f -w node-pty"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

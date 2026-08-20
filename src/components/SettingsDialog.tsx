@@ -23,9 +23,9 @@ export function SettingsDialog() {
   const close = () => useEditor.getState().setSettingsOpen(false)
 
   const [gpus, setGpus] = useState<GpuInfo[]>([])
-  const [node, setNode] = useState('') // '' = auto
-  const [saved, setSaved] = useState('') // active choice on disk, to detect a change
-  const [failed, setFailed] = useState(false) // last attempt didn't come up → reverted
+  const [node, setNode] = useState('') // dropdown selection ('' = auto)
+  const [savedNode, setSavedNode] = useState('')
+  const [savedStatus, setSavedStatus] = useState<string | undefined>(undefined)
   const [renderer] = useState(activeRenderer)
 
   useEffect(() => {
@@ -34,17 +34,15 @@ export function SettingsDialog() {
     void (async () => {
       const [list, choice] = await Promise.all([
         window.kadr.gpuList(),
-        window.kadr.readUserStore('gpu') as Promise<
-          { node?: string; status?: string } | null
-        >
+        window.kadr.readUserStore('gpu') as Promise<{ node?: string; status?: string } | null>
       ])
       if (!alive) return
       setGpus(list)
-      // a 'failed' choice means the app reverted to auto — show Auto selected
-      const active = choice?.node && choice.status !== 'failed' ? choice.node : ''
-      setNode(active)
-      setSaved(active)
-      setFailed(Boolean(choice?.node) && choice?.status === 'failed')
+      setSavedNode(choice?.node ?? '')
+      setSavedStatus(choice?.status)
+      const chosen = list.find((g) => g.node === choice?.node)
+      const matches = !!chosen && renderer.toUpperCase().includes(chosen.vendor.toUpperCase())
+      setNode(choice?.node && (choice.status === 'ok' || matches) ? choice.node : '')
     })()
     return () => {
       alive = false
@@ -56,14 +54,27 @@ export function SettingsDialog() {
   const label = (g: GpuInfo) =>
     `${g.vendor} (${g.integrated ? t('gpuIntegrated') : t('gpuDiscrete')})`
 
-  const changed = node !== saved
+  const chosen = gpus.find((g) => g.node === savedNode)
+  const rendererMatches = !!chosen && renderer.toUpperCase().includes(chosen.vendor.toUpperCase())
+  // The trial GPU is actually driving the window (we can see it, and its vendor
+  // shows in the live renderer) but hasn't been kept yet — offer to keep it.
+  const trialPending = savedStatus !== 'ok' && !!savedNode && rendererMatches
+  // A chosen GPU that didn't come up: it's on disk but the app fell back to auto.
+  const reverted = savedStatus !== 'ok' && !!savedNode && !rendererMatches
+  const effectiveSaved = savedNode && (savedStatus === 'ok' || trialPending) ? savedNode : ''
+  const changed = node !== effectiveSaved
 
-  // a chosen GPU is written as a 'trial': main flips it to 'failed' before the
-  // window opens and back to 'ok' only once the renderer loads, so a GPU that
-  // won't come up heals to auto on the next launch instead of bricking the app.
-  const apply = async () => {
+  const applyRestart = async () => {
+    // written as a 'trial': main flips it to 'failed' before the window opens
+    // and it only becomes 'ok' when the user keeps it below — so a GPU that
+    // comes up blank (or not at all) heals back to auto on the next launch.
     await window.kadr.writeUserStore('gpu', node ? { node, status: 'trial' } : {})
-    setSaved(node)
+    window.kadr.relaunchApp()
+  }
+
+  const keep = () => {
+    window.kadr.gpuConfirm()
+    setSavedStatus('ok')
   }
 
   return (
@@ -81,28 +92,24 @@ export function SettingsDialog() {
           </select>
         </label>
 
-        {renderer && (
-          <div className="dim">{t('gpuActive')}: {renderer}</div>
-        )}
-        {failed && <div className="export-err">{t('gpuFailedRevert')}</div>}
+        {renderer && <div className="dim">{t('gpuActive')}: {renderer}</div>}
+        {reverted && <div className="export-err">{t('gpuFailedRevert')}</div>}
         <div className="dim">{t('gpuEncodeNote')}</div>
 
+        {trialPending && !changed && (
+          <div className="export-ok" style={{ marginTop: 8 }}>{t('gpuTrialAsk')}</div>
+        )}
         {changed && (
           <div className="export-ok" style={{ marginTop: 8 }}>{t('gpuRestartHint')}</div>
         )}
 
         <div className="modal-actions">
-          {changed ? (
-            <button
-              className="primary"
-              onClick={async () => {
-                await apply()
-                window.kadr.relaunchApp()
-              }}
-            >
-              {t('gpuApplyRestart')}
-            </button>
-          ) : null}
+          {trialPending && !changed && (
+            <button className="primary" onClick={keep}>{t('gpuKeep')}</button>
+          )}
+          {changed && (
+            <button className="primary" onClick={applyRestart}>{t('gpuApplyRestart')}</button>
+          )}
           <button onClick={close}>{t('close')}</button>
         </div>
       </div>

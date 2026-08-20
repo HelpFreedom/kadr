@@ -493,6 +493,9 @@ export interface KadrApi {
   defaultGpuPower: string
   /** Enumerate selectable GPUs (DRM render nodes). */
   gpuList(): Promise<GpuInfo[]>
+  /** Confirm the current GPU trial works (only reachable if the window renders);
+      makes the choice stick instead of reverting to auto next launch. */
+  gpuConfirm(): void
   /** Relaunch the app so a new GPU choice takes effect. */
   relaunchApp(): void
 }

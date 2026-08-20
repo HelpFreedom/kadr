@@ -97,8 +97,6 @@ function createWindow() {
       app.exit(1)
     }
   })
-  // the renderer loaded → a pending GPU trial is proven good and may stick
-  win.webContents.once('did-finish-load', () => confirmGpuTrial())
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -440,6 +438,9 @@ function registerIpc() {
   })
 
   ipcMain.handle('gpu:list', () => enumerateGpus())
+  // called from Settings only when the user can SEE the switched GPU works —
+  // a blank window can't confirm, so it heals to auto on the next launch
+  ipcMain.handle('gpu:confirm', () => confirmGpuTrial())
   ipcMain.handle('gpu:relaunch', () => {
     app.relaunch()
     app.exit(0)

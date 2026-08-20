@@ -90,12 +90,13 @@ let trialNode: string | null = null
 
 function applyToChromium(gpu: GpuInfo): void {
   if (gpu.driver === 'nvidia') {
-    // PRIME render offload. Verified on an Optimus KDE-Wayland box (glxinfo AND
-    // eglinfo both report the NVIDIA GPU under exactly these vars), so Chromium's
-    // EGL/GBM GPU process follows — works natively under Wayland, no need to
-    // force x11. These are the same vars switcherooctl sets for the dGPU.
-    // We deliberately do NOT set render-node-override: pointing Chromium's GPU
-    // process at the NVIDIA node directly made it fail to init (blank window).
+    // PRIME render offload (the vars switcherooctl sets for the dGPU; verified
+    // with glxinfo/eglinfo to move GL to the NVIDIA card). Present via XWayland
+    // (--ozone-platform=x11): the X server copies the NVIDIA-rendered frames
+    // back to the primary GPU for display. Native Wayland leaves kwin unable to
+    // import NVIDIA's buffers → the window comes up blank. render-node-override
+    // is deliberately NOT set (it made the GPU process fail to init).
+    app.commandLine.appendSwitch('ozone-platform', 'x11')
     process.env.__NV_PRIME_RENDER_OFFLOAD = '1'
     process.env.__GLX_VENDOR_LIBRARY_NAME = 'nvidia'
     process.env.__VK_LAYER_NV_optimus = 'NVIDIA_only'

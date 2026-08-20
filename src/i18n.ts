@@ -288,7 +288,9 @@ const ru = {
   gpuEncodeNote: 'Ускоряет композитинг и превью; кодирование H.264 остаётся на CPU.',
   gpuRestartHint: 'Изменение вступит в силу после перезапуска.',
   gpuApplyRestart: 'Применить и перезапустить',
-  gpuFailedRevert: 'Выбранная видеокарта не запустилась — вернулись на авто.'
+  gpuFailedRevert: 'Выбранная видеокарта не запустилась — вернулись на авто.',
+  gpuTrialAsk: 'Видеокарта переключилась и рисует. Оставить её? Иначе после перезапуска вернётся авто.',
+  gpuKeep: 'Оставить эту видеокарту'
 }
 
 const en: typeof ru = {
@@ -579,7 +581,9 @@ const en: typeof ru = {
   gpuEncodeNote: 'Speeds up compositing and preview; H.264 encoding stays on the CPU.',
   gpuRestartHint: 'The change takes effect after a restart.',
   gpuApplyRestart: 'Apply and restart',
-  gpuFailedRevert: 'The selected GPU did not start — reverted to auto.'
+  gpuFailedRevert: 'The selected GPU did not start — reverted to auto.',
+  gpuTrialAsk: 'The GPU switched and is rendering. Keep it? Otherwise it reverts to auto on restart.',
+  gpuKeep: 'Keep this GPU'
 }
 
 export type TKey = keyof typeof ru

@@ -9,6 +9,7 @@ import { TRANSITIONS } from '@/gl/transitions'
 import { EDGE_TRANSITIONS } from '@/gl/edges'
 import { CtxMenu } from './CtxMenu'
 import { reverseClip, useReverseUi } from '@/engine/reverse'
+import { normalizeClip, useNormalizeUi } from '@/engine/normalize'
 import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
@@ -473,6 +474,27 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
                 }}
               >
                 {a.reverseOf ? t('unreverse') : t('reverse')}
+              </button>
+            )
+          })()}
+          {(() => {
+            const p = useEditor.getState().project
+            const f = findClip(p, menu.clipId!)
+            const a = f?.clip.assetId ? p.assets.find((x) => x.id === f.clip.assetId) : null
+            if (!a?.hasAudio) return null
+            if (useNormalizeUi.getState().busy[menu.clipId!]) {
+              return <button disabled>⏳ {t('normalizing')}…</button>
+            }
+            return (
+              <button
+                onClick={() => {
+                  normalizeClip(menu.clipId!).catch((err) =>
+                    console.warn('[kadr] normalize failed', err)
+                  )
+                  onClose()
+                }}
+              >
+                {t('normalize')}
               </button>
             )
           })()}

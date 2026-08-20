@@ -7,7 +7,7 @@ import { promises as fs, createReadStream, statSync, existsSync, appendFileSync 
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
-import { probeMedia, makeProxy, makeReversed, ExportMuxer, RawVideoEncoder } from './ffmpeg'
+import { probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, ExportMuxer, RawVideoEncoder } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerFragmentIpc } from './fragments'
@@ -179,7 +179,10 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
 app.whenReady().then(() => {
   protocol.handle('kadr', (request) => {
     const url = new URL(request.url)
-    const filePath = decodeURIComponent(url.pathname)
+    let filePath = decodeURIComponent(url.pathname)
+    // Windows drive paths travel as /D:/dir/file — drop the URL's leading
+    // slash so fs gets D:/dir/file (node accepts forward slashes there)
+    if (/^\/[A-Za-z]:[/\\]/.test(filePath)) filePath = filePath.slice(1)
     try {
       return mediaResponse(filePath, request.headers.get('range'))
     } catch {
@@ -281,6 +284,46 @@ async function requestProxy(srcPath: string, duration: number, audioOnly = false
   return out
 }
 
+// full-res H.264 intermediates for sources Chromium cannot decode (export
+// reads these instead of the original video stream; audio still reads the
+// original). Same identity key and queue discipline as proxies.
+const decodedDir = () => join(app.getPath('userData'), 'decoded')
+let decodedChain: Promise<unknown> = Promise.resolve()
+
+async function requestDecoded(srcPath: string, duration: number): Promise<string> {
+  const stat = statSync(srcPath)
+  const key = createHash('sha1')
+    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
+    .digest('hex')
+    .slice(0, 20)
+  const out = join(decodedDir(), `${key}.mp4`)
+  try {
+    await fs.access(out)
+    return out
+  } catch { /* not built yet */ }
+  await fs.mkdir(decodedDir(), { recursive: true })
+  const job = decodedChain.then(async () => {
+    try {
+      await fs.access(out)
+      return // built while we waited in the queue
+    } catch { /* still missing */ }
+    const tmp = join(decodedDir(), `${key}.part.mp4`)
+    try {
+      await makeDecoded(srcPath, tmp, duration, (p) => {
+        win?.webContents.send('proxy:progress', { path: srcPath, progress: p })
+      })
+      await fs.rename(tmp, out)
+    } catch (err) {
+      fs.unlink(tmp).catch(() => { /* nothing to clean */ })
+      throw err
+    }
+  })
+  decodedChain = job.catch(() => { /* keep the queue alive */ })
+  await job
+  win?.webContents.send('proxy:progress', { path: srcPath, progress: 1 })
+  return out
+}
+
 // reversed renders: keyed by source identity + range, built one at a time
 const reverseDir = () => join(app.getPath('userData'), 'reversed')
 let reverseChain: Promise<unknown> = Promise.resolve()
@@ -359,6 +402,14 @@ async function rememberDir(kind: string, filePath: string) {
 function registerIpc() {
   ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number, audioOnly?: boolean) =>
     requestProxy(srcPath, duration, audioOnly)
+  )
+
+  ipcMain.handle('media:decoded', (_e, srcPath: string, duration: number) =>
+    requestDecoded(srcPath, duration)
+  )
+
+  ipcMain.handle('media:loudness', (_e, srcPath: string, start: number, duration: number) =>
+    measureLoudness(srcPath, start, duration)
   )
 
   ipcMain.handle(
@@ -524,6 +575,39 @@ function registerIpc() {
     return writeImported(out, buf)
   })
 
+  ipcMain.handle('dialog:pick-dir', async (_e, title?: string) => {
+    const r = await dialog.showOpenDialog(win!, {
+      title: title || undefined,
+      properties: ['openDirectory', 'createDirectory']
+    })
+    return r.canceled || !r.filePaths.length ? null : r.filePaths[0]
+  })
+
+  // frame snapshots: PNG next to the project file (Downloads when the
+  // project was never saved and no dir was chosen)
+  ipcMain.handle('snapshot:save', async (_e, dir: string | null, baseName: string, png: ArrayBuffer) => {
+    if (!png?.byteLength) throw new Error('empty snapshot')
+    // without an XDG DOWNLOAD entry getPath('downloads') degrades to $HOME —
+    // prefer the real ~/Downloads when it exists
+    let fallback = app.getPath('downloads')
+    if (fallback === app.getPath('home')) {
+      const dl = join(app.getPath('home'), 'Downloads')
+      try { await fs.access(dl); fallback = dl } catch { /* keep home */ }
+    }
+    const target = dir || fallback
+    await fs.mkdir(target, { recursive: true })
+    const safe = baseName.replace(/[^\p{L}\p{N} ._-]/gu, '_').slice(0, 120) || 'frame'
+    let out = join(target, `${safe}.png`)
+    for (let i = 1; i < 1000; i++) {
+      try {
+        await fs.access(out)
+        out = join(target, `${safe}.${i}.png`)
+      } catch { break }
+    }
+    await fs.writeFile(out, Buffer.from(png))
+    return out
+  })
+
   ipcMain.handle('project:save-dialog', async (_e, currentName: string) => {
     const r = await dialog.showSaveDialog(win!, {
       defaultPath: join(await lastDir('project'), `${currentName}.kadr`),
@@ -595,7 +679,10 @@ function registerIpc() {
 
   // direct ffmpeg encode: raw RGBA frames from the renderer over stdin;
   // returns a local WebSocket port for the frame stream (0 = use IPC)
-  ipcMain.handle('export:raw-begin', async (_e, width: number, height: number, fps: number) => {
+  ipcMain.handle('export:raw-begin', async (
+    _e, width: number, height: number, fps: number,
+    outWidth?: number, outHeight?: number
+  ) => {
     if (!exportState) throw new Error('no export in progress')
     const st = exportState
     await st.fh?.close()
@@ -604,7 +691,7 @@ function registerIpc() {
     st.raw = new RawVideoEncoder()
     st.rawEncoded = true
     st.raw.start({
-      width, height, fps,
+      width, height, outWidth, outHeight, fps,
       codec: preset.ffmpegVideo === 'copy' ? 'libx264' : preset.ffmpegVideo,
       bitrate: preset.videoBitrate,
       out: st.videoTemp

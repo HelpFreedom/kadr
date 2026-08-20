@@ -10,6 +10,8 @@ import type { MediaAsset } from '@shared/types'
 /** non-faststart files keep moov at the end — give up early and fall back */
 const HEAD_LIMIT = 16 * 1024 * 1024
 
+type MP4File = ReturnType<typeof MP4Box.createFile>
+
 interface Sample {
   is_sync: boolean
   cts: number
@@ -38,6 +40,13 @@ export class Mp4FrameSource {
   private fetchAbort: AbortController | null = null
   private fileOffset = 0
   private ready = false
+  private moovFound = false
+  /** moof/mdat stream (moov has no sample table) — jumps re-pump from 0 */
+  private fragmented = false
+  /** active fragmented jump: drop demuxed chunks before the target GOP */
+  private skipTargetUs: number | null = null
+  /** chunks of the newest keyframe-led GOP at or before the skip target */
+  private gopBuffer: EncodedVideoChunk[] = []
   private waiters: (() => void)[] = []
   private ctsShift = 0
   private sampleScale = 0
@@ -67,27 +76,64 @@ export class Mp4FrameSource {
     return new Promise((r) => this.waiters.push(r))
   }
 
+  /**
+   * Sample intake shared by the init demux and fragmented-jump restarts.
+   * While a fragmented jump is skipping, chunks are not queued for decode:
+   * only the newest keyframe-led GOP at or before the target is kept, and
+   * the first keyframe past the target releases it into pendingChunks.
+   */
+  private ingestSamples(file: MP4File, samples: Sample[]) {
+    if (this.fatal) return
+    for (const s of samples) {
+      this.sampleScale = s.timescale
+      const chunk = new EncodedVideoChunk({
+        type: s.is_sync ? 'key' : 'delta',
+        timestamp: Math.round(((s.cts - this.ctsShift) * 1e6) / s.timescale),
+        duration: Math.round((s.duration * 1e6) / s.timescale),
+        data: s.data
+      })
+      if (this.skipTargetUs !== null) {
+        if (s.is_sync) {
+          if (chunk.timestamp <= this.skipTargetUs) {
+            this.gopBuffer = [chunk] // closer candidate — drop the older GOP
+          } else {
+            // first keyframe past the target: the candidate GOP is final
+            this.pendingChunks.push(...this.gopBuffer, chunk)
+            this.gopBuffer = []
+            this.skipTargetUs = null
+          }
+        } else if (this.gopBuffer.length) {
+          this.gopBuffer.push(chunk)
+          if (this.gopBuffer.length > 4000) {
+            this.fatal = true // runaway GOP — bail out to the element path
+            break
+          }
+        } // deltas before the first keyframe are undecodable — drop
+      } else {
+        this.pendingChunks.push(chunk)
+      }
+    }
+    try {
+      file.releaseUsedSamples(this.trackId, samples[samples.length - 1].number)
+    } catch { /* memory bound is best-effort */ }
+    this.feed()
+    this.kick()
+  }
+
+  /** stream over — whatever GOP the skip was holding is the tail GOP */
+  private finishSkip() {
+    if (this.skipTargetUs === null) return
+    this.pendingChunks.push(...this.gopBuffer)
+    this.gopBuffer = []
+    this.skipTargetUs = null
+  }
+
   private async init(): Promise<boolean> {
     // collect samples from the very start: chunks queue up even before the
     // decoder exists, feed() drains them once it's configured
-    this.file.onSamples = (_id: number, _u: unknown, samples: Sample[]) => {
-      for (const s of samples) {
-        this.pendingChunks.push(
-          new EncodedVideoChunk({
-            type: s.is_sync ? 'key' : 'delta',
-            timestamp: Math.round(((s.cts - this.ctsShift) * 1e6) / s.timescale),
-            duration: Math.round((s.duration * 1e6) / s.timescale),
-            data: s.data
-          })
-        )
-        this.sampleScale = s.timescale
-      }
-      try {
-        this.file.releaseUsedSamples(this.trackId, samples[samples.length - 1].number)
-      } catch { /* memory bound is best-effort */ }
-      this.feed()
-      this.kick()
-    }
+    const initFile = this.file
+    initFile.onSamples = (_id: number, _u: unknown, samples: Sample[]) =>
+      this.ingestSamples(initFile, samples)
     const info = await new Promise<any>((resolve, reject) => {
       // everything must be wired SYNCHRONOUSLY inside onReady: with a
       // faststart file (moov first) the pump keeps appending mdat right
@@ -95,6 +141,7 @@ export class Mp4FrameSource {
       // setExtractionOptions()/start() are consumed silently — that froze
       // exports to the first frame on faststart sources
       this.file.onReady = (i: any) => {
+        this.moovFound = true
         try {
           const track = i.videoTracks?.[0]
           if (track) {
@@ -121,6 +168,7 @@ export class Mp4FrameSource {
 
     const track = info.videoTracks?.[0]
     if (!track) return false
+    this.fragmented = !!info.isFragmented
     const config: VideoDecoderConfig = {
       codec: track.codec,
       codedWidth: track.video?.width || track.track_width,
@@ -130,11 +178,21 @@ export class Mp4FrameSource {
     const support = await VideoDecoder.isConfigSupported(config).catch(() => null)
     if (!support?.supported) return false
     this.config = config
-    // restart the stream from the first sample: with moov at the END the
-    // head pump has already swept past all of mdat before the sample table
-    // was known, and mp4box can't extract from data it has discarded —
-    // re-pumping from the seek offset feeds it everything again, now armed
-    this.jump(0)
+    if (this.fragmented) {
+      // fragmented streams put moov first, so extraction was armed inside
+      // onReady before any moof was parsed: chunks already queue from sample
+      // 0 — just attach the decoder and drain. (mp4box seek() is useless
+      // here: moov has no sample table, and jump(0) used to feed the fresh
+      // decoder a mid-GOP delta chunk → DataError → element fallback.)
+      this.makeDecoder()
+      this.feed()
+    } else {
+      // restart the stream from the first sample: with moov at the END the
+      // head pump has already swept past all of mdat before the sample table
+      // was known, and mp4box can't extract from data it has discarded —
+      // re-pumping from the seek offset feeds it everything again, now armed
+      this.jump(0)
+    }
     this.ready = true
     return true
   }
@@ -199,13 +257,14 @@ export class Mp4FrameSource {
         ab.fileStart = this.fileOffset
         this.fileOffset += value.byteLength
         this.file.appendBuffer(ab)
-        if (!this.ready && this.fileOffset > HEAD_LIMIT) {
+        if (!this.moovFound && this.fileOffset > HEAD_LIMIT) {
           throw new Error('moov not found in the head — likely not faststart')
         }
       }
       if (!ac.signal.aborted) {
         try { this.file.flush() } catch { /* tail garbage */ }
         this.demuxDone = true
+        this.finishSkip()
         this.feed()
         this.kick()
       }
@@ -236,12 +295,14 @@ export class Mp4FrameSource {
     }
   }
 
-  /** Restart demux+decode at the keyframe before srcT (loop wrap, far seek). */
-  private jump(srcT: number) {
+  /** Reset decode state shared by both jump flavours. */
+  private resetForJump() {
     this.fetchAbort?.abort()
     for (const f of this.outFrames) f.close()
     this.outFrames = []
     this.pendingChunks = []
+    this.gopBuffer = []
+    this.skipTargetUs = null
     this.current?.close()
     this.current = null
     this.ahead?.close()
@@ -251,12 +312,51 @@ export class Mp4FrameSource {
     this.flushedAll = false
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.makeDecoder()
+  }
+
+  /** Restart demux+decode at the keyframe before srcT (loop wrap, far seek). */
+  private jump(srcT: number) {
+    if (this.fragmented) {
+      this.jumpFragmented(srcT)
+      return
+    }
+    this.resetForJump()
     this.file.stop()
     // seek in unshifted media time so the chosen keyframe is never late
     const shiftSec = this.sampleScale > 0 ? this.ctsShift / this.sampleScale : 0
     const si = this.file.seek(Math.max(0, srcT + shiftSec), true)
     this.file.start()
     void this.pump(si.offset)
+  }
+
+  /**
+   * mp4box cannot seek fragmented streams: moov carries no sample table and
+   * extraction cannot rewind into data it has already discarded. Restart with
+   * a fresh ISOFile from byte 0 instead; ingestSamples() demux-skips (no
+   * decode) everything before the last keyframe at or before srcT.
+   */
+  private jumpFragmented(srcT: number) {
+    this.resetForJump()
+    try { this.file.stop() } catch { /* replaced below */ }
+    const file = MP4Box.createFile()
+    this.file = file
+    file.onError = () => {
+      this.fatal = true
+      this.kick()
+    }
+    file.onSamples = (_id: number, _u: unknown, samples: Sample[]) =>
+      this.ingestSamples(file, samples)
+    file.onReady = () => {
+      try {
+        file.setExtractionOptions(this.trackId, null, { nbSamples: 30 })
+        file.start()
+      } catch {
+        this.fatal = true
+        this.kick()
+      }
+    }
+    this.skipTargetUs = srcT > 0 ? srcT * 1e6 : null
+    void this.pump(0)
   }
 
   /**
@@ -369,6 +469,8 @@ export class Mp4FrameSource {
     this.fetchAbort?.abort()
     for (const f of this.outFrames) f.close()
     this.outFrames = []
+    this.pendingChunks = []
+    this.gopBuffer = []
     this.current?.close()
     this.current = null
     this.ahead?.close()

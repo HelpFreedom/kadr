@@ -6,6 +6,8 @@
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL_3.0-blue.svg)](LICENSE)
 
+Поддержать меня можно на Boosty: https://boosty.to/triangle_black/
+
 ![Демо Kadr](demo.gif)
 
 Kadr — многодорожечный видеоредактор (Electron + React + TypeScript),

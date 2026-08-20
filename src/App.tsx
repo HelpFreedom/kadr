@@ -20,6 +20,7 @@ import {
 } from './engine/mediaImport'
 import { useT, type TKey } from './i18n'
 import { create } from 'zustand'
+import { baseOf } from '@shared/paths'
 import type { Project } from '@shared/types'
 
 // Save feedback: which project snapshot is on disk (→ the ● dirty dot) and
@@ -47,7 +48,7 @@ async function writeAndConfirm(path: string) {
     await window.kadr.writeProject(path, s.project)
     s.setProjectPath(path)
     markProjectSaved(s.project)
-    flashSave('saved', path.split('/').pop() ?? path)
+    flashSave('saved', baseOf(path))
   } catch (err) {
     flashSave('saveError', String(err), true)
   }

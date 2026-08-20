@@ -28,6 +28,9 @@ export interface MediaAsset {
   /** poster of the last frame (clip tails show it on the timeline) */
   thumbnailEnd?: string
   waveform?: WaveformData
+  /** ffprobe codec_name of the video stream (e.g. 'h264', 'hevc') — decides
+      whether Chromium can decode the source or ffmpeg must step in */
+  codec?: string
   /** light 540p copy used by the preview; export always reads `path` */
   proxyPath?: string
   /** this asset is a reversed render of a source range of another asset */
@@ -410,6 +413,16 @@ export interface KadrApi {
   /** Build (or reuse) a preview proxy; resolves with the proxy file path. */
   requestProxy(path: string, duration: number, audioOnly?: boolean): Promise<string>
   onProxyProgress(cb: (p: { path: string; progress: number }) => void): () => void
+  /** Full-resolution H.264 intermediate for sources Chromium cannot decode
+      (e.g. HEVC without VAAPI); cached like proxies, video-only. */
+  requestDecoded(path: string, duration: number): Promise<string>
+  /** Native directory picker; null when the user cancels. */
+  pickDirectory(title?: string): Promise<string | null>
+  /** Write a frame snapshot PNG into dir (Downloads when null) under a
+      collision-free name derived from baseName; resolves with the path. */
+  saveSnapshot(dir: string | null, baseName: string, png: ArrayBuffer): Promise<string>
+  /** EBU R128 loudness of a source range: integrated LUFS + true peak dBTP. */
+  measureLoudness(path: string, start: number, duration: number): Promise<{ i: number; tp: number }>
 
   exportDialog(defaultName: string, ext: string): Promise<string | null>
   exportBegin(job: ExportJob): Promise<void>
@@ -420,7 +433,8 @@ export interface KadrApi {
       resolves with the temp file the encoder writes; exportUseVideo hands it
       to the muxer stage. */
   rawEncodeStart(o: {
-    width: number; height: number; fps: number; codec: string; bitrate: number
+    width: number; height: number; outWidth?: number; outHeight?: number
+    fps: number; codec: string; bitrate: number
   }): Promise<string>
   /** resolves when ffmpeg's stdin accepted the memory — only then reuse it */
   rawEncodeFrame(view: Uint8Array): Promise<void>
@@ -429,7 +443,10 @@ export interface KadrApi {
   exportUseVideo(path: string): Promise<void>
 
   /** main-process fallback raw encode: frames over WS (port > 0) or IPC */
-  exportRawBegin(width: number, height: number, fps: number): Promise<number>
+  exportRawBegin(
+    width: number, height: number, fps: number,
+    outWidth?: number, outHeight?: number
+  ): Promise<number>
   exportRawFrame(data: ArrayBuffer): Promise<void>
   exportRawEnd(): Promise<void>
   exportVideoDone(): Promise<void>

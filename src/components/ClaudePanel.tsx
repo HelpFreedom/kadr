@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { useEditor } from '@/state/store'
+import { dirOf } from '@shared/paths'
 import { activity } from '@/engine/autosave'
 import { useT } from '@/i18n'
 
@@ -123,7 +124,7 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
     ro.observe(holder.current)
 
     const projectPath = useEditor.getState().projectPath
-    const cwd = projectPath ? projectPath.replace(/\/[^/]*$/, '') : null
+    const cwd = projectPath ? dirOf(projectPath) : null
     let dead = false
     window.kadr.claudeOpen(term.cols, term.rows, cwd).then((r) => {
       if (dead) return

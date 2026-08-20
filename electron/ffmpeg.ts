@@ -2,7 +2,7 @@
 import { execFile, spawn, ChildProcess } from 'child_process'
 import { promisify } from 'util'
 import { promises as fsp } from 'fs'
-import { join } from 'path'
+import { join, basename } from 'path'
 import type { ProbeResult, ExportJob, ExportProgress, WaveformData } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
 
@@ -34,7 +34,7 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
   }
 
   const kind = isImage ? 'image' : video ? 'video' : 'audio'
-  const name = path.split('/').pop() || path
+  const name = basename(path)
 
   const asset: ProbeResult['asset'] = {
     path,
@@ -47,6 +47,7 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
     hasAudio: !!audio,
     audioCodec: audio?.codec_name
   }
+  if (kind === 'video' && video?.codec_name) asset.codec = video.codec_name
 
   if (kind !== 'audio') {
     try {
@@ -172,6 +173,89 @@ export function makeProxy(
 }
 
 /**
+ * EBU R128 loudness of a source range: integrated LUFS + true peak dBTP
+ * from ffmpeg's loudnorm measurement pass (JSON printed to stderr).
+ */
+export function measureLoudness(
+  src: string,
+  start: number,
+  duration: number
+): Promise<{ i: number; tp: number }> {
+  const args = [
+    '-v', 'info', '-nostats',
+    ...(start > 0 ? ['-ss', start.toFixed(3)] : []),
+    ...(duration > 0 ? ['-t', duration.toFixed(3)] : []),
+    '-i', src, '-vn',
+    '-af', 'loudnorm=I=-14:TP=-1:print_format=json',
+    '-f', 'null', '-'
+  ]
+  return new Promise((resolve, reject) => {
+    execFile(FFMPEG, args, { maxBuffer: 8 * 1024 * 1024 }, (err, _out, stderr) => {
+      // ffmpeg exits 0 on success; the measurement JSON is on stderr
+      const m = String(stderr).match(/\{[^{}]*"input_i"[\s\S]*?\}/)
+      if (!m) {
+        reject(err instanceof Error ? err : new Error(`loudnorm produced no measurement: ${String(stderr).slice(-300)}`))
+        return
+      }
+      try {
+        const j = JSON.parse(m[0])
+        const i = parseFloat(j.input_i)
+        const tp = parseFloat(j.input_tp)
+        if (!isFinite(i) || i <= -70) {
+          reject(new Error('clip audio is silent — nothing to normalize'))
+          return
+        }
+        resolve({ i, tp: isFinite(tp) ? tp : -1 })
+      } catch (e) { reject(e as Error) }
+    })
+  })
+}
+
+/**
+ * Full-resolution H.264 intermediate for sources Chromium cannot decode
+ * (HEVC without VAAPI, mpeg4, prores, …). Near-lossless on purpose — the
+ * export pipeline re-encodes it once more; video-only (the audio mix always
+ * reads the original).
+ */
+export function makeDecoded(
+  src: string,
+  out: string,
+  duration: number,
+  onProgress?: (p: number) => void
+): Promise<void> {
+  const args = [
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    '-i', src,
+    '-map', '0:v:0', '-an',
+    '-c:v', 'libx264', '-preset', 'fast', '-crf', '14', '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart',
+    out
+  ]
+  return new Promise((resolve, reject) => {
+    const child = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let err = ''
+    let buf = ''
+    child.stdout.on('data', (c) => {
+      buf += c
+      const lines = buf.split('\n')
+      buf = lines.pop() || ''
+      for (const line of lines) {
+        const m = line.match(/^out_time_us=(\d+)/)
+        if (m && duration > 0 && onProgress) {
+          onProgress(Math.min(1, Number(m[1]) / 1e6 / duration))
+        }
+      }
+    })
+    child.stderr.on('data', (c) => { err += c })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`decode ffmpeg exited ${code}: ${err.slice(0, 500)}`))
+    })
+  })
+}
+
+/**
  * Reversed copy of a source range. ffmpeg's `reverse` filter buffers every
  * decoded frame in RAM, so video is reversed in bounded chunks (frame budget
  * scaled by resolution) that are then concatenated in reverse order; audio is
@@ -292,6 +376,8 @@ export class RawVideoEncoder {
   start(opts: {
     width: number
     height: number
+    outWidth?: number
+    outHeight?: number
     fps: number
     codec: string // 'libx264' or an ffmpegVideo codec like 'libvpx-vp9'
     bitrate: number

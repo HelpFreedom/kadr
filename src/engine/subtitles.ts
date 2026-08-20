@@ -4,6 +4,7 @@ import type {
   Project, SubCue, TextDoc, TranscribeResult, TranscribeSegment, AudioSegment
 } from '@shared/types'
 import { useEditor, uid } from '@/state/store'
+import { dirOf, baseOf } from '@shared/paths'
 import { overlapFades } from './player'
 import { evalAnim } from './anim'
 
@@ -275,7 +276,7 @@ export async function transcribeFlow(opts: TranscribeFlowOpts): Promise<Transcri
     duration = asset.duration
     cueOffset = 0 // cue times = source-media times
     assetId = asset.id
-    baseDir = asset.path.replace(/\/[^/]*$/, '')
+    baseDir = dirOf(asset.path)
     baseName = sanitize(asset.name.replace(/\.[^.]+$/, ''))
   } else {
     const { start, end } = opts.target
@@ -288,7 +289,7 @@ export async function transcribeFlow(opts: TranscribeFlowOpts): Promise<Transcri
     docOffset = absolute ? 0 : start
     // dominant source: the segment covering the most of the range
     const byDur = [...audioSegments].sort((a, b) => b.duration - a.duration)[0]
-    baseDir = byDur.path.replace(/\/[^/]*$/, '')
+    baseDir = dirOf(byDur.path)
     const mm = (t: number) => `${Math.floor(t / 60)}m${pad(Math.round(t % 60), 2)}s`
     baseName = `${sanitize(project.name)}_${mm(start)}-${mm(end)}`
   }
@@ -306,7 +307,7 @@ export async function transcribeFlow(opts: TranscribeFlowOpts): Promise<Transcri
 
   const mkDoc = (path: string, format: 'srt' | 'txt'): TextDoc => ({
     id: uid(),
-    name: path.split('/').pop()!,
+    name: baseOf(path),
     path,
     format,
     assetId,

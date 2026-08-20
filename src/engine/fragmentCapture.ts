@@ -23,6 +23,26 @@ export function getCaptureFrame(fragmentId: string): CaptureFrame | null {
   return frames.get(fragmentId) ?? null
 }
 
+// Frame snapshots need FULL WYSIWYG: iframe-overlay fragments are DOM, not
+// GL, so for the duration of a snapshot every active fragment is forced
+// through pixel capture and lands in the compositor like any video layer.
+let forceAll = false
+let reconcileNow: (() => void) | null = null
+
+export function setForceCaptureAll(on: boolean) {
+  if (forceAll === on) return
+  forceAll = on
+  reconcileNow?.()
+}
+
+/** Every fragment wanted at time t is captured and has frames on hand. */
+export function captureReady(project: Project, t: number): boolean {
+  for (const id of wanted(project, t).keys()) {
+    if (!frames.has(id)) return false
+  }
+  return true
+}
+
 const animActive = (a?: Anim) =>
   !!a && (Math.abs(a.value) > 1e-6 || (a.keyframes?.length ?? 0) > 0)
 
@@ -52,7 +72,7 @@ function wanted(project: Project, t: number): Map<string, { clip: Clip; track: T
     for (const clip of track.clips) {
       if (clip.kind !== 'remotion' || !clip.fragmentId) continue
       if (t < clip.start - 2 || t >= clip.start + clip.duration + 0.75) continue
-      if (!fragmentNeedsCapture(track, clip)) continue
+      if (!forceAll && !fragmentNeedsCapture(track, clip)) continue
       out.set(clip.fragmentId, { clip, track })
     }
   }
@@ -140,6 +160,7 @@ export function wireFragmentCapture() {
       void reconcile()
     }, 120)
   }
+  reconcileNow = () => void reconcile()
   useEditor.subscribe(schedule)
   setInterval(schedule, 400) // drift correction while playing
 }

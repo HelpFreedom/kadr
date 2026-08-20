@@ -2,6 +2,7 @@ import type { Project, Clip, Track, MediaAsset } from '@shared/types'
 import { Compositor, type LayerDraw } from '@/gl/compositor'
 import { glowParams } from '@/gl/glow'
 import { getCaptureFrame } from './fragmentCapture'
+import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
 import { getTextLayer } from './text'
 import { attachAudio, setElementGain, isRouted, resumeAudio } from './audio'
@@ -121,14 +122,17 @@ export interface MediaPoolOptions {
 export class MediaPool {
   private items = new Map<string, HTMLVideoElement | HTMLImageElement>()
   private srcs = new Map<string, string>()
+  /** frame snapshots flip this on to decode ORIGINALS at full quality;
+      codecs Chromium can't decode keep their proxy (original would be black) */
+  sourceQuality = false
 
   constructor(private opts: MediaPoolOptions = {}) {}
 
   get(clipId: string, asset: MediaAsset): HTMLVideoElement | HTMLImageElement {
     let el = this.items.get(clipId)
-    const url = window.kadr.fileUrl(
-      this.opts.proxy && asset.proxyPath ? asset.proxyPath : asset.path
-    )
+    const useProxy = this.opts.proxy && !!asset.proxyPath &&
+      (!this.sourceQuality || !chromiumCanDecode(asset.codec))
+    const url = window.kadr.fileUrl(useProxy ? asset.proxyPath! : asset.path)
     if (!el) {
       if (asset.kind === 'image') {
         el = new Image()
@@ -227,16 +231,9 @@ export function drawFrame(
   t: number,
   pool: MediaPool,
   frames?: Map<string, VideoFrame>,
-  blends?: Map<string, BlendFrame>,
-  // Render (and read-back) resolution. Defaults to the project size for the
-  // live preview; export passes the preset's output size so the compositor,
-  // readPixels and the ffmpeg pipe all agree on WxH. Omitting this let export
-  // render at project size while the encoder was told the preset size — equal
-  // byte counts but reshaped rows, which sheared cross-size exports into
-  // scanlines (period 16 for 1080↔1920).
-  renderSize?: { w: number; h: number }
+  blends?: Map<string, BlendFrame>
 ) {
-  comp.setSize(renderSize?.w ?? project.width, renderSize?.h ?? project.height)
+  comp.setSize(project.width, project.height)
   comp.begin(project.background)
   for (let i = project.tracks.length - 1; i >= 0; i--) {
     const track = project.tracks[i]
@@ -473,6 +470,11 @@ export class Player {
   private lastSet = -1
 
   constructor(private hooks: PlayerHooks) {}
+
+  /** Frame snapshots: decode originals instead of preview proxies while on. */
+  setSourceQuality(on: boolean) {
+    this.pool.sourceQuality = on
+  }
 
   attach(canvas: HTMLCanvasElement) {
     this.comp = new Compositor(canvas)

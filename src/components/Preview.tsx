@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Player } from '@/engine/player'
+import { registerPreviewCanvas } from '@/engine/snapshot'
 import { useEditor, projectDuration } from '@/state/store'
 import { AudioMeter } from './AudioMeter'
 import { FragmentOverlays } from './FragmentOverlays'
@@ -25,7 +26,11 @@ export function Preview() {
       duration: () => projectDuration(useEditor.getState().project)
     })
     player.attach(canvas)
-    return () => player.detach()
+    registerPreviewCanvas(canvas, player)
+    return () => {
+      registerPreviewCanvas(null, null)
+      player.detach()
+    }
   }, [])
 
   return (

@@ -61,7 +61,14 @@ const api: KadrApi = {
 
   openMediaDialog: () => ipcRenderer.invoke('media:open-dialog'),
   probeMedia: (path) => ipcRenderer.invoke('media:probe', path),
-  fileUrl: (path) => `kadr://media${encodeURI(path).replace(/[?#]/g, encodeURIComponent)}`,
+  fileUrl: (path) => {
+    // Windows paths (D:\dir\file) must become /D:/dir/file — a raw drive
+    // letter glued after the host ('kadr://mediaD:\…') is an INVALID URL:
+    // the element never loads and the preview spins forever (issue #6)
+    const posix = path.replace(/\\/g, '/')
+    const abs = posix.startsWith('/') ? posix : `/${posix}`
+    return `kadr://media${encodeURI(abs).replace(/[?#]/g, encodeURIComponent)}`
+  },
   pathForFile: (f) => {
     try { return webUtils.getPathForFile(f) } catch { return '' }
   },
@@ -88,6 +95,10 @@ const api: KadrApi = {
     return () => ipcRenderer.removeListener('reverse:progress', handler)
   },
   requestProxy: (path, duration, audioOnly) => ipcRenderer.invoke('proxy:request', path, duration, audioOnly),
+  requestDecoded: (path, duration) => ipcRenderer.invoke('media:decoded', path, duration),
+  pickDirectory: (title) => ipcRenderer.invoke('dialog:pick-dir', title),
+  saveSnapshot: (dir, baseName, png) => ipcRenderer.invoke('snapshot:save', dir, baseName, png),
+  measureLoudness: (path, start, duration) => ipcRenderer.invoke('media:loudness', path, start, duration),
   onProxyProgress: (cb) => {
     const handler = (_e: unknown, p: { path: string; progress: number }) => cb(p)
     ipcRenderer.on('proxy:progress', handler)
@@ -97,7 +108,8 @@ const api: KadrApi = {
   exportDialog: (name, ext) => ipcRenderer.invoke('export:dialog', name, ext),
   exportBegin: (job) => ipcRenderer.invoke('export:begin', job),
   exportVideoChunk: (data, position) => ipcRenderer.invoke('export:video-chunk', data, position),
-  exportRawBegin: (width, height, fps) => ipcRenderer.invoke('export:raw-begin', width, height, fps),
+  exportRawBegin: (width, height, fps, outWidth, outHeight) =>
+    ipcRenderer.invoke('export:raw-begin', width, height, fps, outWidth, outHeight),
   exportRawFrame: (data) => ipcRenderer.invoke('export:raw-frame', data),
   exportRawEnd: () => ipcRenderer.invoke('export:raw-end'),
   exportUseVideo: (path) => ipcRenderer.invoke('export:use-video', path),

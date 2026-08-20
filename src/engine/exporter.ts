@@ -13,6 +13,7 @@ import {
   type BlendFrame
 } from './player'
 import { Mp4FrameSource } from './demux'
+import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
 import { activity } from './autosave'
 import { projectDuration } from '@/state/store'
@@ -145,12 +146,26 @@ export function startExport(
       return
     }
 
+    // drawFrame composites in PROJECT space (layer transforms, masks and
+    // effects are all in project pixels — it forces comp.setSize to project
+    // dims on every call). Frames are therefore rendered at project size and
+    // scaled to the preset size at the encoder: ffmpeg -vf scale (raw path)
+    // or a 2D fit blit (webcodecs path). Reading preset-sized buffers out of
+    // a project-sized framebuffer was GL_INVALID_OPERATION → black exports.
+    const rw = project.width
+    const rh = project.height
     const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
+    canvas.width = rw
+    canvas.height = rh
     const comp = new Compositor(canvas)
-    comp.setSize(width, height)
+    comp.setSize(rw, rh)
     const pool = new MediaPool()
+    // clip end times for the passed-clip cleanup below (the project is
+    // frozen during an export, so this map never goes stale)
+    const clipEnds = new Map<string, number>()
+    for (const tr of project.tracks) {
+      for (const c of tr.clips) clipEnds.set(c.id, c.start + c.duration)
+    }
     // 180° shutter: sub-samples cover half the frame interval around t
     const blurSamples = opts?.motionBlur ? 8 : 1
     // fast path: sequential WebCodecs decode per clip; null = element seeks
@@ -165,7 +180,7 @@ export function startExport(
     // while up to RAW_AHEAD transfers are still in flight (ffmpeg encodes
     // in its own process in parallel anyway).
     const useRaw = opts?.encoder !== 'webcodecs'
-    const rawBuf = useRaw ? new Uint8Array(width * height * 4) : null
+    const rawBuf = useRaw ? new Uint8Array(rw * rh * 4) : null
     const RAW_AHEAD = 3
     const rawInFlight: Promise<void>[] = []
     // frames travel over a local binary WebSocket when main offers one:
@@ -188,15 +203,16 @@ export function startExport(
       const codec = preset.ffmpegVideo === 'copy' ? 'libx264' : preset.ffmpegVideo
       try {
         rawDirect = await window.kadr.rawEncodeStart({
-          width, height, fps, codec, bitrate: preset.videoBitrate
+          width: rw, height: rh, outWidth: width, outHeight: height,
+          fps, codec, bitrate: preset.videoBitrate
         })
-        for (let s = 0; s < 2; s++) slots.push(new Uint8Array(width * height * 4))
+        for (let s = 0; s < 2; s++) slots.push(new Uint8Array(rw * rh * 4))
       } catch (err) {
         console.warn('[kadr] direct raw encoder unavailable, falling back', err)
         rawDirect = null
       }
       if (!rawDirect) {
-        const wsPort = await window.kadr.exportRawBegin(width, height, fps)
+        const wsPort = await window.kadr.exportRawBegin(rw, rh, fps, width, height)
         if (wsPort > 0) {
           rawWs = await new Promise<WebSocket | null>((res) => {
             const s = new WebSocket(`ws://127.0.0.1:${wsPort}`)
@@ -240,6 +256,22 @@ export function startExport(
       encoder.configure(config)
     }
 
+    // webcodecs path renders into the muxed stream directly ('copy' presets
+    // never re-encode), so its frames must already be preset-sized: blit the
+    // project-sized canvas into a centered fit rectangle when sizes differ
+    let fit: { c: HTMLCanvasElement; g: CanvasRenderingContext2D
+               dx: number; dy: number; dw: number; dh: number } | null = null
+    if (!useRaw && (width !== rw || height !== rh)) {
+      const c = document.createElement('canvas')
+      c.width = width
+      c.height = height
+      const s = Math.min(width / rw, height / rh)
+      const dw = Math.round(rw * s)
+      const dh = Math.round(rh * s)
+      fit = { c, g: c.getContext('2d')!,
+              dx: Math.floor((width - dw) / 2), dy: Math.floor((height - dh) / 2), dw, dh }
+    }
+
     try {
       const totalFrames = Math.max(1, Math.round(duration * fps))
       for (let k = 0; k < totalFrames; k++) {
@@ -254,12 +286,12 @@ export function startExport(
             // transforms/masks/track motion move between sub-samples;
             // the decoded video frames stay those of the frame center
             const ts = t + ((s + 0.5) / blurSamples - 0.5) * (0.5 / fps)
-            drawFrame(comp, project, ts, pool, frames, blends, { w: width, h: height })
+            drawFrame(comp, project, ts, pool, frames, blends)
             comp.accumBlit(1 / (s + 1))
           }
           comp.setRenderTarget(false)
         } else {
-          drawFrame(comp, project, t, pool, frames, blends, { w: width, h: height })
+          drawFrame(comp, project, t, pool, frames, blends)
         }
         if (useRaw) {
           if (rawDirect) {
@@ -278,7 +310,12 @@ export function startExport(
             if (rawInFlight.length >= RAW_AHEAD) await rawInFlight.shift()
           }
         } else {
-          const frame = new VideoFrame(canvas, {
+          if (fit) {
+            fit.g.fillStyle = '#000'
+            fit.g.fillRect(0, 0, width, height)
+            fit.g.drawImage(canvas, fit.dx, fit.dy, fit.dw, fit.dh)
+          }
+          const frame = new VideoFrame(fit ? fit.c : canvas, {
             timestamp: Math.round((k * 1e6) / fps),
             duration: Math.round(1e6 / fps)
           })
@@ -288,6 +325,32 @@ export function startExport(
         }
         if (k % 5 === 0 || k === totalFrames - 1) {
           onProgress({ phase: 'video', progress: (k + 1) / totalFrames })
+        }
+        if (k % 30 === 29) {
+          // release decoders and media elements of clips the export has fully
+          // passed: every source held its decoded frames until the very end,
+          // so memory grew with total clip COUNT — a 391-clip project reached
+          // ~7 GB and the kernel OOM killer took the renderer down at 99%.
+          // The 1 s margin covers motion-blur sub-samples and overlap
+          // transitions; a deleted entry would simply re-open on demand.
+          const horizon = t - 1
+          let released = false
+          for (const [clipId, src] of sources) {
+            const end = clipEnds.get(clipId)
+            if (end !== undefined && end < horizon) {
+              src?.close()
+              sources.delete(clipId)
+              released = true
+            }
+          }
+          if (released) {
+            const keep = new Set<string>()
+            for (const [clipId, end] of clipEnds) {
+              if (end >= horizon) keep.add(clipId)
+            }
+            pool.prune(keep)
+          }
+          comp.collect() // drop GPU textures idle for 300+ frames
         }
       }
       if (useRaw) {
@@ -366,9 +429,16 @@ export function startExport(
       const srcT = clipSourceTime(clip, asset, t - clip.start)
       let src = sources.get(clip.id)
       if (src === undefined) {
-        src = (globalThis as { KADR_DISABLE_FAST_DECODE?: boolean }).KADR_DISABLE_FAST_DECODE
-          ? null
-          : await Mp4FrameSource.open(asset)
+        const fastOff = (globalThis as { KADR_DISABLE_FAST_DECODE?: boolean }).KADR_DISABLE_FAST_DECODE
+        src = fastOff ? null : await Mp4FrameSource.open(asset)
+        if (!src && !fastOff) {
+          // Chromium can't decode some codecs at all (HEVC without VAAPI,
+          // mpeg4, …): WebCodecs rejects them and a <video> element renders
+          // 0×0 — the element path would export black. Re-encode once to a
+          // cached full-res H.264 intermediate and fast-decode that instead.
+          const alt = await undecodableFallback(asset)
+          if (alt) src = await Mp4FrameSource.open(alt)
+        }
         sources.set(clip.id, src)
         console.info(`[kadr] export decode for ${asset.name}: ${src ? 'webcodecs' : 'element'}`)
       }
@@ -417,6 +487,34 @@ export function startExport(
     }
     await Promise.all(waits)
   }
+}
+
+/**
+ * A shim asset pointing at the cached ffmpeg H.264 intermediate when the
+ * source codec is one Chromium cannot decode; null when the codec is fine
+ * (the regular element fallback stays in charge) or the transcode failed.
+ * Old projects saved before the codec field existed are re-probed once.
+ */
+const undecodable = new Map<string, Promise<MediaAsset | null>>()
+
+function undecodableFallback(asset: MediaAsset): Promise<MediaAsset | null> {
+  let p = undecodable.get(asset.path)
+  if (!p) {
+    p = (async () => {
+      let codec = asset.codec
+      if (!codec) codec = (await window.kadr.probeMedia(asset.path)).asset.codec
+      if (chromiumCanDecode(codec)) return null
+      console.info(`[kadr] ${asset.name}: '${codec}' is not decodable by Chromium — building an H.264 intermediate`)
+      const path = await window.kadr.requestDecoded(asset.path, asset.duration)
+      return { ...asset, path }
+    })().catch((err) => {
+      console.warn(`[kadr] decode fallback failed for ${asset.name}`, err)
+      return null
+    })
+    undecodable.set(asset.path, p)
+  }
+  // shims carry per-asset metadata (name, fps…) — rebind onto this asset
+  return p.then((alt) => (alt ? { ...asset, path: alt.path } : null))
 }
 
 /**

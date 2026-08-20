@@ -55,7 +55,20 @@ function editorEval(code) {
   })
 }
 
-const asText = (v) => ({ content: [{ type: 'text', text: JSON.stringify(v, null, 1) }] })
+// claude kills the stdio transport when a single JSON-RPC message exceeds
+// 16 MB ("stdout overflow → Connection closed") — cap every tool result far
+// below that. Whole-project dumps with asset waveforms/thumbnails were the
+// culprit; kadr_state strips those, this guard covers kadr_eval and the rest.
+const MAX_TEXT = 4_000_000
+const asText = (v) => {
+  let text = JSON.stringify(v, null, 1)
+  if (text.length > MAX_TEXT) {
+    text = text.slice(0, MAX_TEXT) +
+      '\n…[result truncated at 4 MB — return selected fields instead of whole ' +
+      'objects; asset waveform/thumbnail blobs are the usual culprits]'
+  }
+  return { content: [{ type: 'text', text }] }
+}
 const asError = (e) => ({ content: [{ type: 'text', text: `Error: ${e.message || e}` }], isError: true })
 
 const server = new McpServer({ name: 'kadr', version: '1.0.0' })
@@ -68,14 +81,21 @@ server.registerTool('kadr_state', {
     'video track (drawn last). Clip: {id, kind: media|text, assetId, start, duration, inPoint, ' +
     'speed, gain, muted, transform, mask?, maskShapes?, effects[], transitionIn/Out?, fadeIn/Out?}. ' +
     'project.texts lists transcript/subtitle documents (TextDoc {id, name, path, format: srt|txt, ' +
-    'assetId?, offset?}) — path is a real file you can Read/Edit; see kadr_transcribe to create them.',
+    'assetId?, offset?}) — path is a real file you can Read/Edit; see kadr_transcribe to create them. ' +
+    'Asset waveform/thumbnail blobs are omitted (hasWaveform/hasThumbnail flags remain).',
   inputSchema: {}
 }, async () => {
   try {
     return asText(await editorEval(`
       const s = window.kadrEditor.useEditor.getState()
+      // strip multi-MB base64 blobs: a >16 MB tool result makes claude drop
+      // the whole MCP connection ("stdout overflow")
+      const assets = s.project.assets.map(a => {
+        const { waveform, thumbnail, thumbnailEnd, ...rest } = a
+        return { ...rest, hasWaveform: !!waveform, hasThumbnail: !!thumbnail }
+      })
       return {
-        project: s.project,
+        project: { ...s.project, assets },
         projectPath: s.projectPath,
         selection: s.selection,
         playhead: s.playhead,
@@ -103,6 +123,10 @@ server.registerTool('kadr_eval', {
     '- window.kadrEditor.uid() → new id; .PRESETS → export presets; .projectDuration(project); ' +
     '.evalAnim(anim, t); await .reverseClip(clipId) — reverse a video/audio clip in place ' +
     '(renders a backwards copy, swaps the clip to it; calling again un-reverses); ' +
+    'await .normalizeClip(clipId, {targetLufs?, peakDb?}) — measure the clip audio (EBU R128) ' +
+    'and set its gain for −14 LUFS with a −1 dBTP ceiling (defaults); works on either half of a ' +
+    'linked A/V pair, one undo entry, returns {gain, gainDb, measuredLufs, peakLimited}; ' +
+    'await .snapshotFrame({t?, importToBin?}) — see kadr_snapshot; ' +
     'await .importFiles([paths], {trackId, at}|null) — probe files into the bin (deduped by path) ' +
     'and, with a placement, lay them out back-to-back on the timeline from `at`.\n' +
     '- await window.kadr.probeMedia(path) → { asset } (probe a media file to import: then ' +
@@ -111,7 +135,9 @@ server.registerTool('kadr_eval', {
     'Times are seconds. Animatable scalars (clip gain, transform.x/y/scale/rotation/opacity) are ' +
     'Anim objects — write { value: 0.5 }, NEVER a bare number. ' +
     'Mutations: always pushHistory first; the store is zustand — re-read ' +
-    'getState() after each action. Example — add a media file to track V1 at 2s:\n' +
+    'getState() after each action. NEVER return whole project/asset objects — asset ' +
+    'waveform/thumbnail blobs are megabytes of base64 (results are truncated at 4 MB); ' +
+    'return the specific fields you need. Example — add a media file to track V1 at 2s:\n' +
     'const ed = window.kadrEditor; const st = () => ed.useEditor.getState();\n' +
     'const { asset } = await window.kadr.probeMedia("/path/v.mp4");\n' +
     'const id = ed.uid(); st().pushHistory("hInsert"); st().addAsset({ id, ...asset });\n' +
@@ -120,6 +146,27 @@ server.registerTool('kadr_eval', {
   inputSchema: { code: z.string().describe('async function body to run in the editor page') }
 }, async ({ code }) => {
   try { return asText(await editorEval(code)) } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_snapshot', {
+  description:
+    'YOUR EYES on the timeline: render the WYSIWYG frame at time t (default: current playhead) ' +
+    'to a PNG at project resolution and return its absolute path — then Read that file to SEE ' +
+    'the frame (composition, text placement, colors, effects). Media decodes at SOURCE quality ' +
+    '(originals, not the preview proxies); Remotion fragments are included (forced through ' +
+    'pixel capture). The PNG lands next to the project file (Downloads if the project was ' +
+    'never saved) and is imported into the media bin unless importToBin=false — pass false ' +
+    'when you only need to look. Takes ~2 s, up to ~5 s with fragments or many clips.',
+  inputSchema: {
+    t: z.number().optional().describe('project time in seconds; default = current playhead'),
+    importToBin: z.boolean().optional().describe('default true: register the PNG as a media asset')
+  }
+}, async ({ t, importToBin }) => {
+  try {
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.snapshotFrame(${JSON.stringify({ t, importToBin })})
+      return r`))
+  } catch (e) { return asError(e) }
 })
 
 server.registerTool('kadr_export', {

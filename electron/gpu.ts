@@ -89,14 +89,20 @@ export function enumerateGpus(): GpuInfo[] {
 let trialNode: string | null = null
 
 function applyToChromium(gpu: GpuInfo): void {
-  app.commandLine.appendSwitch('render-node-override', gpu.node)
   if (gpu.driver === 'nvidia') {
-    // NVIDIA's GL/EGL stack does not drive a Wayland Chromium GPU process
-    // reliably on Optimus; XWayland + GLX PRIME offload is the path that works.
+    // NVIDIA Optimus: the reliable way to move the GL stack to the dGPU is GLX
+    // PRIME render offload under XWayland. render-node-override to the NVIDIA
+    // node tends to make Chromium's GPU process fail to init on this stack
+    // (blank/no window), so we deliberately DON'T use it here — the offload
+    // env below does the selection. force_high_performance_gpu backs it up.
     app.commandLine.appendSwitch('ozone-platform', 'x11')
+    app.commandLine.appendSwitch('force_high_performance_gpu')
     process.env.__NV_PRIME_RENDER_OFFLOAD = '1'
     process.env.__GLX_VENDOR_LIBRARY_NAME = 'nvidia'
     process.env.__VK_LAYER_NV_optimus = 'NVIDIA_only'
+  } else {
+    // Intel / AMD: point Chromium's GPU process straight at the render node.
+    app.commandLine.appendSwitch('render-node-override', gpu.node)
   }
   process.env.KADR_GPU_POWER = gpu.integrated ? 'low-power' : 'high-performance'
 }

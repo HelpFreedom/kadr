@@ -194,6 +194,14 @@ app.whenReady().then(() => {
   registerTranscribeIpc(() => win)
   registerFragmentIpc(() => win)
   createWindow()
+  // log which GPU Chromium actually settled on — the diagnostic for the GPU
+  // picker (0x8086 = Intel, 0x10de = NVIDIA, 0x1002 = AMD)
+  app.getGPUInfo('basic').then((info) => {
+    const dev = (info as { gpuDevice?: Array<{ active?: boolean; vendorId?: number; deviceId?: number }> }).gpuDevice
+    const g = dev?.find((d) => d.active) ?? dev?.[0]
+    const hex = (n?: number) => (n == null ? '?' : '0x' + n.toString(16))
+    console.log(`[kadr] active GPU: vendor=${hex(g?.vendorId)} device=${hex(g?.deviceId)}`)
+  }).catch(() => { /* getGPUInfo unavailable — Settings readout still shows it */ })
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

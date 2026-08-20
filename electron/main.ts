@@ -211,7 +211,7 @@ app.on('window-all-closed', () => {
     // an in-flight export/muxer or any stray handle must never keep a
     // windowless process alive — a lingering instance blocks the next
     // launch and reads as "the editor won't open anymore". On a clean close
-    // force-exit quickly: a slow GPU-process teardown (NVIDIA under gamescope)
+    // force-exit quickly: a slow GPU-process teardown (NVIDIA PRIME offload)
     // otherwise makes closing hang for seconds. Give an export longer to flush.
     setTimeout(() => app.exit(0), exportState ? 2500 : 400)
   }
@@ -463,8 +463,8 @@ function registerIpc() {
   ipcMain.handle('gpu:confirm', () => confirmGpuTrial())
   ipcMain.handle('gpu:relaunch', () => {
     // spawn a fresh top-level process (not app.relaunch) so cleanRelaunchEnv can
-    // escape gamescope's nested Wayland and clear NVIDIA vars — the new process
-    // re-reads gpu.json and routes to gamescope/Intel from scratch.
+    // clear the NVIDIA offload vars / x11 hint and a dev-server URL — the new
+    // process re-reads gpu.json and applies the chosen GPU from scratch.
     spawn(process.execPath, process.argv.slice(1), {
       env: cleanRelaunchEnv(),
       detached: true,

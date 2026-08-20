@@ -90,17 +90,19 @@ let trialNode: string | null = null
 
 function applyToChromium(gpu: GpuInfo): void {
   if (gpu.driver === 'nvidia') {
-    // PRIME render offload (the vars switcherooctl sets for the dGPU; verified
-    // with glxinfo/eglinfo to move GL to the NVIDIA card). Present via XWayland
-    // (--ozone-platform=x11): the X server copies the NVIDIA-rendered frames
-    // back to the primary GPU for display. Native Wayland leaves kwin unable to
-    // import NVIDIA's buffers → the window comes up blank. render-node-override
-    // is deliberately NOT set (it made the GPU process fail to init).
+    // Community-documented reality (NVIDIA/Electron forums): on an Optimus
+    // laptop only XWayland renders Chromium on the NVIDIA GPU — native Wayland
+    // falls back to software or a blank window. So force x11 + GLX PRIME offload.
+    // --disable-gpu-sandbox stops the GPU process crashing on the proprietary
+    // driver, which is the "process starts but no window appears" symptom.
+    // render-node-override and the Vulkan driver-select are deliberately dropped
+    // (they made GPU init / vkCreateInstance fail). Minor redraw glitches remain
+    // the known cost of the XWayland path.
     app.commandLine.appendSwitch('ozone-platform', 'x11')
+    app.commandLine.appendSwitch('disable-gpu-sandbox')
     process.env.__NV_PRIME_RENDER_OFFLOAD = '1'
     process.env.__GLX_VENDOR_LIBRARY_NAME = 'nvidia'
     process.env.__VK_LAYER_NV_optimus = 'NVIDIA_only'
-    process.env.VK_LOADER_DRIVERS_SELECT = '*nvidia*'
   } else {
     // Intel / AMD: point Chromium's GPU process straight at the render node.
     app.commandLine.appendSwitch('render-node-override', gpu.node)

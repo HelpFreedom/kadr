@@ -1,3 +1,6 @@
+// Side-effect import — MUST stay first so bundled-runtime PATH/env is set
+// before './ffmpeg' (which captures KADR_FFMPEG/FFPROBE at load) is imported.
+import './runtime-env'
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'electron'
 import { join, dirname, basename } from 'path'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
@@ -8,6 +11,7 @@ import { probeMedia, makeProxy, makeReversed, ExportMuxer, RawVideoEncoder } fro
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerFragmentIpc } from './fragments'
+import { enumerateGpus, applyGpuChoiceAtStartup, confirmGpuTrial } from './gpu'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -52,6 +56,11 @@ app.commandLine.appendSwitch(
   'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
 )
 
+// Point the GPU process at the user's chosen render node (else Chromium's
+// default = the integrated GPU). MUST run before app 'ready'. Also sets
+// KADR_GPU_POWER for the renderer's WebGL powerPreference.
+applyGpuChoiceAtStartup()
+
 // Last line of defense: a stray async error (e.g. a stream racing a request
 // abort) must be logged, not shown as a modal error dialog over the editor.
 process.on('uncaughtException', (err) => {
@@ -88,6 +97,8 @@ function createWindow() {
       app.exit(1)
     }
   })
+  // the renderer loaded → a pending GPU trial is proven good and may stick
+  win.webContents.once('did-finish-load', () => confirmGpuTrial())
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -236,10 +247,10 @@ const userStorePath = (name: string) =>
 const proxyDir = () => join(app.getPath('userData'), 'proxies')
 let proxyChain: Promise<unknown> = Promise.resolve()
 
-async function requestProxy(srcPath: string, duration: number): Promise<string> {
+async function requestProxy(srcPath: string, duration: number, audioOnly = false): Promise<string> {
   const stat = statSync(srcPath)
   const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
+    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}:${audioOnly ? 'a' : 'v'}`)
     .digest('hex')
     .slice(0, 20)
   const out = join(proxyDir(), `${key}.mp4`)
@@ -257,7 +268,7 @@ async function requestProxy(srcPath: string, duration: number): Promise<string> 
     try {
       await makeProxy(srcPath, tmp, duration, (p) => {
         win?.webContents.send('proxy:progress', { path: srcPath, progress: p })
-      })
+      }, audioOnly)
       await fs.rename(tmp, out)
     } catch (err) {
       fs.unlink(tmp).catch(() => { /* nothing to clean */ })
@@ -346,8 +357,8 @@ async function rememberDir(kind: string, filePath: string) {
 }
 
 function registerIpc() {
-  ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number) =>
-    requestProxy(srcPath, duration)
+  ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number, audioOnly?: boolean) =>
+    requestProxy(srcPath, duration, audioOnly)
   )
 
   ipcMain.handle(
@@ -367,6 +378,12 @@ function registerIpc() {
 
   ipcMain.handle('store:write', async (_e, name: string, data: unknown) => {
     await fs.writeFile(userStorePath(name), JSON.stringify(data, null, 1))
+  })
+
+  ipcMain.handle('gpu:list', () => enumerateGpus())
+  ipcMain.handle('gpu:relaunch', () => {
+    app.relaunch()
+    app.exit(0)
   })
 
   ipcMain.handle('media:open-dialog', async () => {

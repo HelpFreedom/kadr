@@ -1,0 +1,22 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b1e26"/>
+      <stop offset="1" stop-color="#0e1014"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f9dff"/>
+      <stop offset="1" stop-color="#8b5cff"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="104" fill="url(#bg)"/>
+  <!-- viewfinder corner brackets (a "frame") -->
+  <g fill="none" stroke="url(#accent)" stroke-width="26" stroke-linecap="round">
+    <path d="M150 120 H120 V150"/>
+    <path d="M362 120 H392 V150"/>
+    <path d="M150 392 H120 V362"/>
+    <path d="M362 392 H392 V362"/>
+  </g>
+  <!-- play triangle -->
+  <path d="M214 190 L330 256 L214 322 Z" fill="url(#accent)"/>
+</svg>

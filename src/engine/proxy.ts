@@ -8,6 +8,16 @@ import { useEditor } from '@/state/store'
 /** sources at or above this short-side size get a preview proxy */
 const PROXY_MIN_SIDE = 720
 
+// Audio codecs Chromium can decode in a media element. Anything else — ac3,
+// eac3 (Dolby), dts, truehd, alac, wma… — is silent in the preview even though
+// the video plays, so we proxy it to AAC regardless of resolution. Assets
+// probed before this field existed (no audioCodec) are left alone.
+const PREVIEW_AUDIO = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac', 'pcm_s16le', 'pcm_u8'])
+
+function audioNeedsProxy(a: MediaAsset): boolean {
+  return a.hasAudio && !!a.audioCodec && !PREVIEW_AUDIO.has(a.audioCodec)
+}
+
 interface ProxyProgressState {
   /** asset id → 0..1 while a proxy is being generated */
   jobs: Record<string, number>
@@ -16,7 +26,9 @@ interface ProxyProgressState {
 export const useProxyProgress = create<ProxyProgressState>(() => ({ jobs: {} }))
 
 export function wantsProxy(a: MediaAsset): boolean {
-  return a.kind === 'video' && Math.min(a.width, a.height) >= PROXY_MIN_SIDE
+  if (a.kind === 'video') return Math.min(a.width, a.height) >= PROXY_MIN_SIDE || audioNeedsProxy(a)
+  if (a.kind === 'audio') return audioNeedsProxy(a)
+  return false
 }
 
 const inflight = new Set<string>()
@@ -33,7 +45,7 @@ export function ensureProxies() {
     inflight.add(a.id)
     useProxyProgress.setState((s) => ({ jobs: { ...s.jobs, [a.id]: 0 } }))
     window.kadr
-      .requestProxy(a.path, a.duration)
+      .requestProxy(a.path, a.duration, a.kind === 'audio')
       .then((proxyPath) => {
         const cur = useEditor.getState().project.assets.find((x) => x.id === a.id)
         if (cur && cur.proxyPath !== proxyPath) {

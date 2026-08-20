@@ -87,7 +87,7 @@ const api: KadrApi = {
     ipcRenderer.on('reverse:progress', handler)
     return () => ipcRenderer.removeListener('reverse:progress', handler)
   },
-  requestProxy: (path, duration) => ipcRenderer.invoke('proxy:request', path, duration),
+  requestProxy: (path, duration, audioOnly) => ipcRenderer.invoke('proxy:request', path, duration, audioOnly),
   onProxyProgress: (cb) => {
     const handler = (_e: unknown, p: { path: string; progress: number }) => cb(p)
     ipcRenderer.on('proxy:progress', handler)
@@ -129,6 +129,7 @@ const api: KadrApi = {
     return () => ipcRenderer.removeListener('fragment:progress', handler)
   },
 
+  defaultWhisperModel: process.env.KADR_WHISPER_MODEL || '',
   transcribe: (req) => ipcRenderer.invoke('transcribe:run', req),
   transcribeCancel: () => ipcRenderer.invoke('transcribe:cancel'),
   onTranscribeProgress: (cb) => {
@@ -153,7 +154,11 @@ const api: KadrApi = {
     const handler = (_e: unknown, code: number) => cb(code)
     ipcRenderer.on('claude:exit', handler)
     return () => ipcRenderer.removeListener('claude:exit', handler)
-  }
+  },
+
+  defaultGpuPower: process.env.KADR_GPU_POWER || '',
+  gpuList: () => ipcRenderer.invoke('gpu:list'),
+  relaunchApp: () => { void ipcRenderer.invoke('gpu:relaunch') }
 }
 
 // contextIsolation is off (see main.ts: export frames pass by reference),

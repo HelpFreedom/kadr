@@ -5,6 +5,21 @@ import type { TextDoc } from '@shared/types'
 /** files/URLs currently being imported (drop or dialog) — drives the '…' hint */
 export const useImportUi = create<{ active: number }>(() => ({ active: 0 }))
 
+/** The UI installs this so that dropping/importing the first media into an
+ *  empty project can ask for a project format (resolve dims, or null = keep
+ *  current). Set to null when no UI is mounted. */
+export type ProjectFormatResolver = (
+  probe: { width: number; height: number; fps: number }
+) => Promise<{ width: number; height: number; fps: number } | null>
+let formatResolver: ProjectFormatResolver | null = null
+export function setProjectFormatResolver(fn: ProjectFormatResolver | null): void {
+  formatResolver = fn
+}
+function projectIsEmpty(): boolean {
+  const p = useEditor.getState().project
+  return p.assets.length === 0 && p.tracks.every((tr) => tr.clips.length === 0)
+}
+
 /**
  * Import files by absolute path: probe each into a bin asset (paths already
  * in the bin are reused, not duplicated), register srt/txt as text docs, and
@@ -29,6 +44,8 @@ async function importFilesInner(
   place: { trackId: string | null; at: number } | null
 ): Promise<string[]> {
   const st = useEditor.getState
+  // the first media into a fresh project may set the project format
+  const wasEmpty = projectIsEmpty()
   const assetIds: string[] = []
   const textDocs: TextDoc[] = []
   for (const path of paths) {
@@ -57,6 +74,20 @@ async function importFilesInner(
     }
   }
   if (textDocs.length) st().addTexts(textDocs)
+  // fresh project + a video just landed → offer to set the project format
+  if (wasEmpty && formatResolver && assetIds.length) {
+    const vid = st().project.assets.find(
+      (a) => assetIds.includes(a.id) && a.kind === 'video'
+    )
+    if (vid) {
+      const choice = await formatResolver({ width: vid.width, height: vid.height, fps: vid.fps })
+      if (choice) {
+        useEditor.setState((s) => ({
+          project: { ...s.project, width: choice.width, height: choice.height, fps: choice.fps }
+        }))
+      }
+    }
+  }
   if (place && assetIds.length) {
     st().insertClipsFromAssets(assetIds, place.trackId, place.at)
   }

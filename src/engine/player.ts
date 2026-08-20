@@ -227,9 +227,16 @@ export function drawFrame(
   t: number,
   pool: MediaPool,
   frames?: Map<string, VideoFrame>,
-  blends?: Map<string, BlendFrame>
+  blends?: Map<string, BlendFrame>,
+  // Render (and read-back) resolution. Defaults to the project size for the
+  // live preview; export passes the preset's output size so the compositor,
+  // readPixels and the ffmpeg pipe all agree on WxH. Omitting this let export
+  // render at project size while the encoder was told the preset size — equal
+  // byte counts but reshaped rows, which sheared cross-size exports into
+  // scanlines (period 16 for 1080↔1920).
+  renderSize?: { w: number; h: number }
 ) {
-  comp.setSize(project.width, project.height)
+  comp.setSize(renderSize?.w ?? project.width, renderSize?.h ?? project.height)
   comp.begin(project.background)
   for (let i = project.tracks.length - 1; i >= 0; i--) {
     const track = project.tracks[i]

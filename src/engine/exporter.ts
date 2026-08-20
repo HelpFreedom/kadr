@@ -254,12 +254,12 @@ export function startExport(
             // transforms/masks/track motion move between sub-samples;
             // the decoded video frames stay those of the frame center
             const ts = t + ((s + 0.5) / blurSamples - 0.5) * (0.5 / fps)
-            drawFrame(comp, project, ts, pool, frames, blends)
+            drawFrame(comp, project, ts, pool, frames, blends, { w: width, h: height })
             comp.accumBlit(1 / (s + 1))
           }
           comp.setRenderTarget(false)
         } else {
-          drawFrame(comp, project, t, pool, frames, blends)
+          drawFrame(comp, project, t, pool, frames, blends, { w: width, h: height })
         }
         if (useRaw) {
           if (rawDirect) {

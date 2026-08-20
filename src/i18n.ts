@@ -268,7 +268,22 @@ const ru = {
   resolution: 'Разрешение',
   framerate: 'Частота кадров',
   duration: 'Длительность',
-  inOut: 'Вход/выход'
+  inOut: 'Вход/выход',
+  create: 'Создать',
+  apply: 'Применить',
+  format: 'Формат',
+  projectFormat: 'Формат проекта',
+  projectMatchVideo: 'Под размер видео',
+  settings: 'Настройки',
+  gpu: 'Видеокарта',
+  gpuAuto: 'Авто (по умолчанию)',
+  gpuIntegrated: 'встроенная',
+  gpuDiscrete: 'дискретная',
+  gpuActive: 'Сейчас активна',
+  gpuEncodeNote: 'Ускоряет композитинг и превью; кодирование H.264 остаётся на CPU.',
+  gpuRestartHint: 'Изменение вступит в силу после перезапуска.',
+  gpuApplyRestart: 'Применить и перезапустить',
+  gpuFailedRevert: 'Выбранная видеокарта не запустилась — вернулись на авто.'
 }
 
 const en: typeof ru = {
@@ -539,7 +554,22 @@ const en: typeof ru = {
   resolution: 'Resolution',
   framerate: 'Frame rate',
   duration: 'Duration',
-  inOut: 'In/out'
+  inOut: 'In/out',
+  create: 'Create',
+  apply: 'Apply',
+  format: 'Format',
+  projectFormat: 'Project format',
+  projectMatchVideo: 'Match video',
+  settings: 'Settings',
+  gpu: 'Graphics card',
+  gpuAuto: 'Auto (default)',
+  gpuIntegrated: 'integrated',
+  gpuDiscrete: 'discrete',
+  gpuActive: 'Currently active',
+  gpuEncodeNote: 'Speeds up compositing and preview; H.264 encoding stays on the CPU.',
+  gpuRestartHint: 'The change takes effect after a restart.',
+  gpuApplyRestart: 'Apply and restart',
+  gpuFailedRevert: 'The selected GPU did not start — reverted to auto.'
 }
 
 export type TKey = keyof typeof ru

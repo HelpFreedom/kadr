@@ -44,7 +44,8 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
     width: video?.width || 0,
     height: video?.height || 0,
     fps: fps || 30,
-    hasAudio: !!audio
+    hasAudio: !!audio,
+    audioCodec: audio?.codec_name
   }
 
   if (kind !== 'audio') {
@@ -123,17 +124,29 @@ export function makeProxy(
   src: string,
   out: string,
   duration: number,
-  onProgress?: (p: number) => void
+  onProgress?: (p: number) => void,
+  audioOnly = false
 ): Promise<void> {
-  const args = [
-    '-y', '-v', 'error', '-progress', 'pipe:1',
-    '-i', src,
-    '-vf', "scale=-2:'min(540,ih)'",
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-b:a', '96k',
-    '-movflags', '+faststart',
-    out
-  ]
+  // audioOnly: the source has no usable video (a music/voice file) but an audio
+  // codec Chromium can't decode (ac3/dts/…) — transcode just the audio to AAC
+  // so the preview element has sound. Otherwise a normal 540p video+AAC proxy.
+  const args = audioOnly
+    ? [
+        '-y', '-v', 'error', '-progress', 'pipe:1',
+        '-i', src,
+        '-vn', '-c:a', 'aac', '-b:a', '160k',
+        '-movflags', '+faststart',
+        out
+      ]
+    : [
+        '-y', '-v', 'error', '-progress', 'pipe:1',
+        '-i', src,
+        '-vf', "scale=-2:'min(540,ih)'",
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-b:a', '96k',
+        '-movflags', '+faststart',
+        out
+      ]
   return new Promise((resolve, reject) => {
     const child = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let err = ''

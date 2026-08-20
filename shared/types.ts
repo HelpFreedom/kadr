@@ -21,6 +21,8 @@ export interface MediaAsset {
   height: number
   fps: number
   hasAudio: boolean
+  /** ffprobe audio codec_name (e.g. 'aac', 'ac3'); drives preview-proxy need */
+  audioCodec?: string
   /** data: URL of a poster frame, generated on import */
   thumbnail?: string
   /** poster of the last frame (clip tails show it on the timeline) */
@@ -406,7 +408,7 @@ export interface KadrApi {
   ): () => void
 
   /** Build (or reuse) a preview proxy; resolves with the proxy file path. */
-  requestProxy(path: string, duration: number): Promise<string>
+  requestProxy(path: string, duration: number, audioOnly?: boolean): Promise<string>
   onProxyProgress(cb: (p: { path: string; progress: number }) => void): () => void
 
   exportDialog(defaultName: string, ext: string): Promise<string | null>
@@ -448,6 +450,8 @@ export interface KadrApi {
   onFragmentProgress(cb: (p: { id: string; phase: string; progress: number }) => void): () => void
 
   /** Mix the request's audio to a temp wav and run Whisper over it. */
+  /** whisper model pre-bundled in the packaged app ('' if none); subtitles default to it */
+  defaultWhisperModel: string
   transcribe(req: TranscribeRequest): Promise<TranscribeResult>
   transcribeCancel(): Promise<void>
   onTranscribeProgress(cb: (p: { progress: number; text: string }) => void): () => void
@@ -466,4 +470,26 @@ export interface KadrApi {
   claudeClose(): Promise<void>
   onClaudeData(cb: (data: string) => void): () => void
   onClaudeExit(cb: (code: number) => void): () => void
+
+  /** WebGL powerPreference hint derived from the persisted GPU choice
+      ('default' | 'high-performance' | 'low-power'); '' when unset. */
+  defaultGpuPower: string
+  /** Enumerate selectable GPUs (DRM render nodes). */
+  gpuList(): Promise<GpuInfo[]>
+  /** Relaunch the app so a new GPU choice takes effect. */
+  relaunchApp(): void
+}
+
+/** A user-selectable GPU (one DRM render node). */
+export interface GpuInfo {
+  /** DRM render node path, e.g. /dev/dri/renderD129 */
+  node: string
+  /** kernel driver: i915 / nvidia / amdgpu / … */
+  driver: string
+  vendorId: string
+  deviceId: string
+  /** friendly vendor: NVIDIA / Intel / AMD (or driver name) */
+  vendor: string
+  /** primary display adapter (laptop iGPU) vs a discrete card */
+  integrated: boolean
 }

@@ -283,11 +283,17 @@ export class Compositor {
 
   constructor(canvas: HTMLCanvasElement | OffscreenCanvas) {
     this.canvas = canvas
+    // powerPreference nudges Chromium toward the discrete GPU when the user
+    // picked one (main sets KADR_GPU_POWER → preload's defaultGpuPower).
+    const power = window.kadr?.defaultGpuPower
     const gl = canvas.getContext('webgl2', {
       alpha: false,
       antialias: false,
       preserveDrawingBuffer: true,
-      desynchronized: true
+      desynchronized: true,
+      ...(power === 'high-performance' || power === 'low-power'
+        ? { powerPreference: power }
+        : {})
     }) as WebGL2RenderingContext | null
     if (!gl) throw new Error('WebGL2 is not available')
     this.gl = gl
@@ -352,6 +358,15 @@ export class Compositor {
   /** Copy the finished frame out of the default framebuffer (bottom-up rows). */
   readPixels(out: Uint8Array) {
     const gl = this.gl
+    // Guard the readback size against the encoder's expectation: a buffer that
+    // does not hold exactly width*height*4 bytes means the caller rendered at a
+    // different resolution than it will encode at, which silently reshapes rows.
+    const need = this.width * this.height * 4
+    if (out.length !== need) {
+      throw new Error(
+        `readPixels size mismatch: buffer ${out.length}B for ${this.width}×${this.height} (need ${need}B)`
+      )
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
     gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, out)
   }

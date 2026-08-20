@@ -277,21 +277,33 @@ async function ensureWorkspace(
   let installed = false
   if (!existsSync(join(WORKSPACE, 'node_modules', 'remotion'))) {
     onProgress?.('install', 0)
-    const extraEnv = await netEnv()
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn('npm', ['install', '--no-audit', '--no-fund'], {
-        cwd: WORKSPACE,
-        env: { ...process.env, ...extraEnv },
-        stdio: ['ignore', 'pipe', 'pipe']
+    // Packaged builds ship a pre-installed node_modules (resources/
+    // kadr-fragments-seed) so the first fragment needs neither host npm nor a
+    // ~150 MB network install. Copy it once; if the seed's browser cache came
+    // along inside node_modules it travels for free. No seed (dev, or a lite
+    // build) → fall back to a live `npm install` with the bundled node/npm.
+    const seed = app.isPackaged
+      ? join(process.resourcesPath, 'kadr-fragments-seed', 'node_modules')
+      : ''
+    if (seed && existsSync(join(seed, 'remotion'))) {
+      await fs.cp(seed, join(WORKSPACE, 'node_modules'), { recursive: true })
+    } else {
+      const extraEnv = await netEnv()
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('npm', ['install', '--no-audit', '--no-fund'], {
+          cwd: WORKSPACE,
+          env: { ...process.env, ...extraEnv },
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
+        let err = ''
+        child.stderr.on('data', (c) => { err += c })
+        child.on('error', reject)
+        child.on('close', (code) => {
+          if (code === 0) resolve()
+          else reject(new Error(`npm install failed (${code}): ${err.slice(-600)}`))
+        })
       })
-      let err = ''
-      child.stderr.on('data', (c) => { err += c })
-      child.on('error', reject)
-      child.on('close', (code) => {
-        if (code === 0) resolve()
-        else reject(new Error(`npm install failed (${code}): ${err.slice(-600)}`))
-      })
-    })
+    }
     installed = true
     onProgress?.('install', 1)
   }

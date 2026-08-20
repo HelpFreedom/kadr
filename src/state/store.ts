@@ -42,14 +42,14 @@ export const newClipDefaults = (): Pick<
   effects: []
 })
 
-export function newProject(): Project {
+export function newProject(opts?: { width?: number; height?: number; fps?: number }): Project {
   return {
     version: 1,
     id: uid(),
     name: 'Untitled',
-    width: 1920,
-    height: 1080,
-    fps: 30,
+    width: opts?.width ?? 1920,
+    height: opts?.height ?? 1080,
+    fps: opts?.fps ?? 30,
     background: '#000000',
     tracks: [
       { id: uid(), kind: 'video', name: 'V2', muted: false, locked: false, gain: 1, clips: [] },
@@ -378,6 +378,7 @@ interface EditorState {
   /** timeline pixels per second */
   zoom: number
   exportOpen: boolean
+  settingsOpen: boolean
   /** in/out fragment (Shift+drag on the timeline) */
   range: TimeRange | null
   /** clip whose animation/mask panel is open (double-click) */
@@ -458,6 +459,7 @@ interface EditorState {
   setPreviewLoading(l: boolean): void
   setZoom(z: number): void
   setExportOpen(open: boolean): void
+  setSettingsOpen(open: boolean): void
   setRange(r: TimeRange | null): void
 }
 
@@ -472,6 +474,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   previewLoading: false,
   zoom: 60,
   exportOpen: false,
+  settingsOpen: false,
   range: null,
   animClipId: null,
   motionTrackId: null,
@@ -1105,6 +1108,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setPreviewLoading: (previewLoading) => set({ previewLoading }),
   setZoom: (zoom) => set({ zoom: Math.min(MAX_ZOOM, Math.max(4, zoom)) }),
   setExportOpen: (exportOpen) => set({ exportOpen }),
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setRange: (range) =>
     set({ range: range && range.end - range.start > 0.01 ? range : null })
 }))

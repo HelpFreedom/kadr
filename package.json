@@ -10,13 +10,15 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "pack": "bash scripts/pack.sh",
     "postinstall": "electron-rebuild -f -w node-pty"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "mp4-muxer": "^5.1.5",
+    "mediabunny": "^1.50.8",
+    "mp4-muxer": "^5.2.2",
     "mp4box": "^2.3.0",
     "node-pty": "^1.1.0",
     "react": "^18.3.1",
@@ -27,6 +29,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.4",
+    "electron-builder": "^26.0.12",
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
@@ -39,5 +42,10 @@
   },
   "contributors": [
     "Claude (Anthropic)"
-  ]
+  ],
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true,
+    "node-pty@1.1.0": true
+  }
 }

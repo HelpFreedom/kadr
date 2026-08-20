@@ -5,11 +5,19 @@ import { Inspector } from './components/Inspector'
 import { Timeline } from './components/Timeline'
 import { TransportBar, LangSwitch } from './components/TransportBar'
 import { ExportDialog } from './components/ExportDialog'
+import { SettingsDialog } from './components/SettingsDialog'
 import { ClaudePanel } from './components/ClaudePanel'
 import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
 import { CaptionsDialog } from './components/CaptionsDialog'
+import { ProjectFormatDialog, type Dims } from './components/ProjectFormatDialog'
 import { useEditor, newProject } from './state/store'
-import { dropPayload, dropUsable, importDrop, importFiles } from './engine/mediaImport'
+import {
+  dropPayload,
+  dropUsable,
+  importDrop,
+  importFiles,
+  setProjectFormatResolver
+} from './engine/mediaImport'
 import { useT, type TKey } from './i18n'
 import { create } from 'zustand'
 import type { Project } from '@shared/types'
@@ -93,6 +101,16 @@ export default function App() {
   const [sideW, setSideW] = useState(() =>
     Math.min(640, Math.max(200, Number(localStorage.getItem('kadr.sidew')) || 280))
   )
+  // New Project format dialog
+  const [newProjOpen, setNewProjOpen] = useState(false)
+  // "media dropped into an empty project" format prompt: the pending probe +
+  // the resolver waiting for the user's pick
+  const [dropFmt, setDropFmt] = useState<{ probe: Dims; resolve: (d: Dims | null) => void } | null>(null)
+
+  useEffect(() => {
+    setProjectFormatResolver((probe) => new Promise((resolve) => setDropFmt({ probe, resolve })))
+    return () => setProjectFormatResolver(null)
+  }, [])
 
   // media dropped ANYWHERE in the window is at least imported into the bin
   // (the timeline zones place clips and mark the event handled); a non-media
@@ -236,12 +254,7 @@ export default function App() {
         <button title={redoTitle} disabled={!redoLabel} onClick={() => useEditor.getState().redo()}>
           ↷ {t('redoShort')}
         </button>
-        <button
-          onClick={() => {
-            useEditor.getState().setProject(newProject())
-            markProjectSaved(useEditor.getState().project)
-          }}
-        >
+        <button onClick={() => setNewProjOpen(true)}>
           {t('newProject')}
         </button>
         <button onClick={openProject}>{t('open')}</button>
@@ -257,6 +270,9 @@ export default function App() {
         >
           🤖 Claude
         </button>
+        <button title={t('settings')} onClick={() => useEditor.getState().setSettingsOpen(true)}>
+          ⚙
+        </button>
         <LangSwitch />
       </div>
       <div className="main-row">
@@ -271,6 +287,35 @@ export default function App() {
       <div className="v-resizer" onPointerDown={startResize} title="⇕" />
       <Timeline height={tlHeight} />
       <ExportDialog />
+      <SettingsDialog />
+      {newProjOpen && (
+        <ProjectFormatDialog
+          matchVideo={null}
+          title={t('newProject')}
+          applyLabel={t('create')}
+          onApply={(d) => {
+            useEditor.getState().setProject(newProject(d))
+            markProjectSaved(useEditor.getState().project)
+            setNewProjOpen(false)
+          }}
+          onClose={() => setNewProjOpen(false)}
+        />
+      )}
+      {dropFmt && (
+        <ProjectFormatDialog
+          matchVideo={dropFmt.probe}
+          title={t('projectFormat')}
+          applyLabel={t('apply')}
+          onApply={(d) => {
+            dropFmt.resolve(d)
+            setDropFmt(null)
+          }}
+          onClose={() => {
+            dropFmt.resolve(null)
+            setDropFmt(null)
+          }}
+        />
+      )}
       <TranscribeDialog />
       <SubtitlePanel />
       <CaptionsDialog />

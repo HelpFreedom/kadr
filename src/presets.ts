@@ -1,5 +1,25 @@
 import type { ExportPreset } from '@shared/types'
 
+/** Canvas-size presets for creating/retargeting a project (resolution + fps
+ *  only — codec/container is an export concern, so this list is separate from
+ *  PRESETS). Picked in the New Project dialog and when dropping media into an
+ *  empty project. */
+export interface ProjectPreset {
+  id: string
+  name: string
+  width: number
+  height: number
+  fps: number
+}
+
+export const PROJECT_PRESETS: ProjectPreset[] = [
+  { id: 'yt1080', name: 'YouTube · 16:9 1080p', width: 1920, height: 1080, fps: 30 },
+  { id: 'yt4k', name: 'YouTube 4K · 16:9', width: 3840, height: 2160, fps: 30 },
+  { id: 'vertical', name: 'Shorts / Reels / TikTok · 9:16', width: 1080, height: 1920, fps: 30 },
+  { id: 'square', name: 'Square · 1:1', width: 1080, height: 1080, fps: 30 },
+  { id: 'hd720', name: '720p · 16:9', width: 1280, height: 720, fps: 30 }
+]
+
 export const PRESETS: ExportPreset[] = [
   {
     id: 'yt1080',

@@ -96,6 +96,9 @@ export interface ExportOptions {
       desktop-NLE quality; 'webcodecs' keeps the old in-browser encoder
       (faster, but Chromium's OpenH264 ignores the preset bitrate) */
   encoder?: 'x264' | 'webcodecs'
+  /** encode H.264 on the NVIDIA hardware encoder (NVENC) instead of CPU x264 —
+      much faster; only honored for H.264 presets when NVENC is available */
+  nvenc?: boolean
 }
 
 export function startExport(
@@ -200,7 +203,11 @@ export function startExport(
     const slots: Uint8Array[] = []
     const slotPending: (Promise<void> | null)[] = [null, null]
     if (useRaw) {
-      const codec = preset.ffmpegVideo === 'copy' ? 'libx264' : preset.ffmpegVideo
+      // H.264 presets can encode on the NVIDIA hardware encoder (NVENC) instead
+      // of CPU x264 when requested and available; other codecs are unchanged.
+      const codec = preset.ffmpegVideo === 'copy'
+        ? (opts?.nvenc ? 'h264_nvenc' : 'libx264')
+        : preset.ffmpegVideo
       try {
         rawDirect = await window.kadr.rawEncodeStart({
           width: rw, height: rh, outWidth: width, outHeight: height,

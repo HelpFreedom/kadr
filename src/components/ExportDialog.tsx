@@ -20,8 +20,14 @@ export function ExportDialog() {
   const [motionBlur, setMotionBlur] = useState(true)
   const [frameBlending, setFrameBlending] = useState(true)
   const [fastEncoder, setFastEncoder] = useState(false)
+  const [nvenc, setNvenc] = useState(false)
+  const [nvencOk, setNvencOk] = useState(false)
   const [status, setStatus] = useState<Status>({ kind: 'idle' })
   const handle = useRef<ExportHandle | null>(null)
+
+  useEffect(() => {
+    if (open) void window.kadr.nvencAvailable().then(setNvencOk)
+  }, [open])
 
   useEffect(() => {
     return window.kadr.onExportProgress((p) => {
@@ -49,7 +55,13 @@ export function ExportDialog() {
       out,
       (p) => setStatus({ kind: 'running', phase: p.phase, progress: p.progress }),
       s.range,
-      { motionBlur, frameBlending, encoder: fastEncoder ? 'webcodecs' : 'x264' }
+      {
+        motionBlur,
+        frameBlending,
+        // NVENC uses the raw ffmpeg path, so it overrides the webcodecs option
+        encoder: fastEncoder && !(nvenc && nvencOk) ? 'webcodecs' : 'x264',
+        nvenc: nvenc && nvencOk
+      }
     )
     handle.current = h
     h.done.catch((err) => {
@@ -125,6 +137,15 @@ export function ExportDialog() {
             onChange={(e) => setFastEncoder(e.target.checked)}
           />
           {t('fastEncoder')}
+        </label>
+        <label className="anim-check export-mb" title={t('nvencHint')}>
+          <input
+            type="checkbox"
+            checked={nvenc && nvencOk}
+            disabled={running || !nvencOk}
+            onChange={(e) => setNvenc(e.target.checked)}
+          />
+          {t('nvenc')}{!nvencOk ? ` — ${t('nvencNA')}` : ''}
         </label>
 
         {status.kind === 'running' && (

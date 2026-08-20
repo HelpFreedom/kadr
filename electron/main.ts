@@ -6,7 +6,7 @@ import { join, dirname, basename } from 'path'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
-import { execFile, spawn } from 'child_process'
+import { execFile, spawn, spawnSync } from 'child_process'
 import { probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, ExportMuxer, RawVideoEncoder } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
@@ -407,6 +407,23 @@ async function rememberDir(kind: string, filePath: string) {
   } catch { /* best effort */ }
 }
 
+// Is NVIDIA hardware H.264 encoding usable? Needs an NVIDIA device present and
+// an ffmpeg built with h264_nvenc (the bundled static ffmpeg is not). Probed
+// once and cached — the export dialog offers the NVENC option only when true.
+let nvencCache: boolean | null = null
+function nvencAvailable(): boolean {
+  if (nvencCache !== null) return nvencCache
+  try {
+    if (!existsSync('/dev/nvidia0')) return (nvencCache = false)
+    const ff = process.env.KADR_FFMPEG || 'ffmpeg'
+    const r = spawnSync(ff, ['-hide_banner', '-encoders'], { encoding: 'utf8', timeout: 5000 })
+    nvencCache = /h264_nvenc/.test(r.stdout || '')
+  } catch {
+    nvencCache = false
+  }
+  return nvencCache
+}
+
 function registerIpc() {
   ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number, audioOnly?: boolean) =>
     requestProxy(srcPath, duration, audioOnly)
@@ -439,6 +456,7 @@ function registerIpc() {
     await fs.writeFile(userStorePath(name), JSON.stringify(data, null, 1))
   })
 
+  ipcMain.handle('nvenc:available', () => nvencAvailable())
   ipcMain.handle('gpu:list', () => enumerateGpus())
   // called from Settings only when the user can SEE the switched GPU works —
   // a blank window can't confirm, so it heals to auto on the next launch

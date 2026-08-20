@@ -491,6 +491,9 @@ export interface KadrApi {
   /** WebGL powerPreference hint derived from the persisted GPU choice
       ('default' | 'high-performance' | 'low-power'); '' when unset. */
   defaultGpuPower: string
+  /** True when NVIDIA hardware H.264 encoding (NVENC) is usable — an NVIDIA
+      device is present and ffmpeg has h264_nvenc. */
+  nvencAvailable(): Promise<boolean>
   /** Enumerate selectable GPUs (DRM render nodes). */
   gpuList(): Promise<GpuInfo[]>
   /** Confirm the current GPU trial works (only reachable if the window renders);

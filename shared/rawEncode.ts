@@ -32,7 +32,13 @@ export function rawEncodeArgs(o: RawEncodeOpts): string[] {
     '-s', `${o.width}x${o.height}`, '-r', String(o.fps),
     '-i', 'pipe:0',
     '-vf', vf,
-    ...(o.codec === 'libx264'
+    ...(o.codec === 'h264_nvenc'
+      // NVIDIA hardware encoder — moves H.264 off the CPU (x264) onto the GPU's
+      // dedicated NVENC block; p5/vbr is a balanced quality preset.
+      ? ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr',
+         '-b:v', String(b), '-maxrate', String(Math.round(b * 1.6)), '-bufsize', String(b * 3),
+         '-profile:v', 'high']
+      : o.codec === 'libx264'
       ? ['-c:v', 'libx264', '-preset', 'faster',
          '-b:v', String(b), '-maxrate', String(Math.round(b * 1.6)), '-bufsize', String(b * 3)]
       : ['-c:v', o.codec, '-b:v', String(b),

@@ -169,6 +169,7 @@ const api: KadrApi = {
   },
 
   defaultGpuPower: process.env.KADR_GPU_POWER || '',
+  nvencAvailable: () => ipcRenderer.invoke('nvenc:available'),
   gpuList: () => ipcRenderer.invoke('gpu:list'),
   gpuConfirm: () => { void ipcRenderer.invoke('gpu:confirm') },
   relaunchApp: () => { void ipcRenderer.invoke('gpu:relaunch') }

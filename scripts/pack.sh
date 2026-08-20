@@ -76,8 +76,11 @@ FF_DIR="$(find "$TMP" -maxdepth 1 -type d -name 'ffmpeg-*' | head -n1)"
 # BtbN layout is <dir>/bin/ffmpeg; johnvansickle was <dir>/ffmpeg
 install -m755 "$FF_DIR/bin/ffmpeg"  "$BIN/ffmpeg"
 install -m755 "$FF_DIR/bin/ffprobe" "$BIN/ffprobe"
-"$BIN/ffmpeg" -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc \
-  && log "  ffmpeg has NVENC ✓" || log "  WARNING: bundled ffmpeg lacks nvenc"
+if "$BIN/ffmpeg" -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc; then
+  log "  ffmpeg has NVENC ✓"
+else
+  log "  WARNING: bundled ffmpeg lacks nvenc"
+fi
 
 # ---- 3. bundled Node (host node/npm/npx for Remotion + MCP bridge) ---------
 log "stage Node $NODE_VERSION"

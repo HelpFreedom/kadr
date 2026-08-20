@@ -13,8 +13,9 @@
 // sees 'failed' and reverts to auto — the app heals itself.
 import { app } from 'electron'
 import { readFileSync, writeFileSync } from 'fs'
-import { readdirSync } from 'fs'
+import { readdirSync, openSync } from 'fs'
 import { spawn, spawnSync } from 'child_process'
+import { tmpdir } from 'os'
 import { join } from 'path'
 import type { GpuInfo } from '@shared/types'
 
@@ -119,8 +120,18 @@ function relaunchInGamescope(): void {
     KADR_HOST_WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY ?? '',
     KADR_HOST_DISPLAY: process.env.DISPLAY ?? ''
   }
+  // the re-exec'd app must load the built renderer (out/), not a dev server URL
+  // that dies when electron-vite's electron exits — else it's a blank window
+  delete env.ELECTRON_RENDERER_URL
   const args = ['-W', '1600', '-H', '900', '--', process.execPath, ...process.argv.slice(1)]
-  spawn('gamescope', args, { env, detached: true, stdio: 'ignore' }).unref()
+  // capture gamescope + the inner app's output so GPU/renderer failures are
+  // diagnosable (the process is detached, so there's no terminal to inherit)
+  let stdio: 'ignore' | ['ignore', number, number] = 'ignore'
+  try {
+    const fd = openSync(join(tmpdir(), 'kadr-gpu.log'), 'a')
+    stdio = ['ignore', fd, fd]
+  } catch { /* fall back to ignore */ }
+  spawn('gamescope', args, { env, detached: true, stdio }).unref()
   app.exit(0)
 }
 
@@ -189,7 +200,9 @@ export function cleanRelaunchEnv(): NodeJS.ProcessEnv {
   if (env.KADR_HOST_DISPLAY !== undefined) env.DISPLAY = env.KADR_HOST_DISPLAY
   for (const k of [
     'KADR_GAMESCOPE', 'KADR_HOST_WAYLAND_DISPLAY', 'KADR_HOST_DISPLAY',
-    '__NV_PRIME_RENDER_OFFLOAD', '__GLX_VENDOR_LIBRARY_NAME', '__VK_LAYER_NV_optimus'
+    '__NV_PRIME_RENDER_OFFLOAD', '__GLX_VENDOR_LIBRARY_NAME', '__VK_LAYER_NV_optimus',
+    // a GPU switch relaunches from a possibly-dead dev server; load built out/
+    'ELECTRON_RENDERER_URL'
   ]) delete env[k]
   return env
 }

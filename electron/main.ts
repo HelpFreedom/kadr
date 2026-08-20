@@ -3,7 +3,7 @@
 import './runtime-env'
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'electron'
 import { join, dirname, basename } from 'path'
-import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
+import { promises as fs, createReadStream, statSync, existsSync, appendFileSync, openSync } from 'fs'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { execFile, spawn, spawnSync } from 'child_process'
@@ -463,12 +463,19 @@ function registerIpc() {
   ipcMain.handle('gpu:confirm', () => confirmGpuTrial())
   ipcMain.handle('gpu:relaunch', () => {
     // spawn a fresh top-level process (not app.relaunch) so cleanRelaunchEnv can
-    // escape gamescope's nested Wayland and clear NVIDIA vars — the new process
-    // re-reads gpu.json and routes to gamescope/Intel from scratch.
+    // clear the NVIDIA offload vars and a dev-server URL — the new process
+    // re-reads gpu.json and applies the chosen GPU from scratch. Route its
+    // output to userData/gpu.log so a switch that fails to render is diagnosable
+    // (and the detached child keeps valid stdout/stderr fds).
+    let stdio: 'ignore' | ['ignore', number, number] = 'ignore'
+    try {
+      const fd = openSync(join(app.getPath('userData'), 'gpu.log'), 'a')
+      stdio = ['ignore', fd, fd]
+    } catch { /* fall back to ignore */ }
     spawn(process.execPath, process.argv.slice(1), {
       env: cleanRelaunchEnv(),
       detached: true,
-      stdio: 'ignore'
+      stdio
     }).unref()
     app.exit(0)
   })

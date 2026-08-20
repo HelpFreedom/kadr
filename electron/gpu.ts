@@ -13,8 +13,7 @@
 // sees 'failed' and reverts to auto — the app heals itself.
 import { app } from 'electron'
 import { readFileSync, writeFileSync } from 'fs'
-import { readdirSync, openSync } from 'fs'
-import { spawn, spawnSync } from 'child_process'
+import { readdirSync } from 'fs'
 import { join } from 'path'
 import type { GpuInfo } from '@shared/types'
 
@@ -89,62 +88,19 @@ export function enumerateGpus(): GpuInfo[] {
 // it to 'ok' only after the user confirms the window renders.
 let trialNode: string | null = null
 
-const hasGamescope = (): boolean => {
-  try {
-    return spawnSync('sh', ['-c', 'command -v gamescope'], { stdio: 'ignore' }).status === 0
-  } catch {
-    return false
-  }
-}
-
 const NVIDIA_ENV = {
   __NV_PRIME_RENDER_OFFLOAD: '1',
   __GLX_VENDOR_LIBRARY_NAME: 'nvidia',
   __VK_LAYER_NV_optimus: 'NVIDIA_only'
 }
 
-/**
- * Re-launch this app inside gamescope on the NVIDIA GPU, then exit. gamescope
- * renders the app on the dGPU and hands finished frames to the desktop
- * compositor (kwin, on the iGPU) — the same path games use, and the only one
- * that reliably shows a window on this hybrid Wayland setup (native Wayland goes
- * blank; XWayland offload crashes the GPU process → no window). The nested
- * WAYLAND/DISPLAY are stashed so a later switch back to Intel can escape.
- */
-function relaunchInGamescope(): void {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...NVIDIA_ENV,
-    KADR_GAMESCOPE: '1',
-    KADR_HOST_WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY ?? '',
-    KADR_HOST_DISPLAY: process.env.DISPLAY ?? ''
-  }
-  // the re-exec'd app must load the built renderer (out/), not a dev server URL
-  // that dies when electron-vite's electron exits — else it's a blank window
-  delete env.ELECTRON_RENDERER_URL
-  const args = ['-W', '1600', '-H', '900', '--', process.execPath, ...process.argv.slice(1)]
-  // capture gamescope + the inner app's output so GPU/renderer failures are
-  // diagnosable (the process is detached, so there's no terminal to inherit)
-  let stdio: 'ignore' | ['ignore', number, number] = 'ignore'
-  try {
-    // userData is per-user (not world-writable /tmp), so no symlink-attack on a
-    // predictable log path; still useful for diagnosing GPU/renderer failures
-    const fd = openSync(join(app.getPath('userData'), 'gpu.log'), 'a')
-    stdio = ['ignore', fd, fd]
-  } catch { /* fall back to ignore */ }
-  spawn('gamescope', args, { env, detached: true, stdio }).unref()
-  app.exit(0)
-}
-
 function applyGpu(gpu: GpuInfo): void {
   if (gpu.driver === 'nvidia') {
-    if (hasGamescope()) {
-      relaunchInGamescope() // exits and re-enters inside gamescope
-      return
-    }
-    // no gamescope: best-effort XWayland offload (may still not present)
+    // NVIDIA PRIME render offload in a normal window — exactly how Lutris runs
+    // games: the dGPU renders (source), the iGPU-driven display presents it
+    // (sink). Needs the XWayland/GLX path (--ozone-platform=x11) for the offload
+    // env to take effect; native Wayland leaves Chromium's EGL on the iGPU.
     app.commandLine.appendSwitch('ozone-platform', 'x11')
-    app.commandLine.appendSwitch('disable-gpu-sandbox')
     Object.assign(process.env, NVIDIA_ENV)
   } else {
     // Intel / AMD: point Chromium's GPU process straight at the render node.
@@ -160,13 +116,6 @@ function applyGpu(gpu: GpuInfo): void {
  */
 export function applyGpuChoiceAtStartup(): void {
   process.env.KADR_GPU_POWER = 'default'
-  // already relaunched inside gamescope on the dGPU (offload env inherited) —
-  // Chromium is on NVIDIA, nothing to select. Leave powerPreference at 'default':
-  // a 'high-performance' request makes Chromium re-pick a GPU and blanks the
-  // window inside gamescope's single-GPU view (this exactly matches the working
-  // manual `gamescope -- electron .` run).
-  if (process.env.KADR_GAMESCOPE) return
-
   const choice = readGpuChoice()
   if (!choice.node) return
   const gpu = enumerateGpus().find((g) => g.node === choice.node)
@@ -182,9 +131,9 @@ export function applyGpuChoiceAtStartup(): void {
   // 'failed' or anything else → leave at auto (the self-heal path)
 }
 
-/** Promote a surviving trial to 'ok' (only reachable when the window renders —
- *  see the Settings "Keep" button). Inside gamescope the outer process that set
- *  trialNode has exited, so fall back to the on-disk choice. */
+/** Promote a surviving trial to 'ok' (reachable only when the window renders —
+ *  the Settings "Keep" button); a bad pick that never renders stays 'failed' and
+ *  heals to auto on the next launch. */
 export function confirmGpuTrial(): void {
   const node = trialNode ?? readGpuChoice().node
   if (!node) return
@@ -192,17 +141,14 @@ export function confirmGpuTrial(): void {
   trialNode = null
 }
 
-/** Env for relaunching as a fresh top-level process on the real desktop —
- *  escapes gamescope's nested Wayland and clears the NVIDIA offload vars, so the
- *  new process re-decides the GPU from gpu.json cleanly. */
+/** Env for the fresh process a GPU switch relaunches into: clears the NVIDIA
+ *  offload vars (so switching back to Intel doesn't inherit them) and
+ *  ELECTRON_RENDERER_URL (the switch may relaunch from a now-dead dev server —
+ *  load the built out/ instead). */
 export function cleanRelaunchEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env }
-  if (env.KADR_HOST_WAYLAND_DISPLAY !== undefined) env.WAYLAND_DISPLAY = env.KADR_HOST_WAYLAND_DISPLAY
-  if (env.KADR_HOST_DISPLAY !== undefined) env.DISPLAY = env.KADR_HOST_DISPLAY
   for (const k of [
-    'KADR_GAMESCOPE', 'KADR_HOST_WAYLAND_DISPLAY', 'KADR_HOST_DISPLAY',
     '__NV_PRIME_RENDER_OFFLOAD', '__GLX_VENDOR_LIBRARY_NAME', '__VK_LAYER_NV_optimus',
-    // a GPU switch relaunches from a possibly-dead dev server; load built out/
     'ELECTRON_RENDERER_URL'
   ]) delete env[k]
   return env

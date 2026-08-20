@@ -45,8 +45,16 @@ const api: KadrApi = {
         reject(new Error(`raw encoder gone: ${rawEncErr.slice(0, 300)}`))
         return
       }
-      if (stdin.write(view)) resolve()
-      else stdin.once('drain', resolve)
+      // The frame buffer is handed over BY REFERENCE (contextIsolation is
+      // off exactly to avoid an 8 MB copy per frame) and the exporter reuses
+      // it as soon as this promise resolves. `write()` returning true only
+      // means "you may keep writing" — the chunk itself can still sit in the
+      // stream's queue, still pointing at our buffer, so resolving on it let
+      // the next frame overwrite data ffmpeg had not read yet: exports came
+      // out with occasional TORN frames (half frame k, half frame k+2) and
+      // no two runs were pixel-identical. The write callback fires only once
+      // the chunk has actually been flushed to the pipe.
+      stdin.write(view, (err) => (err ? reject(err) : resolve()))
     }),
   rawEncodeEnd: async () => {
     rawEnc?.stdin?.end()
@@ -94,8 +102,8 @@ const api: KadrApi = {
     ipcRenderer.on('reverse:progress', handler)
     return () => ipcRenderer.removeListener('reverse:progress', handler)
   },
-  requestProxy: (path, duration) => ipcRenderer.invoke('proxy:request', path, duration),
-  requestDecoded: (path, duration) => ipcRenderer.invoke('media:decoded', path, duration),
+  requestProxy: (path, duration, opts) => ipcRenderer.invoke('proxy:request', path, duration, opts),
+  requestDecoded: (path, duration, opts) => ipcRenderer.invoke('media:decoded', path, duration, opts),
   pickDirectory: (title) => ipcRenderer.invoke('dialog:pick-dir', title),
   saveSnapshot: (dir, baseName, png) => ipcRenderer.invoke('snapshot:save', dir, baseName, png),
   measureLoudness: (path, start, duration) => ipcRenderer.invoke('media:loudness', path, start, duration),
@@ -123,12 +131,14 @@ const api: KadrApi = {
 
   fragmentEnsure: () => ipcRenderer.invoke('fragment:ensure'),
   fragmentServer: () => ipcRenderer.invoke('fragment:server'),
-  fragmentCreate: (spec) => ipcRenderer.invoke('fragment:create', spec),
+  fragmentCreate: (spec, projectDir) => ipcRenderer.invoke('fragment:create', spec, projectDir),
   fragmentDelete: (id) => ipcRenderer.invoke('fragment:delete', id),
+  fragmentRelocate: (projectDir, ids) => ipcRenderer.invoke('fragment:relocate', projectDir, ids),
   fragmentCaptureStart: (id, url, w, h, fps) =>
     ipcRenderer.invoke('fragment:capture-start', id, url, w, h, fps),
   fragmentCaptureStop: (id) => ipcRenderer.invoke('fragment:capture-stop', id),
   fragmentCaptureSync: (id, msg) => ipcRenderer.send('fragment:capture-sync', id, msg),
+  fragmentCaptureQuery: (id) => ipcRenderer.invoke('fragment:capture-query', id),
   onFragmentFrame: (cb) => {
     const handler = (_e: unknown, p: { id: string; w: number; h: number; data: Uint8Array }) => cb(p)
     ipcRenderer.on('fragment:frame', handler)

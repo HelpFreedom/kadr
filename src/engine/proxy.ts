@@ -37,8 +37,19 @@ export function ensureProxies() {
     if (!wantsProxy(a) || inflight.has(a.id)) continue
     inflight.add(a.id)
     useProxyProgress.setState((s) => ({ jobs: { ...s.jobs, [a.id]: 0 } }))
-    window.kadr
-      .requestProxy(a.path, a.duration)
+    ;(async () => {
+      // assets saved before codec/hasAlpha existed: re-probe once so alpha
+      // sources stop getting (and keeping) an H.264 proxy that bakes the
+      // transparency into a solid background
+      let { codec, hasAlpha } = a
+      if (a.kind === 'video' && codec === undefined) {
+        const fresh = (await window.kadr.probeMedia(a.path)).asset
+        codec = fresh.codec
+        hasAlpha = fresh.hasAlpha
+        useEditor.getState().updateAsset(a.id, { codec, hasAlpha: !!hasAlpha })
+      }
+      return window.kadr.requestProxy(a.path, a.duration, { alpha: !!hasAlpha, codec })
+    })()
       .then((proxyPath) => {
         const cur = useEditor.getState().project.assets.find((x) => x.id === a.id)
         if (cur && cur.proxyPath !== proxyPath) {

@@ -6,7 +6,7 @@
 import { app, ipcMain, BrowserWindow } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import { promises as fs, existsSync, readdirSync, statSync } from 'fs'
-import { join } from 'path'
+import { join, basename, dirname } from 'path'
 import { createHash } from 'crypto'
 import { homedir } from 'os'
 import type { FragmentSpec, FragmentInfo } from '@shared/types'
@@ -55,6 +55,10 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  // project-owned fragments live behind symlinks: keep module ids at the
+  // symlinked (in-root) paths so the file watcher sees edits and hot reload
+  // keeps working — resolved-to-realpath ids fall outside the watch root
+  resolve: { preserveSymlinks: true },
   server: { host: '127.0.0.1', fs: { allow: ['/'] } }
 })
 `
@@ -135,8 +139,20 @@ function App() {
       }
     }
     window.addEventListener('message', onMsg)
+    // snapshots poll this through fragment:capture-query to know when the
+    // player really sits on the requested frame (seeks are async — grabbing
+    // pixels before the seek painted returned STALE frames)
+    let rafId = 0
+    const trackFrame = () => {
+      ;(window as any).__kadrFrame = ref.current ? ref.current.getCurrentFrame() : -1
+      rafId = requestAnimationFrame(trackFrame)
+    }
+    rafId = requestAnimationFrame(trackFrame)
     parent.postMessage({ kadr: true, type: 'ready', comp: id }, '*')
-    return () => window.removeEventListener('message', onMsg)
+    return () => {
+      window.removeEventListener('message', onMsg)
+      cancelAnimationFrame(rafId)
+    }
   }, [])
   if (!entry) {
     return React.createElement('div',
@@ -242,10 +258,12 @@ async function writeManaged(path: string, content: string) {
   await fs.writeFile(path, content)
 }
 
-/** Rewrite the registry from the folders actually present on disk. */
+/** Rewrite the registry from the folders actually present on disk.
+    Project-owned fragments appear here as symlinks — include them too
+    (a symlinked Dirent is never isDirectory(); existsSync follows it). */
 async function regenRegistry() {
   const dirs = (await fs.readdir(FRAG_DIR(), { withFileTypes: true }))
-    .filter((d) => d.isDirectory())
+    .filter((d) => d.isDirectory() || d.isSymbolicLink())
     .map((d) => d.name)
     .filter((n) => existsSync(join(FRAG_DIR(), n, 'index.tsx')))
     .sort()
@@ -266,7 +284,7 @@ async function ensureWorkspace(
 ): Promise<{ dir: string; installed: boolean }> {
   await fs.mkdir(FRAG_DIR(), { recursive: true })
   await writeIfMissing(join(WORKSPACE, 'package.json'), PKG_JSON)
-  await writeIfMissing(join(WORKSPACE, 'vite.config.ts'), VITE_CONFIG)
+  await writeManaged(join(WORKSPACE, 'vite.config.ts'), VITE_CONFIG)
   await writeIfMissing(join(WORKSPACE, 'tsconfig.json'), TSCONFIG)
   await writeIfMissing(join(WORKSPACE, 'index.html'), INDEX_HTML)
   await writeManaged(join(WORKSPACE, 'player.tsx'), PLAYER_TSX)
@@ -342,7 +360,11 @@ async function ensureServer(): Promise<{ url: string }> {
     const timer = setTimeout(() => reject(new Error('vite start timeout: ' + out.slice(-400))), 30000)
     const onData = (c: Buffer) => {
       out += c
-      const m = out.match(/(http:\/\/127\.0\.0\.1:\d+)/)
+      // vite's banner carries ANSI colors that split the port digits
+      // ("http://127.0.0.1:\x1b[1m5621") — strip them before matching, or a
+      // cold start never resolves and every first fragment use flakes
+      const clean = out.replace(/\x1b\[[0-9;]*m/g, '')
+      const m = clean.match(/(http:\/\/127\.0\.0\.1:\d+)/)
       if (m) {
         clearTimeout(timer)
         resolve(m[1])
@@ -367,11 +389,32 @@ function stopServer() {
 const slug = (s: string) =>
   s.normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'frag'
 
-async function createFragment(spec: FragmentSpec): Promise<FragmentInfo> {
+/** The per-project home of fragment sources: <projectDir>/kadr-fragments. */
+const projectFragHome = (projectDir: string) => join(projectDir, 'kadr-fragments')
+
+const linkType = process.platform === 'win32' ? 'junction' : 'dir'
+
+const assertId = (id: string) => {
+  if (!id || id.includes('/') || id.includes('\\') || id.includes('..')) {
+    throw new Error('bad fragment id')
+  }
+}
+
+async function createFragment(spec: FragmentSpec, projectDir?: string | null): Promise<FragmentInfo> {
   await ensureWorkspace()
   const id = `${slug(spec.name)}-${Math.random().toString(36).slice(2, 7)}`
-  const dir = join(FRAG_DIR(), id)
-  await fs.mkdir(dir, { recursive: true })
+  const link = join(FRAG_DIR(), id)
+  let dir = link
+  if (projectDir) {
+    // the source of truth lives next to the .kadr file — easy to find, moves
+    // with the project; the workspace only holds a symlink so vite/remotion
+    // keep seeing it under src/fragments
+    dir = join(projectFragHome(projectDir), id)
+    await fs.mkdir(dir, { recursive: true })
+    await fs.symlink(dir, link, linkType)
+  } else {
+    await fs.mkdir(dir, { recursive: true })
+  }
   const meta = {
     id,
     name: spec.name,
@@ -388,11 +431,70 @@ async function createFragment(spec: FragmentSpec): Promise<FragmentInfo> {
 }
 
 async function deleteFragment(id: string): Promise<void> {
-  const dir = join(FRAG_DIR(), id)
-  // refuse anything that is not a direct child of the fragments dir
-  if (!id || id.includes('/') || id.includes('..')) throw new Error('bad fragment id')
-  await fs.rm(dir, { recursive: true, force: true })
+  assertId(id)
+  const link = join(FRAG_DIR(), id)
+  // a project-owned fragment: the workspace entry is a symlink — remove the
+  // real folder too (but only ever inside a kadr-fragments home)
+  try {
+    const st = await fs.lstat(link)
+    if (st.isSymbolicLink()) {
+      const real = await fs.realpath(link).catch(() => null)
+      if (real && basename(dirname(real)) === 'kadr-fragments') {
+        await fs.rm(real, { recursive: true, force: true })
+      }
+    }
+  } catch { /* nothing linked */ }
+  await fs.rm(link, { recursive: true, force: true })
   await regenRegistry()
+}
+
+/**
+ * Make every fragment of a project live under <projectDir>/kadr-fragments:
+ * loose workspace folders MOVE there (symlink left behind), fragments that
+ * exist only in the project folder (opened on another machine, or after the
+ * workspace was cleaned) get their workspace symlink recreated. Valid
+ * existing links are left alone. Returns the ids that changed.
+ */
+async function relocateFragments(projectDir: string, ids: string[]): Promise<string[]> {
+  await ensureWorkspace()
+  const changed: string[] = []
+  for (const id of ids) {
+    assertId(id)
+    const link = join(FRAG_DIR(), id)
+    const target = join(projectFragHome(projectDir), id)
+    const lst = await fs.lstat(link).catch(() => null)
+    if (lst?.isSymbolicLink()) {
+      const ok = existsSync(join(link, 'index.tsx'))
+      if (!ok) {
+        await fs.rm(link, { force: true })
+        if (existsSync(join(target, 'index.tsx'))) {
+          await fs.symlink(target, link, linkType)
+          changed.push(id)
+        }
+      }
+      continue
+    }
+    if (lst?.isDirectory()) {
+      if (existsSync(target)) continue // conflict — keep both untouched
+      await fs.mkdir(projectFragHome(projectDir), { recursive: true })
+      try {
+        await fs.rename(link, target)
+      } catch {
+        await fs.cp(link, target, { recursive: true }) // cross-device move
+        await fs.rm(link, { recursive: true, force: true })
+      }
+      await fs.symlink(target, link, linkType)
+      changed.push(id)
+      continue
+    }
+    // nothing in the workspace at all — restore the link if the project has it
+    if (existsSync(join(target, 'index.tsx'))) {
+      await fs.symlink(target, link, linkType)
+      changed.push(id)
+    }
+  }
+  if (changed.length) await regenRegistry()
+  return changed
 }
 
 /** Content hash of a fragment folder (names + mtimes + sizes). */
@@ -500,7 +602,9 @@ async function captureStart(
     // with a portrait-rotated monitor first in the layout, a 1280×720 request
     // came back 1080×720 and captured frames arrived letterboxed + stretched
     enableLargerThanScreen: true,
-    webPreferences: { offscreen: true }
+    // never throttle: a parked hidden window stops repainting on seeks, so
+    // paused-editor snapshots captured the PREVIOUS frame (stale-frame bug)
+    webPreferences: { offscreen: true, backgroundThrottling: false }
   })
   captures.set(id, win)
   win.setContentSize(cw, ch) // re-assert: creation may still have clamped
@@ -529,6 +633,18 @@ function captureSync(id: string, msg: unknown) {
     .catch(() => { /* page mid-load */ })
 }
 
+/** The fragment player's CURRENT frame (−1 page not ready, −2 no window). */
+async function captureQuery(id: string): Promise<number> {
+  const win = captures.get(id)
+  if (!win || win.isDestroyed()) return -2
+  try {
+    const v = await win.webContents.executeJavaScript('window.__kadrFrame ?? -1', true)
+    return typeof v === 'number' ? v : -1
+  } catch {
+    return -1
+  }
+}
+
 function stopAllCaptures() {
   for (const id of [...captures.keys()]) captureStop(id)
 }
@@ -543,8 +659,11 @@ export function registerFragmentIpc(getWin: () => BrowserWindow | null) {
     ensureWorkspace((phase, p) => send('workspace', phase, p))
   )
   ipcMain.handle('fragment:server', () => ensureServer())
-  ipcMain.handle('fragment:create', (_e, spec: FragmentSpec) => createFragment(spec))
+  ipcMain.handle('fragment:create', (_e, spec: FragmentSpec, projectDir?: string | null) =>
+    createFragment(spec, projectDir))
   ipcMain.handle('fragment:delete', (_e, id: string) => deleteFragment(id))
+  ipcMain.handle('fragment:relocate', (_e, projectDir: string, ids: string[]) =>
+    relocateFragments(projectDir, ids))
   ipcMain.handle('fragment:render', (_e, id: string, opts?: { transparent?: boolean }) =>
     renderFragment(id, opts, (p) => send(id, 'render', p))
   )
@@ -552,6 +671,7 @@ export function registerFragmentIpc(getWin: () => BrowserWindow | null) {
     captureStart(getWin, id, url, w, h, fps)
   )
   ipcMain.handle('fragment:capture-stop', (_e, id: string) => captureStop(id))
+  ipcMain.handle('fragment:capture-query', (_e, id: string) => captureQuery(id))
   ipcMain.on('fragment:capture-sync', (_e, id: string, msg: unknown) => captureSync(id, msg))
   app.on('before-quit', () => {
     stopServer()

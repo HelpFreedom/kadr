@@ -47,6 +47,15 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
     hasAudio: !!audio
   }
   if (kind === 'video' && video?.codec_name) asset.codec = video.codec_name
+  if (kind === 'video') {
+    // alpha travels two ways: an alpha pixel format (yuva…, rgba, prores
+    // 4444) or WebM's container-level alpha_mode tag (vp8/vp9 alpha planes —
+    // their pix_fmt still reads plain yuv420p)
+    const pf = String(video?.pix_fmt ?? '')
+    const tagAlpha = String(video?.tags?.alpha_mode ?? video?.tags?.ALPHA_MODE ?? '') === '1'
+    const pfAlpha = /^(yuva|rgba|argb|abgr|bgra|gbrap|ya8|ya16)/.test(pf)
+    if (tagAlpha || pfAlpha) asset.hasAlpha = true
+  }
 
   if (kind !== 'audio') {
     try {
@@ -116,17 +125,37 @@ async function readWaveform(path: string, duration: number): Promise<WaveformDat
   }
 }
 
+/** Input decoder flags: vpx alpha only decodes through the libvpx decoders
+    (the native vp8/vp9 decoder silently drops the alpha plane). */
+function alphaInputArgs(codec?: string): string[] {
+  if (codec === 'vp9') return ['-c:v', 'libvpx-vp9']
+  if (codec === 'vp8') return ['-c:v', 'libvpx']
+  return []
+}
+
 /**
- * Preview proxy: light 540p H.264 + AAC copy of a heavy source. The preview
- * decodes this instead of the original; export always reads the original.
+ * Preview proxy: light 540p H.264 + AAC copy of a heavy source. Sources with
+ * an alpha channel become VP9+alpha WebM instead — H.264 would bake the
+ * transparency into a solid background. The preview decodes this instead of
+ * the original; export always reads the original.
  */
 export function makeProxy(
   src: string,
   out: string,
   duration: number,
-  onProgress?: (p: number) => void
+  onProgress?: (p: number) => void,
+  opts?: { alpha?: boolean; codec?: string }
 ): Promise<void> {
-  const args = [
+  const args = opts?.alpha ? [
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    ...alphaInputArgs(opts.codec),
+    '-i', src,
+    '-vf', "scale=-2:'min(540,ih)'",
+    '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-crf', '32', '-b:v', '0',
+    '-cpu-used', '8', '-row-mt', '1',
+    '-c:a', 'libopus', '-b:a', '96k',
+    out
+  ] : [
     '-y', '-v', 'error', '-progress', 'pipe:1',
     '-i', src,
     '-vf', "scale=-2:'min(540,ih)'",
@@ -199,18 +228,109 @@ export function measureLoudness(
 }
 
 /**
+ * Can this alpha source be packed as colour-over-matte for fast decoding?
+ * Everything but full-range sources can: the packer converts the picture to
+ * BT.709 limited, which is the one space Chromium hands to WebGL untouched.
+ * (Full-range YUV is rare in alpha footage and would need its own dance, so
+ * it keeps the slower element-decode path — correct, just slow.)
+ */
+export async function canPackAlpha(src: string): Promise<boolean> {
+  const t = await probeColorTags(src)
+  return t.range !== 'pc'
+}
+
+/** The matrix a browser decode of this source ends up using. */
+export async function sourceMatrix(src: string): Promise<string> {
+  const t = await probeColorTags(src)
+  // Untagged footage (Remotion's VP9 renders included) is read as BT.601 by
+  // the <video> pipeline — measured against known RGB: BT.709 turned pure
+  // red into (255, 36, 12).
+  return t.matrix || 'bt601'
+}
+
+async function probeColorTags(src: string): Promise<{ matrix: string; range: string; height: number }> {
+  let height = 0
+  let s: Record<string, string> = {}
+  try {
+    const { stdout } = await execFileP(FFPROBE, [
+      '-v', 'error', '-select_streams', 'v:0', '-print_format', 'json',
+      '-show_entries', 'stream=height,color_space,color_range', src
+    ], { maxBuffer: 1024 * 1024 })
+    s = (JSON.parse(stdout).streams || [])[0] || {}
+    height = Number(s.height) || 0
+  } catch { /* fall through to the heuristic */ }
+  const known = (v?: string) => (v && v !== 'unknown' && v !== 'reserved' ? v : '')
+  return {
+    matrix: known(s.color_space),
+    range: known(s.color_range) === 'pc' ? 'pc' : 'tv',
+    height
+  }
+}
+
+/**
  * Full-resolution H.264 intermediate for sources Chromium cannot decode
  * (HEVC without VAAPI, mpeg4, prores, …). Near-lossless on purpose — the
  * export pipeline re-encodes it once more; video-only (the audio mix always
  * reads the original).
  */
-export function makeDecoded(
+export async function makeDecoded(
   src: string,
   out: string,
   duration: number,
-  onProgress?: (p: number) => void
+  onProgress?: (p: number) => void,
+  opts?: { alpha?: boolean; codec?: string; packed?: boolean; matrix?: string }
 ): Promise<void> {
-  const args = [
+  const args = opts?.packed ? [
+    // ALPHA FAST PATH. Chromium's WebCodecs cannot decode alpha at all
+    // (VP9-alpha WebM carries it as container side data; ProRes 4444 is
+    // unsupported), so alpha sources fell back to per-frame <video> seeks —
+    // ~0.2 s per frame, i.e. 4 fps exports. Packing colour over its alpha
+    // matte into ONE ordinary H.264 MP4 (2× height) turns them into plain
+    // mp4s the fast demux+WebCodecs path reads at full speed; the compositor
+    // shader recombines the halves. LOSSLESS on purpose (-qp 0): the export
+    // must be pixel-identical to the old element-decode path, so this
+    // intermediate may not add a generation. The matte is mapped full→limited
+    // range so the decoder's limited→full expansion restores it exactly.
+    // Cost: ~400 MB per minute of 1080p60, encoded at ~1.3× realtime once
+    // per source (cached); the disk guard in requestDecoded keeps it sane.
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    ...alphaInputArgs(opts.codec),
+    '-i', src,
+    '-filter_complex',
+    '[0:v]format=yuva420p,split=2[c][a];' +
+    // the picture's samples are copied verbatim — no colour conversion is
+    // applied here or tagged on the file, so the decoder treats it exactly
+    // like the original (guaranteed by the BT.709/HD gate in requestDecoded)
+    // The picture is converted to BT.709 limited — a pure matrix change
+    // (swscale, no gamma or gamut transform), a no-op when the source is
+    // BT.709 already. It has to be BT.709: Chromium runs its own colour
+    // transform on any other space while uploading the frame, and that
+    // transform would also sweep over the bottom half and lift the alpha
+    // matte (128 → 143). A matte is not colour and must arrive verbatim.
+    `[c]format=yuv420p,scale=in_color_matrix=${opts.matrix || 'bt601'}:out_color_matrix=bt709[col];` +
+    // the matte rides in the luma plane, mapped into the same limited range
+    // the decoder will expand back — verified to round-trip bit-exactly
+    '[a]alphaextract,format=yuv420p,scale=in_range=pc:out_range=tv[m];' +
+    '[col][m]vstack=inputs=2[v]',
+    '-map', '[v]', '-an',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-qp', '0', '-pix_fmt', 'yuv420p',
+    // deliberately UNTAGGED: a tagged frame reaches WebGL through Chromium's
+    // colour-managed upload, which rewrites mid-tones (it lifted the alpha
+    // matte 128 → 143). Untagged frames are re-wrapped on the CPU by
+    // Mp4FrameSource and upload verbatim — the picture is already BT.709.
+    '-movflags', '+faststart',
+    out
+  ] : opts?.alpha ? [
+    // alpha sources (ProRes 4444, HEVC-alpha…) must keep transparency:
+    // near-lossless VP9+alpha WebM, decoded by the element-seek path
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    ...alphaInputArgs(opts.codec),
+    '-i', src,
+    '-map', '0:v:0', '-an',
+    '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-crf', '12', '-b:v', '0',
+    '-cpu-used', '4', '-row-mt', '1',
+    out
+  ] : [
     '-y', '-v', 'error', '-progress', 'pipe:1',
     '-i', src,
     '-map', '0:v:0', '-an',

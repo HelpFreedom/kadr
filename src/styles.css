@@ -611,6 +611,33 @@ button.danger:hover { background: #944; }
 .lane { position: relative; background: var(--bg); }
 .lane.audio { background: #161a17; }
 
+.tl-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(64, 200, 120, 0.5);
+  z-index: 2;
+  pointer-events: none;
+}
+.tl-marker-flag {
+  position: absolute;
+  top: 0;
+  left: -1px;
+  min-width: 14px;
+  height: 15px;
+  padding: 0 3px;
+  background: #2f9e63;
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+  border-radius: 0 7px 7px 0;
+  cursor: ew-resize;
+  user-select: none;
+  pointer-events: auto;
+}
+
 .playhead {
   position: absolute;
   top: 0;

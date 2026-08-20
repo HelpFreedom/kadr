@@ -97,6 +97,13 @@ export function sanitizeProject(p: Project): Project {
   if (!Number.isFinite(p.height) || p.height <= 0) p.height = 1080
   if (!Number.isFinite(p.fps) || p.fps <= 0) p.fps = 30
   p.assets ??= []
+  p.markers = (p.markers ?? []).filter(
+    (m) => m && typeof m.id === 'string' && Number.isFinite(m.time)
+  )
+  for (const m of p.markers) {
+    if (typeof m.label !== 'string' || !m.label) m.label = '•'
+    if (m.time < 0) m.time = 0
+  }
   for (const track of p.tracks) {
     if (!Number.isFinite(track.gain)) track.gain = 1
     for (const c of track.clips) {
@@ -420,6 +427,10 @@ interface EditorState {
       audio assets go to an audio track regardless of the drop lane. */
   insertClipsFromAssets(assetIds: string[], trackId: string | null, at: number): void
   insertTextClip(at: number): void
+  /** Add a track-independent timeline marker (auto-numbered); returns id. */
+  addMarker(time: number): string
+  moveMarker(id: string, time: number): void
+  removeMarker(id: string): void
   updateClip(clipId: string, patch: Partial<Clip>): void
   /** Change speed/duration, rescaling keyframes and fades to stay on content.
       Optional `start` moves the clip too (a speed drag from the LEFT edge
@@ -604,6 +615,37 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((s) => {
       const p = clone(s.project)
       p.tracks.splice(kind === 'video' ? 0 : p.tracks.length, 0, makeTrack(p, kind))
+      return { project: p }
+    })
+  },
+
+  addMarker: (time) => {
+    get().pushHistory('hMarker')
+    const id = uid()
+    set((s) => {
+      const p = clone(s.project)
+      p.markers ??= []
+      const n = p.markers.reduce((m, x) => Math.max(m, parseInt(x.label, 10) || 0), 0) + 1
+      p.markers.push({ id, time: Math.max(0, time), label: String(n) })
+      return { project: p }
+    })
+    return id
+  },
+
+  moveMarker: (id, time) =>
+    set((s) => {
+      const m0 = s.project.markers?.find((x) => x.id === id)
+      if (!m0) return {}
+      const p = clone(s.project)
+      p.markers!.find((x) => x.id === id)!.time = Math.max(0, time)
+      return { project: p }
+    }),
+
+  removeMarker: (id) => {
+    get().pushHistory('hMarkerDelete')
+    set((s) => {
+      const p = clone(s.project)
+      p.markers = (p.markers ?? []).filter((x) => x.id !== id)
       return { project: p }
     })
   },

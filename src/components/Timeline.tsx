@@ -302,6 +302,7 @@ export function Timeline({ height }: { height: number }) {
           ))}
           <RangeOverlay />
           <KfMarker />
+          <Markers />
           <Playhead />
         </div>
       </div>
@@ -544,6 +545,46 @@ function Playhead() {
   const playhead = useEditor((s) => s.playhead)
   const zoom = useEditor((s) => s.zoom)
   return <div className="playhead" style={{ left: HEADER_W + playhead * zoom }} />
+}
+
+/** Track-independent user markers: M adds one at the playhead, the flag
+    drags along the timeline (snapping), right-click removes. */
+function Markers() {
+  const markers = useEditor((s) => s.project.markers)
+  const zoom = useEditor((s) => s.zoom)
+  const t = useT()
+  if (!markers?.length) return null
+  return (
+    <>
+      {markers.map((m) => (
+        <div
+          key={m.id}
+          className="tl-marker"
+          style={{ left: HEADER_W + m.time * zoom }}
+          onPointerDown={(e) => {
+            if (e.button !== 0) return
+            e.stopPropagation()
+            const st = useEditor.getState()
+            st.pushHistory('hMarkerMove')
+            const points = snapPoints(st.project, '', st.playhead)
+            const startX = e.clientX
+            const t0 = m.time
+            windowDrag(e, (_dx, ev) => {
+              const s = useEditor.getState()
+              s.moveMarker(m.id, snapTime(t0 + (ev.clientX - startX) / s.zoom, points, s.zoom))
+            })
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            useEditor.getState().removeMarker(m.id)
+          }}
+        >
+          <span className="tl-marker-flag" title={t('markerTip')}>{m.label}</span>
+        </div>
+      ))}
+    </>
+  )
 }
 
 /** Yellow marker mirroring a keyframe being dragged in a mini-timeline. */

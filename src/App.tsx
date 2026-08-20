@@ -10,6 +10,7 @@ import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
 import { CaptionsDialog } from './components/CaptionsDialog'
 import { useEditor, newProject } from './state/store'
 import { dropPayload, dropUsable, importDrop, importFiles } from './engine/mediaImport'
+import { syncProjectFragments } from './engine/fragments'
 import { useT, type TKey } from './i18n'
 import { create } from 'zustand'
 import { baseOf } from '@shared/paths'
@@ -41,6 +42,9 @@ async function writeAndConfirm(path: string) {
     s.setProjectPath(path)
     markProjectSaved(s.project)
     flashSave('saved', baseOf(path))
+    // fragments follow the project: loose workspace folders move next to
+    // the .kadr file (first save, save-as to a new place)
+    void syncProjectFragments(s.project, path)
   } catch (err) {
     flashSave('saveError', String(err), true)
   }
@@ -70,6 +74,9 @@ async function openProject() {
   const p = await window.kadr.readProject(path)
   useEditor.getState().setProject(p, path)
   markProjectSaved(useEditor.getState().project)
+  // restore workspace symlinks for fragments living next to the .kadr file
+  // (project moved from another machine / cleaned workspace)
+  void syncProjectFragments(useEditor.getState().project, path)
 }
 
 const TL_MIN = 160
@@ -157,6 +164,8 @@ export default function App() {
         }
       } else if (e.code === 'KeyU') {
         s.toggleLinkSelection()
+      } else if (e.code === 'KeyM' && !e.ctrlKey && !e.altKey) {
+        s.addMarker(s.playhead)
       } else if (e.code === 'ArrowLeft') {
         // step the playhead by frames; preventDefault keeps the timeline from scrolling
         e.preventDefault()

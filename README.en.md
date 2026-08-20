@@ -62,12 +62,24 @@ captions to this part», watch it happen live in the preview.
   timeline, edits clips, transcribes, creates and iterates Remotion
   fragments while you watch the preview update. The panel is draggable,
   resizable and remembers its place across launches.
+- 📍 **Timeline markers** — press **M** to drop a numbered marker at the
+  playhead: drag it, right-click to remove it, it lives in the project
+  file and the embedded Claude can see and place them too ("retime
+  everything between marker 3 and marker 4").
 - 📤 **Uncompromised export** — video is encoded by ffmpeg x264 at the
   preset's true bitrate (Chromium's built-in encoder ignored the bitrate
   and softened the picture — measured and replaced; frames reach ffmpeg
-  with zero copies), mp4box-based fast decode (~8× over element seeks,
-  with graceful fallback), 8-sample motion blur, automatic frame blending
-  for fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3.
+  with zero copies), 8-sample motion blur, automatic frame blending for
+  fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3, and a
+  short chime when the render is done.
+- 🚀 **Fast on every source** — seeking a `<video>` element costs ~0.2 s
+  per frame, so the exporter avoids it everywhere: alpha video (every
+  transparent Remotion fragment included) is read through a **lossless**
+  colour-over-matte intermediate, MP4s with the index at the end of the
+  file are picked up from their tail, undecodable codecs go through an
+  H.264 intermediate. A real 11-minute project full of transparent
+  fragments now exports in **13 minutes instead of hours** (58 fps at
+  1080p60).
 - 🛟 **Quality-of-life** — background 540p preview proxies, autosave every
   5 minutes (atomic, skipped during exports/AI sessions), an
   unsaved-changes indicator with “✓ Saved” feedback, self-healing after

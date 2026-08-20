@@ -7,17 +7,19 @@
 // path for it to Read.
 import { useEditor } from '@/state/store'
 import { dirOf } from '@shared/paths'
-import { setForceCaptureAll, captureReady } from './fragmentCapture'
+import {
+  setForceCaptureAll, captureReady, captureTargets, captureVersion, pokeCaptureSync
+} from './fragmentCapture'
 import { ensureFragmentServer } from './fragments'
 import { importFiles } from './mediaImport'
 
 let previewCanvas: HTMLCanvasElement | null = null
-let previewPlayer: { setSourceQuality(on: boolean): void } | null = null
+let previewPlayer: { setSourceQuality(on: boolean): void; drawNow(): void } | null = null
 
 /** Preview.tsx registers its GL canvas + player once the Player attaches. */
 export function registerPreviewCanvas(
   c: HTMLCanvasElement | null,
-  player?: { setSourceQuality(on: boolean): void } | null
+  player?: { setSourceQuality(on: boolean): void; drawNow(): void } | null
 ) {
   previewCanvas = c
   previewPlayer = player ?? null
@@ -93,7 +95,48 @@ export async function snapshotFrame(opts: {
       if (ready || Date.now() > deadline) break
       await sleep(120)
     }
+    // fragment seeks are async inside the capture window: grabbing pixels
+    // before the player painted the requested frame returned STALE content
+    // (bug report: snapshots showed the previous playhead's frame). Wait
+    // until each captured player REPORTS the expected frame and has painted
+    // since (version bump), with a grace path for already-correct frames.
+    if (forced) {
+      const targets = captureTargets(st().project, t)
+      const v0 = new Map(targets.map((x) => [x.fragmentId, captureVersion(x.fragmentId)]))
+      const matchedAt = new Map<string, number>()
+      const fresh = new Set<string>()
+      const fDeadline = Date.now() + 6000
+      while (Date.now() < fDeadline && fresh.size < targets.length) {
+        for (const { fragmentId, expectedFrame } of targets) {
+          if (fresh.has(fragmentId)) continue
+          const cur = await window.kadr.fragmentCaptureQuery(fragmentId)
+          if (Math.abs(cur - expectedFrame) <= 1) {
+            if (!matchedAt.has(fragmentId)) matchedAt.set(fragmentId, Date.now())
+            const painted = captureVersion(fragmentId) > (v0.get(fragmentId) ?? 0)
+            if (painted || Date.now() - matchedAt.get(fragmentId)! > 700) fresh.add(fragmentId)
+          } else {
+            matchedAt.delete(fragmentId)
+          }
+        }
+        if (fresh.size < targets.length) {
+          pokeCaptureSync()
+          await sleep(150)
+        }
+      }
+      if (fresh.size < targets.length) {
+        const dbg = await Promise.all(targets.map(async (x) => ({
+          id: x.fragmentId, want: x.expectedFrame,
+          got: await window.kadr.fragmentCaptureQuery(x.fragmentId),
+          v0: v0.get(x.fragmentId), v: captureVersion(x.fragmentId)
+        })))
+        console.warn('[kadr] snapshot fragment wait TIMED OUT', JSON.stringify(dbg))
+      }
+    }
     await sleep(600)
+
+    // the preview rAF loop may be throttled to a standstill while the window
+    // is occluded — never rely on it having drawn: composite the frame NOW
+    previewPlayer?.drawNow()
 
     const canvas = previewCanvas
     const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/png'))

@@ -99,7 +99,11 @@ mixes audio and muxes/transcodes per preset.
 - `src/gl/compositor.ts` — WebGL2 quad compositor: perspective-correct 3D,
   masks (crop + up to 8 shapes), transition FBOs, motion-blur accumulator,
   glow + gaussian-blur effect passes (`drawLayerFx`), raw-BGRA capture
-  upload, `readPixels` for the export pipe.
+  upload, packed colour-over-matte sampling for alpha video
+  (`LayerDraw.alphaPacked`), and pipelined readback for the export pipe
+  (`startRead`/`finishRead` through a pixel-pack buffer). `holdSources`
+  keeps a dynamic texture from re-uploading once per motion-blur
+  sub-sample.
 - `src/gl/transitions.ts` / `src/gl/edges.ts` / `src/gl/glow.ts` — GLSL
   registries: 14 overlap transitions, 12 edge (tip) transitions, the smoky
   outer-glow effect.
@@ -114,6 +118,33 @@ mixes audio and muxes/transcodes per preset.
   stays behind the «fast encoder» checkbox) → main-process ffmpeg mux
   pass. `src/engine/reverse.ts` — clip reversal flow (cached backwards
   renders, linked AV pairs, ⏳ progress).
+  DECODE SPEED is the whole game here: an element seek costs ~0.2 s per
+  frame, so everything that can avoid it does.
+  * ALPHA VIDEO (VP9+alpha WebM — every transparent fragment render —
+    ProRes 4444, HEVC-alpha) has no WebCodecs path in any browser, so
+    `alphaPackedFallback` builds a cached LOSSLESS H.264 mp4 that stacks
+    the colour frame over its alpha matte (2× height) and the shader
+    splits it apart again. The packer normalises the picture to BT.709
+    with a pure matrix change and writes NO colour tags, and
+    `Mp4FrameSource` re-wraps the frames as BT.709 on the CPU: a tagged
+    frame goes through Chromium's colour-managed upload, which rewrites
+    mid-tones and would lift the matte (128 → 143). `KADR_DISABLE_ALPHA_PACK`
+    forces the old path.
+  * MOOV AT THE END (any file not written with faststart) is picked up by
+    fetching the file's tail (`pumpTail`) instead of dropping to element
+    seeks.
+  * A STATIC SHUTTER collapses: `frameSignature` records what drawFrame
+    would draw without touching the GPU, and when every motion-blur
+    sub-sample matches, one draw stands in for eight — exact, and
+    `KADR_FORCE_FULL_SHUTTER` restores the full pass.
+  * Frame blending is skipped for alpha sources: compositing B over A
+    reproduces lerp(A,B,w) only while the layer is opaque.
+  * `rawEncodeFrame` resolves on stdin's WRITE CALLBACK — `write()`
+    returning true only means "keep writing" while the chunk may still
+    point at the buffer the exporter is about to refill (torn frames).
+  * ffmpeg leaves x264's b_deterministic off, so two identical runs never
+    produce identical files: verify picture changes by hashing rendered
+    frames (`globalThis.KADR_FRAME_HASH = []`), never by comparing output.
 - `src/engine/subtitles.ts` / `captions.ts` — SRT parse/serialize,
   word-precise cue splitting (`segmentsToRichCues`), auto-captions
   fragment generator.
@@ -124,6 +155,12 @@ mixes audio and muxes/transcodes per preset.
   transitions).
 - `src/engine/autosave.ts` — 5-minute autosave with `activity` flags
   (paused during export and Claude sessions).
+- `src/engine/chime.ts` — short WebAudio two-note signal when a render
+  finishes (wired to export progress in `src/main.tsx`).
+- Timeline markers live in `project.markers` (`addMarker`/`moveMarker`/
+  `removeMarker` in the store, flags drawn by `Timeline.tsx`, M key in
+  `App.tsx`): project-wide time labels, not bound to a track, and part of
+  `kadr_state` so the embedded Claude can read and place them.
 - `window.kadrEditor` (set in `src/main.tsx`) — scripting surface for
   automation / AI / MCP integration.
 

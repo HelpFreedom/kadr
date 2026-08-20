@@ -22,7 +22,11 @@ set -euo pipefail
 NODE_VERSION="20.18.1"                     # bundled host node for npm/npx/mcp bridge
 PBS_RELEASE="20241206"                     # astral python-build-standalone release tag
 PYTHON_VERSION="3.12.8"                    # cpython version within that release
-FFMPEG_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+# BtbN static build (GPL): unlike johnvansickle it ships h264_nvenc/hevc_nvenc,
+# so the "GPU encoding (NVENC)" export option works in the packaged app too. It
+# dlopens the user's NVIDIA driver libs at runtime — no NVIDIA, no problem, the
+# app's nvencAvailable() check just leaves the option off and x264 is used.
+FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
 
 ARCH="x64"; UNAME_ARCH="x86_64"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -63,14 +67,17 @@ else
   [ -d "$ROOT/out/main" ] || { echo "out/ missing — drop --skip-build" >&2; exit 1; }
 fi
 
-# ---- 2. ffmpeg / ffprobe (static) ------------------------------------------
-log "stage static ffmpeg/ffprobe"
+# ---- 2. ffmpeg / ffprobe (static, with NVENC) ------------------------------
+log "stage static ffmpeg/ffprobe (BtbN gpl, incl. nvenc)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 dl "$FFMPEG_URL" "$TMP/ffmpeg.tar.xz"
 tar -xJf "$TMP/ffmpeg.tar.xz" -C "$TMP"
-FF_DIR="$(find "$TMP" -maxdepth 1 -type d -name 'ffmpeg-*-static' | head -n1)"
-install -m755 "$FF_DIR/ffmpeg"  "$BIN/ffmpeg"
-install -m755 "$FF_DIR/ffprobe" "$BIN/ffprobe"
+FF_DIR="$(find "$TMP" -maxdepth 1 -type d -name 'ffmpeg-*' | head -n1)"
+# BtbN layout is <dir>/bin/ffmpeg; johnvansickle was <dir>/ffmpeg
+install -m755 "$FF_DIR/bin/ffmpeg"  "$BIN/ffmpeg"
+install -m755 "$FF_DIR/bin/ffprobe" "$BIN/ffprobe"
+"$BIN/ffmpeg" -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc \
+  && log "  ffmpeg has NVENC ✓" || log "  WARNING: bundled ffmpeg lacks nvenc"
 
 # ---- 3. bundled Node (host node/npm/npx for Remotion + MCP bridge) ---------
 log "stage Node $NODE_VERSION"

@@ -465,7 +465,10 @@ function registerIpc() {
     // spawn a fresh top-level process (not app.relaunch) so cleanRelaunchEnv can
     // clear the NVIDIA offload vars / x11 hint and a dev-server URL — the new
     // process re-reads gpu.json and applies the chosen GPU from scratch.
-    spawn(process.execPath, process.argv.slice(1), {
+    // drop any --ozone-platform=x11 the NVIDIA path added, so a switch back to
+    // Intel runs native Wayland; the new process re-adds x11 only if it picks NVIDIA
+    const relaunchArgs = process.argv.slice(1).filter((a) => !a.startsWith('--ozone-platform'))
+    spawn(process.execPath, relaunchArgs, {
       env: cleanRelaunchEnv(),
       detached: true,
       stdio: 'ignore'

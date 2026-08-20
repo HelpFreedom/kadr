@@ -110,8 +110,7 @@ function relaunchWithOffload(): void {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...NVIDIA_ENV,
-    KADR_GPU_OFFLOAD: '1',
-    ELECTRON_OZONE_PLATFORM_HINT: 'x11'
+    KADR_GPU_OFFLOAD: '1'
   }
   // load the built renderer (out/), not a dev-server URL that dies on relaunch
   delete env.ELECTRON_RENDERER_URL
@@ -122,7 +121,15 @@ function relaunchWithOffload(): void {
     const fd = openSync(join(app.getPath('userData'), 'gpu.log'), 'a')
     stdio = ['ignore', fd, fd]
   } catch { /* fall back to ignore */ }
-  spawn(process.execPath, process.argv.slice(1), { env, detached: true, stdio }).unref()
+  // --ozone-platform=x11 as a CLI flag: the ELECTRON_OZONE_PLATFORM_HINT env is
+  // NOT honored on a Wayland session (Chromium stays on wayland, where NVIDIA
+  // is Vulkan-incompatible and falls back to software). XWayland/GLX is where
+  // the PRIME offload actually renders on the NVIDIA GPU.
+  const args = [
+    ...process.argv.slice(1).filter((a) => !a.startsWith('--ozone-platform')),
+    '--ozone-platform=x11'
+  ]
+  spawn(process.execPath, args, { env, detached: true, stdio }).unref()
   app.exit(0)
 }
 

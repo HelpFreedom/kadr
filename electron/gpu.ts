@@ -14,6 +14,7 @@
 import { app } from 'electron'
 import { readFileSync, writeFileSync } from 'fs'
 import { readdirSync } from 'fs'
+import { spawn, spawnSync } from 'child_process'
 import { join } from 'path'
 import type { GpuInfo } from '@shared/types'
 
@@ -85,24 +86,54 @@ export function enumerateGpus(): GpuInfo[] {
 }
 
 // set when THIS launch applied a not-yet-proven GPU; confirmGpuTrial() promotes
-// it to 'ok' only after the renderer actually loads.
+// it to 'ok' only after the user confirms the window renders.
 let trialNode: string | null = null
 
-function applyToChromium(gpu: GpuInfo): void {
+const hasGamescope = (): boolean => {
+  try {
+    return spawnSync('sh', ['-c', 'command -v gamescope'], { stdio: 'ignore' }).status === 0
+  } catch {
+    return false
+  }
+}
+
+const NVIDIA_ENV = {
+  __NV_PRIME_RENDER_OFFLOAD: '1',
+  __GLX_VENDOR_LIBRARY_NAME: 'nvidia',
+  __VK_LAYER_NV_optimus: 'NVIDIA_only'
+}
+
+/**
+ * Re-launch this app inside gamescope on the NVIDIA GPU, then exit. gamescope
+ * renders the app on the dGPU and hands finished frames to the desktop
+ * compositor (kwin, on the iGPU) — the same path games use, and the only one
+ * that reliably shows a window on this hybrid Wayland setup (native Wayland goes
+ * blank; XWayland offload crashes the GPU process → no window). The nested
+ * WAYLAND/DISPLAY are stashed so a later switch back to Intel can escape.
+ */
+function relaunchInGamescope(): void {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...NVIDIA_ENV,
+    KADR_GAMESCOPE: '1',
+    KADR_HOST_WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY ?? '',
+    KADR_HOST_DISPLAY: process.env.DISPLAY ?? ''
+  }
+  const args = ['-W', '1600', '-H', '900', '--', process.execPath, ...process.argv.slice(1)]
+  spawn('gamescope', args, { env, detached: true, stdio: 'inherit' }).unref()
+  app.exit(0)
+}
+
+function applyGpu(gpu: GpuInfo): void {
   if (gpu.driver === 'nvidia') {
-    // Community-documented reality (NVIDIA/Electron forums): on an Optimus
-    // laptop only XWayland renders Chromium on the NVIDIA GPU — native Wayland
-    // falls back to software or a blank window. So force x11 + GLX PRIME offload.
-    // --disable-gpu-sandbox stops the GPU process crashing on the proprietary
-    // driver, which is the "process starts but no window appears" symptom.
-    // render-node-override and the Vulkan driver-select are deliberately dropped
-    // (they made GPU init / vkCreateInstance fail). Minor redraw glitches remain
-    // the known cost of the XWayland path.
+    if (hasGamescope()) {
+      relaunchInGamescope() // exits and re-enters inside gamescope
+      return
+    }
+    // no gamescope: best-effort XWayland offload (may still not present)
     app.commandLine.appendSwitch('ozone-platform', 'x11')
     app.commandLine.appendSwitch('disable-gpu-sandbox')
-    process.env.__NV_PRIME_RENDER_OFFLOAD = '1'
-    process.env.__GLX_VENDOR_LIBRARY_NAME = 'nvidia'
-    process.env.__VK_LAYER_NV_optimus = 'NVIDIA_only'
+    Object.assign(process.env, NVIDIA_ENV)
   } else {
     // Intel / AMD: point Chromium's GPU process straight at the render node.
     app.commandLine.appendSwitch('render-node-override', gpu.node)
@@ -111,32 +142,54 @@ function applyToChromium(gpu: GpuInfo): void {
 }
 
 /**
- * Read the persisted choice and, before app 'ready', point Chromium's GPU
- * process at that render node. Must run at main module load. Never applies an
- * unproven choice twice: a 'trial' is consumed (→ 'failed') before use, so a
- * launch that never reaches the renderer heals to auto next time.
+ * Read the persisted choice and, before app 'ready', route rendering to it.
+ * Must run at main module load. A 'trial' is consumed (→ 'failed') before use,
+ * so a launch that never renders heals back to auto next time.
  */
 export function applyGpuChoiceAtStartup(): void {
   process.env.KADR_GPU_POWER = 'default'
+  // already relaunched inside gamescope on the dGPU — Chromium is on NVIDIA,
+  // nothing more to select here.
+  if (process.env.KADR_GAMESCOPE) {
+    process.env.KADR_GPU_POWER = 'high-performance'
+    return
+  }
+
   const choice = readGpuChoice()
   if (!choice.node) return
   const gpu = enumerateGpus().find((g) => g.node === choice.node)
   if (!gpu) return
 
   if (choice.status === 'ok') {
-    applyToChromium(gpu) // proven-good on a previous launch
+    applyGpu(gpu) // proven-good on a previous launch
   } else if (choice.status === 'trial') {
-    writeGpuChoice({ node: gpu.node, status: 'failed' }) // heal to auto if we don't load
+    writeGpuChoice({ node: gpu.node, status: 'failed' }) // heal to auto if it never renders
     trialNode = gpu.node
-    applyToChromium(gpu)
+    applyGpu(gpu)
   }
   // 'failed' or anything else → leave at auto (the self-heal path)
 }
 
-/** Call once the renderer has actually loaded — promotes a surviving trial to
- *  'ok' so it sticks on future launches. No-op unless this launch was a trial. */
+/** Promote a surviving trial to 'ok' (only reachable when the window renders —
+ *  see the Settings "Keep" button). Inside gamescope the outer process that set
+ *  trialNode has exited, so fall back to the on-disk choice. */
 export function confirmGpuTrial(): void {
-  if (!trialNode) return
-  writeGpuChoice({ node: trialNode, status: 'ok' })
+  const node = trialNode ?? readGpuChoice().node
+  if (!node) return
+  writeGpuChoice({ node, status: 'ok' })
   trialNode = null
+}
+
+/** Env for relaunching as a fresh top-level process on the real desktop —
+ *  escapes gamescope's nested Wayland and clears the NVIDIA offload vars, so the
+ *  new process re-decides the GPU from gpu.json cleanly. */
+export function cleanRelaunchEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  if (env.KADR_HOST_WAYLAND_DISPLAY !== undefined) env.WAYLAND_DISPLAY = env.KADR_HOST_WAYLAND_DISPLAY
+  if (env.KADR_HOST_DISPLAY !== undefined) env.DISPLAY = env.KADR_HOST_DISPLAY
+  for (const k of [
+    'KADR_GAMESCOPE', 'KADR_HOST_WAYLAND_DISPLAY', 'KADR_HOST_DISPLAY',
+    '__NV_PRIME_RENDER_OFFLOAD', '__GLX_VENDOR_LIBRARY_NAME', '__VK_LAYER_NV_optimus'
+  ]) delete env[k]
+  return env
 }

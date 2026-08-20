@@ -6,12 +6,12 @@ import { join, dirname, basename } from 'path'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, ExportMuxer, RawVideoEncoder } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerFragmentIpc } from './fragments'
-import { enumerateGpus, applyGpuChoiceAtStartup, confirmGpuTrial } from './gpu'
+import { enumerateGpus, applyGpuChoiceAtStartup, confirmGpuTrial, cleanRelaunchEnv } from './gpu'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -442,7 +442,14 @@ function registerIpc() {
   // a blank window can't confirm, so it heals to auto on the next launch
   ipcMain.handle('gpu:confirm', () => confirmGpuTrial())
   ipcMain.handle('gpu:relaunch', () => {
-    app.relaunch()
+    // spawn a fresh top-level process (not app.relaunch) so cleanRelaunchEnv can
+    // escape gamescope's nested Wayland and clear NVIDIA vars — the new process
+    // re-reads gpu.json and routes to gamescope/Intel from scratch.
+    spawn(process.execPath, process.argv.slice(1), {
+      env: cleanRelaunchEnv(),
+      detached: true,
+      stdio: 'inherit'
+    }).unref()
     app.exit(0)
   })
 

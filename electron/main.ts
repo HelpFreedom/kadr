@@ -210,8 +210,10 @@ app.on('window-all-closed', () => {
     app.quit()
     // an in-flight export/muxer or any stray handle must never keep a
     // windowless process alive — a lingering instance blocks the next
-    // launch and reads as "the editor won't open anymore"
-    setTimeout(() => app.exit(0), 2500)
+    // launch and reads as "the editor won't open anymore". On a clean close
+    // force-exit quickly: a slow GPU-process teardown (NVIDIA under gamescope)
+    // otherwise makes closing hang for seconds. Give an export longer to flush.
+    setTimeout(() => app.exit(0), exportState ? 2500 : 400)
   }
 })
 
@@ -448,7 +450,7 @@ function registerIpc() {
     spawn(process.execPath, process.argv.slice(1), {
       env: cleanRelaunchEnv(),
       detached: true,
-      stdio: 'inherit'
+      stdio: 'ignore'
     }).unref()
     app.exit(0)
   })

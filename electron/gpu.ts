@@ -120,7 +120,7 @@ function relaunchInGamescope(): void {
     KADR_HOST_DISPLAY: process.env.DISPLAY ?? ''
   }
   const args = ['-W', '1600', '-H', '900', '--', process.execPath, ...process.argv.slice(1)]
-  spawn('gamescope', args, { env, detached: true, stdio: 'inherit' }).unref()
+  spawn('gamescope', args, { env, detached: true, stdio: 'ignore' }).unref()
   app.exit(0)
 }
 
@@ -148,12 +148,12 @@ function applyGpu(gpu: GpuInfo): void {
  */
 export function applyGpuChoiceAtStartup(): void {
   process.env.KADR_GPU_POWER = 'default'
-  // already relaunched inside gamescope on the dGPU — Chromium is on NVIDIA,
-  // nothing more to select here.
-  if (process.env.KADR_GAMESCOPE) {
-    process.env.KADR_GPU_POWER = 'high-performance'
-    return
-  }
+  // already relaunched inside gamescope on the dGPU (offload env inherited) —
+  // Chromium is on NVIDIA, nothing to select. Leave powerPreference at 'default':
+  // a 'high-performance' request makes Chromium re-pick a GPU and blanks the
+  // window inside gamescope's single-GPU view (this exactly matches the working
+  // manual `gamescope -- electron .` run).
+  if (process.env.KADR_GAMESCOPE) return
 
   const choice = readGpuChoice()
   if (!choice.node) return

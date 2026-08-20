@@ -90,16 +90,16 @@ let trialNode: string | null = null
 
 function applyToChromium(gpu: GpuInfo): void {
   if (gpu.driver === 'nvidia') {
-    // NVIDIA Optimus: the reliable way to move the GL stack to the dGPU is GLX
-    // PRIME render offload under XWayland. render-node-override to the NVIDIA
-    // node tends to make Chromium's GPU process fail to init on this stack
-    // (blank/no window), so we deliberately DON'T use it here — the offload
-    // env below does the selection. force_high_performance_gpu backs it up.
-    app.commandLine.appendSwitch('ozone-platform', 'x11')
-    app.commandLine.appendSwitch('force_high_performance_gpu')
+    // PRIME render offload. Verified on an Optimus KDE-Wayland box (glxinfo AND
+    // eglinfo both report the NVIDIA GPU under exactly these vars), so Chromium's
+    // EGL/GBM GPU process follows — works natively under Wayland, no need to
+    // force x11. These are the same vars switcherooctl sets for the dGPU.
+    // We deliberately do NOT set render-node-override: pointing Chromium's GPU
+    // process at the NVIDIA node directly made it fail to init (blank window).
     process.env.__NV_PRIME_RENDER_OFFLOAD = '1'
     process.env.__GLX_VENDOR_LIBRARY_NAME = 'nvidia'
     process.env.__VK_LAYER_NV_optimus = 'NVIDIA_only'
+    process.env.VK_LOADER_DRIVERS_SELECT = '*nvidia*'
   } else {
     // Intel / AMD: point Chromium's GPU process straight at the render node.
     app.commandLine.appendSwitch('render-node-override', gpu.node)

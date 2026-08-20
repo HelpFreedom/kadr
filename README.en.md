@@ -56,7 +56,11 @@ captions to this part», watch it happen live in the preview.
   timeline clips. Live preview with hot reload (no renders while
   iterating!), automatic pixel-capture mode when you put GL effects, 3D or
   transitions on a fragment, and exactly **one** real render at export
-  (content-hash cached).
+  (content-hash cached). Fragment sources live **in the project folder**,
+  so a project travels with its graphics.
+- 🪟 **Alpha video** — transparent WebM (VP8/VP9+alpha), MOV (ProRes 4444)
+  and HEVC with alpha keep their transparency in both preview and export:
+  lower tracks show through, masks and effects behave as usual.
 - 🤖 **Embedded Claude Code** — a real interactive Claude session in a
   terminal panel, wired to the live project over MCP: it reads the
   timeline, edits clips, transcribes, creates and iterates Remotion

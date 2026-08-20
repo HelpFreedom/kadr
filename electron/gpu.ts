@@ -15,7 +15,6 @@ import { app } from 'electron'
 import { readFileSync, writeFileSync } from 'fs'
 import { readdirSync, openSync } from 'fs'
 import { spawn, spawnSync } from 'child_process'
-import { tmpdir } from 'os'
 import { join } from 'path'
 import type { GpuInfo } from '@shared/types'
 
@@ -128,7 +127,9 @@ function relaunchInGamescope(): void {
   // diagnosable (the process is detached, so there's no terminal to inherit)
   let stdio: 'ignore' | ['ignore', number, number] = 'ignore'
   try {
-    const fd = openSync(join(tmpdir(), 'kadr-gpu.log'), 'a')
+    // userData is per-user (not world-writable /tmp), so no symlink-attack on a
+    // predictable log path; still useful for diagnosing GPU/renderer failures
+    const fd = openSync(join(app.getPath('userData'), 'gpu.log'), 'a')
     stdio = ['ignore', fd, fd]
   } catch { /* fall back to ignore */ }
   spawn('gamescope', args, { env, detached: true, stdio }).unref()

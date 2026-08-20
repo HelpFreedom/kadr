@@ -16,7 +16,9 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
   { id: 'yt1080', name: 'YouTube · 16:9 1080p', width: 1920, height: 1080, fps: 30 },
   { id: 'yt4k', name: 'YouTube 4K · 16:9', width: 3840, height: 2160, fps: 30 },
   { id: 'vertical', name: 'Shorts / Reels / TikTok · 9:16', width: 1080, height: 1920, fps: 30 },
+  { id: 'vertical4k', name: 'Shorts / Reels 4K · 9:16', width: 2160, height: 3840, fps: 30 },
   { id: 'square', name: 'Square · 1:1', width: 1080, height: 1080, fps: 30 },
+  { id: 'square4k', name: 'Square 4K · 1:1', width: 2160, height: 2160, fps: 30 },
   { id: 'hd720', name: '720p · 16:9', width: 1280, height: 720, fps: 30 }
 ]
 
@@ -59,6 +61,32 @@ export const PRESETS: ExportPreset[] = [
     videoBitrate: 9_000_000,
     audioCodec: 'aac',
     audioBitrate: '192k'
+  },
+  {
+    id: 'vertical4k',
+    name: 'Shorts/Reels 4K 2160×3840',
+    container: 'mp4',
+    codec: 'avc',
+    ffmpegVideo: 'copy',
+    width: 2160,
+    height: 3840,
+    fps: 'project',
+    videoBitrate: 40_000_000,
+    audioCodec: 'aac',
+    audioBitrate: '256k'
+  },
+  {
+    id: 'square4k',
+    name: 'Square 4K 2160×2160',
+    container: 'mp4',
+    codec: 'avc',
+    ffmpegVideo: 'copy',
+    width: 2160,
+    height: 2160,
+    fps: 'project',
+    videoBitrate: 28_000_000,
+    audioCodec: 'aac',
+    audioBitrate: '256k'
   },
   {
     id: 'hd720',

@@ -16,7 +16,9 @@ let rawEncExit: Promise<void> | null = null
 
 const api: KadrApi = {
   rawEncodeStart: (o) => {
-    const out = join(tmpdir(), `kadr-export-raw-${Date.now()}.mp4`)
+    // disk-backed temp (KADR_TMPDIR) — os.tmpdir() is often a small tmpfs that a
+    // big export overflows mid-encode (see runtime-env.ts)
+    const out = join(process.env.KADR_TMPDIR || tmpdir(), `kadr-export-raw-${Date.now()}.mp4`)
     const child = spawn(process.env.KADR_FFMPEG || 'ffmpeg', rawEncodeArgs({ ...o, out }), {
       stdio: ['pipe', 'ignore', 'pipe']
     })

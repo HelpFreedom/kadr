@@ -11,7 +11,7 @@
 // (the renderer inherits this env when its process is spawned). In dev
 // (`app.isPackaged` false) nothing changes — the host toolchain is used as before.
 import { app } from 'electron'
-import { readFileSync } from 'fs'
+import { readFileSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -29,6 +29,19 @@ import { join } from 'path'
 // shows in the app menu, task bar and window from the packaged icon.)
 process.env.PULSE_PROP_OVERRIDE ??= 'application.name=Kadr'
 process.env.PULSE_PROP ??= 'application.name=Kadr'
+
+// Export/render intermediates (the raw-video encode and the mux temp) can be
+// multi-GB. os.tmpdir() is a small tmpfs on many Linux setups — here /tmp is a
+// 7.7 GB RAM-backed tmpfs — so a big export fills it mid-run and ffmpeg dies with
+// EDQUOT/ENOSPC ("Disk quota exceeded", errno -122). Route the temps to a
+// disk-backed dir under userData instead; preload.ts and main.ts read
+// KADR_TMPDIR (falling back to os.tmpdir()), and the renderer inherits this env
+// when its process is spawned. Set for dev too — same tmpfs trap there.
+try {
+  const t = join(app.getPath('userData'), 'tmp')
+  mkdirSync(t, { recursive: true })
+  process.env.KADR_TMPDIR ??= t
+} catch { /* fall back to os.tmpdir() at the call sites */ }
 
 if (app.isPackaged) {
   const runtime = join(process.resourcesPath, 'runtime')

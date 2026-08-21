@@ -729,7 +729,9 @@ function registerIpc() {
 
   ipcMain.handle('export:begin', async (_e, job: ExportJob) => {
     await cleanupExport()
-    const videoTemp = join(tmpdir(), `kadr-export-${Date.now()}.mp4`)
+    // disk-backed temp (KADR_TMPDIR) — os.tmpdir() is often a small tmpfs (see
+    // runtime-env.ts); a multi-GB export intermediate overflows it otherwise
+    const videoTemp = join(process.env.KADR_TMPDIR || tmpdir(), `kadr-export-${Date.now()}.mp4`)
     const fh = job.preset.audioOnly ? null : await fs.open(videoTemp, 'w')
     exportState = {
       job, videoTemp, fh, muxer: null, raw: null, rawEncoded: false,

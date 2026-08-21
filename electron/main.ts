@@ -200,6 +200,7 @@ app.whenReady().then(() => {
   registerClaudeIpc(() => win)
   registerTranscribeIpc(() => win)
   registerFragmentIpc(() => win)
+  void sweepExportTemps() // reclaim multi-GB export intermediates left by a crash
   createWindow()
   // log which GPU Chromium actually settled on — the diagnostic for the GPU
   // picker (0x8086 = Intel, 0x10de = NVIDIA, 0x1002 = AMD)
@@ -860,4 +861,27 @@ async function cleanupExport() {
   st.rawWss?.close()
   try { await st.fh?.close() } catch { /* already closed */ }
   try { await fs.unlink(st.videoTemp) } catch { /* never created */ }
+}
+
+// Delete raw-export / mux temp files (kadr-export[-raw]-<ts>.mp4) orphaned by a
+// previous crash or hard kill — these intermediates can be multi-GB. Only files
+// older than a minute are touched, so a concurrent instance's live export (temps
+// named by Date.now()) is never removed. Covers KADR_TMPDIR and os.tmpdir()
+// (leftovers from before temps moved off the tmpfs).
+async function sweepExportTemps() {
+  const cutoff = Date.now() - 60_000
+  const dirs = new Set([process.env.KADR_TMPDIR, tmpdir()].filter(Boolean) as string[])
+  for (const dir of dirs) {
+    let names: string[]
+    try {
+      names = await fs.readdir(dir)
+    } catch { continue } // dir missing — nothing to sweep
+    for (const name of names) {
+      if (!/^kadr-export(-raw)?-\d+\.mp4$/.test(name)) continue
+      const p = join(dir, name)
+      try {
+        if ((await fs.stat(p)).mtimeMs < cutoff) await fs.unlink(p)
+      } catch { /* raced with another cleanup */ }
+    }
+  }
 }

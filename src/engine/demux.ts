@@ -14,6 +14,10 @@ const HEAD_LIMIT = 16 * 1024 * 1024
  * (wedged hardware decoder) — after this, give up and fall back to element-seek */
 const DECODE_STALL_MS = 8000
 
+/** watchdog for demux/decoder init (moov fetch + configure) — a wedged decoder
+ * can hang here with no output and no error; bound it so open() falls back */
+const OPEN_TIMEOUT_MS = 10000
+
 type MP4File = ReturnType<typeof MP4Box.createFile>
 
 interface Sample {
@@ -57,14 +61,20 @@ export class Mp4FrameSource {
   private scratch: Uint8Array | null = null
 
   static async open(asset: MediaAsset): Promise<Mp4FrameSource | null> {
+    const src = new Mp4FrameSource(asset)
     try {
-      const src = new Mp4FrameSource(asset)
-      if (await src.init()) return src
-      src.close()
-      return null
-    } catch {
-      return null
-    }
+      // init pulls the moov and configures the decoder; on a wedged GPU/decoder
+      // it can hang with neither an output nor an error. Bound it so the export
+      // never stalls here — a timeout just falls back to the element-seek path.
+      const ok = await Promise.race([
+        src.init(),
+        new Promise<boolean>((_, rej) =>
+          setTimeout(() => rej(new Error('demux init timeout')), OPEN_TIMEOUT_MS))
+      ])
+      if (ok) return src
+    } catch { /* fall through to cleanup + element-seek fallback */ }
+    src.close()
+    return null
   }
 
   private constructor(asset: MediaAsset) {

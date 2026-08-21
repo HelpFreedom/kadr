@@ -62,6 +62,22 @@ async function importFilesInner(
     }
     const existing = st().project.assets.find((a) => a.path === path)
     if (existing) {
+      // reuse only if the file on disk hasn't changed; a same-name overwrite
+      // (new mtime) re-probes and refreshes the asset in place, keeping its id
+      // so every clip that references it picks up the new pixels/waveform/dims.
+      const stat = await window.kadr.statMedia(path).catch(() => null)
+      const unchanged =
+        !stat || (existing.mtimeMs != null && Math.round(stat.mtimeMs) === Math.round(existing.mtimeMs))
+      if (unchanged) {
+        assetIds.push(existing.id)
+        continue
+      }
+      try {
+        const { asset } = await window.kadr.probeMedia(path)
+        st().updateAsset(existing.id, asset)
+      } catch (err) {
+        console.error('re-probe failed', path, err)
+      }
       assetIds.push(existing.id)
       continue
     }

@@ -18,6 +18,21 @@ export interface CaptureFrame {
 
 const frames = new Map<string, CaptureFrame>()
 const active = new Map<string, { clipId: string }>()
+// Per fragment: the last frame number we asked the offscreen player to show,
+// and the capture `version` at the moment we asked. captureReady() then waits
+// for a paint that landed AFTER the request, so a snapshot reflects the target
+// frame rather than whatever the offscreen happened to be showing.
+const syncedFrame = new Map<string, number>()
+const versionAtSync = new Map<string, number>()
+
+/** Offscreen player frame for a fragment clip at editor time `playhead`. */
+function frameOf(clip: Clip, playhead: number): number {
+  const fps = clip.fragmentMeta?.fps ?? 60
+  const rel = playhead - clip.start
+  return Math.max(0, Math.round(
+    (Math.max(0, Math.min(clip.duration, rel)) * (clip.speed || 1) + clip.inPoint) * fps
+  ))
+}
 
 export function getCaptureFrame(fragmentId: string): CaptureFrame | null {
   return frames.get(fragmentId) ?? null
@@ -35,10 +50,15 @@ export function setForceCaptureAll(on: boolean) {
   reconcileNow?.()
 }
 
-/** Every fragment wanted at time t is captured and has frames on hand. */
+/** Every fragment wanted at time t is captured AND has painted a frame for the
+ *  current sync target (not just any leftover frame). */
 export function captureReady(project: Project, t: number): boolean {
   for (const id of wanted(project, t).keys()) {
-    if (!frames.has(id)) return false
+    const f = frames.get(id)
+    if (!f) return false
+    // require a paint newer than the last frame request, so we don't read a
+    // stale frame (e.g. the offscreen's initial frame before it seeked)
+    if (f.version <= (versionAtSync.get(id) ?? -1)) return false
   }
   return true
 }
@@ -106,17 +126,21 @@ export function wireFragmentCapture() {
     const s = useEditor.getState()
     const rel = s.playhead - clip.start
     const inside = rel >= 0 && rel < clip.duration
-    const fps = clip.fragmentMeta?.fps ?? 60
     const vol = clip.muted || track.muted || !inside
       ? 0
       : Math.min(1, evalAnim(clip.gain, Math.max(0, rel)) * track.gain *
           fadeFactor(clip, Math.max(0, rel), overlapFades(track, clip)))
+    const frame = frameOf(clip, s.playhead)
+    // when the target frame changes, remember the current paint version so
+    // captureReady() waits for the NEXT paint (the one that shows this frame)
+    if (syncedFrame.get(fragmentId) !== frame) {
+      syncedFrame.set(fragmentId, frame)
+      versionAtSync.set(fragmentId, frames.get(fragmentId)?.version ?? 0)
+    }
     window.kadr.fragmentCaptureSync(fragmentId, {
       kadr: true,
       type: 'sync',
-      frame: Math.max(0, Math.round(
-        (Math.max(0, Math.min(clip.duration, rel)) * (clip.speed || 1) + clip.inPoint) * fps
-      )),
+      frame,
       playing: s.playing && inside,
       volume: vol
     })
@@ -129,6 +153,8 @@ export function wireFragmentCapture() {
       if (!want.has(id)) {
         active.delete(id)
         frames.delete(id)
+        syncedFrame.delete(id)
+        versionAtSync.delete(id)
         void window.kadr.fragmentCaptureStop(id)
       }
     }
@@ -140,8 +166,10 @@ export function wireFragmentCapture() {
           const meta = clip.fragmentMeta
           const cw = Math.min(CAPTURE_MAX_W, meta?.width ?? s.project.width)
           const ch = Math.round(cw * ((meta?.height ?? s.project.height) / (meta?.width ?? s.project.width)))
+          // seed the player on the target frame so its first paint is correct
+          const frame = frameOf(clip, s.playhead)
           await window.kadr.fragmentCaptureStart(
-            id, `${url}/?comp=${encodeURIComponent(id)}`, cw, ch, meta?.fps ?? 60
+            id, `${url}/?comp=${encodeURIComponent(id)}&frame=${frame}`, cw, ch, meta?.fps ?? 60
           )
         } catch {
           active.delete(id)

@@ -225,6 +225,17 @@ export interface BlendFrame {
  * `blends` adds frame blending: the successor source frame is composited
  * over the main one with its weight, smoothing fps-mismatch cadence.
  */
+// Throttled so one persistently-broken clip can't flood the console every frame
+// (preview redraws ~continuously; export runs thousands of frames).
+let lastLayerErrLog = 0
+function logLayerError(clip: Clip, err: unknown) {
+  const now = Date.now()
+  if (now - lastLayerErrLog > 2000) {
+    lastLayerErrLog = now
+    console.error(`[kadr] clip ${clip.id} failed to draw (skipped this frame):`, err)
+  }
+}
+
 export function drawFrame(
   comp: Compositor,
   project: Project,
@@ -246,16 +257,23 @@ export function drawFrame(
       .sort((a, b) => a.start - b.start)
     const assetOf = (c: Clip) =>
       c.assetId ? project.assets.find((a) => a.id === c.assetId) : undefined
-    // clip tails/heads with edge effects render through an offscreen pass
+    // clip tails/heads with edge effects render through an offscreen pass.
+    // Guarded per clip: a bad clip (e.g. a keyframe with no easing) must skip
+    // only itself, not throw out of the layer loop and black out the whole frame
+    // — comp.begin() already cleared the framebuffer above.
     const drawWithEdge = (c: Clip) => {
-      const eff = edgeAt(c, t - c.start)
-      if (eff && eff.g > 0.003 && eff.g < 0.997) {
-        comp.beginOverlay(0)
-        drawClipLayer(comp, project, t, pool, c, track, assetOf(c), 1, frames, blends)
-        comp.endOverlay()
-        comp.drawEdgeEffect(eff.type, eff.g, trackOpacity)
-      } else {
-        drawClipLayer(comp, project, t, pool, c, track, assetOf(c), trackOpacity, frames, blends)
+      try {
+        const eff = edgeAt(c, t - c.start)
+        if (eff && eff.g > 0.003 && eff.g < 0.997) {
+          comp.beginOverlay(0)
+          drawClipLayer(comp, project, t, pool, c, track, assetOf(c), 1, frames, blends)
+          comp.endOverlay()
+          comp.drawEdgeEffect(eff.type, eff.g, trackOpacity)
+        } else {
+          drawClipLayer(comp, project, t, pool, c, track, assetOf(c), trackOpacity, frames, blends)
+        }
+      } catch (err) {
+        logLayerError(c, err)
       }
     }
 
@@ -278,14 +296,22 @@ export function drawFrame(
         if (c !== pair[0] && c !== pair[1]) drawWithEdge(c)
       }
       const [A, B] = pair
-      const overlapEnd = Math.min(A.start + A.duration, B.start + B.duration)
-      const p = Math.min(1, Math.max(0, (t - B.start) / Math.max(0.001, overlapEnd - B.start)))
-      comp.beginOverlay(0)
-      drawClipLayer(comp, project, t, pool, A, track, assetOf(A), 1, frames, blends)
-      comp.beginOverlay(1)
-      drawClipLayer(comp, project, t, pool, B, track, assetOf(B), 1, frames, blends)
-      comp.endOverlay()
-      comp.drawTransition(pairType, p, trackOpacity)
+      try {
+        const overlapEnd = Math.min(A.start + A.duration, B.start + B.duration)
+        const p = Math.min(1, Math.max(0, (t - B.start) / Math.max(0.001, overlapEnd - B.start)))
+        comp.beginOverlay(0)
+        drawClipLayer(comp, project, t, pool, A, track, assetOf(A), 1, frames, blends)
+        comp.beginOverlay(1)
+        drawClipLayer(comp, project, t, pool, B, track, assetOf(B), 1, frames, blends)
+        comp.endOverlay()
+        comp.drawTransition(pairType, p, trackOpacity)
+      } catch (err) {
+        // a throw mid-transition would leave the frame black; draw the pair
+        // flat (each clip guarded) instead of losing the whole frame
+        logLayerError(B, err)
+        drawWithEdge(A)
+        drawWithEdge(B)
+      }
     } else {
       for (const c of active) drawWithEdge(c)
     }
@@ -338,13 +364,14 @@ function drawClipLayer(
         : undefined,
       shapes: shapes.length
         ? shapes.map((ms) => ({
-            type: (ms.type === 'rect' ? 1 : ms.type === 'ellipse' ? 2 : 3) as 1 | 2 | 3,
+            type: (ms.type === 'rect' ? 1 : ms.type === 'ellipse' ? 2 : ms.type === 'roundrect' ? 4 : 3) as 1 | 2 | 3 | 4,
             cx: evalAnim(ms.cx, rel),
             cy: evalAnim(ms.cy, rel),
             halfW: Math.max(0, evalAnim(ms.w, rel)) / 2,
             halfH: Math.max(0, evalAnim(ms.h, rel)) / 2,
             featherIn: Math.max(0, evalAnim(ms.featherIn, rel)),
             featherOut: Math.max(0, evalAnim(ms.featherOut, rel)),
+            radius: ms.radius ? Math.max(0, evalAnim(ms.radius, rel)) : 0,
             invert: ms.invert
           }))
         : undefined

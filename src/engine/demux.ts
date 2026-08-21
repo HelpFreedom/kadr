@@ -10,6 +10,10 @@ import type { MediaAsset } from '@shared/types'
 /** non-faststart files keep moov at the end — give up early and fall back */
 const HEAD_LIMIT = 16 * 1024 * 1024
 
+/** watchdog for a decode that emits neither an output frame nor an error
+ * (wedged hardware decoder) — after this, give up and fall back to element-seek */
+const DECODE_STALL_MS = 8000
+
 type MP4File = ReturnType<typeof MP4Box.createFile>
 
 interface Sample {
@@ -72,8 +76,26 @@ export class Mp4FrameSource {
     for (const w of ws) w()
   }
 
+  // Resolved by kick() (a decoder output or error). Bounded by a watchdog:
+  // if neither fires within DECODE_STALL_MS the decoder is wedged — e.g. VAAPI
+  // init deadlocks on a driver/GPU mismatch and emits no output AND no error.
+  // On timeout we flag the source fatal and resolve, so the frameAt guard-loop
+  // throws and the exporter falls back to element-seek. Prevents an infinite
+  // export hang regardless of GPU/driver.
   private wait(): Promise<void> {
-    return new Promise((r) => this.waiters.push(r))
+    return new Promise((r) => {
+      const w = () => {
+        clearTimeout(timer)
+        r()
+      }
+      const timer = setTimeout(() => {
+        this.fatal = true
+        const i = this.waiters.indexOf(w)
+        if (i >= 0) this.waiters.splice(i, 1)
+        r()
+      }, DECODE_STALL_MS)
+      this.waiters.push(w)
+    })
   }
 
   /**

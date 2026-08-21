@@ -50,10 +50,19 @@ app.commandLine.appendSwitch('password-store', 'basic')
 // Let Chromium use VAAPI for hardware video encode/decode where the driver
 // allows it (Intel iGPU on this machine); WebCodecs then picks it up via
 // hardwareAcceleration: 'prefer-hardware'.
+//
+// EXCEPT on the NVIDIA PRIME-offload path (KADR_GPU_OFFLOAD): there is no VA
+// driver for the NVIDIA GLX context, so VaapiVideoDecoder init fails ("Could
+// not get a valid VA display") and — worse — a WebCodecs decode can then wedge
+// with neither an output nor an error callback, hanging the offline export
+// forever. So on that path we DON'T enable VAAPI decode (WebCodecs falls back
+// to software decode, which works); GPU compositing still runs on the dGPU.
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
 app.commandLine.appendSwitch(
   'enable-features',
-  'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
+  process.env.KADR_GPU_OFFLOAD
+    ? 'VaapiVideoEncoder,AcceleratedVideoEncoder'
+    : 'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
 )
 
 // Point the GPU process at the user's chosen render node (else Chromium's
@@ -407,17 +416,24 @@ async function rememberDir(kind: string, filePath: string) {
   } catch { /* best effort */ }
 }
 
-// Is NVIDIA hardware H.264 encoding usable? Needs an NVIDIA device present and
-// an ffmpeg built with h264_nvenc (the bundled static ffmpeg is not). Probed
-// once and cached — the export dialog offers the NVENC option only when true.
+// Is NVIDIA hardware H.264 encoding actually usable? Listing h264_nvenc in
+// -encoders is NOT enough: ffmpeg's bundled NVENC SDK can be newer than the
+// installed driver (e.g. build needs NVENC API 13.1 but the driver only has
+// 13.0), and it fails only at encode time. So we run a real 1-frame encode and
+// trust the exit code — a mismatch just leaves the NVENC option off and x264 is
+// used, instead of a hard export error. Probed once, cached.
 let nvencCache: boolean | null = null
 function nvencAvailable(): boolean {
   if (nvencCache !== null) return nvencCache
   try {
     if (!existsSync('/dev/nvidia0')) return (nvencCache = false)
     const ff = process.env.KADR_FFMPEG || 'ffmpeg'
-    const r = spawnSync(ff, ['-hide_banner', '-encoders'], { encoding: 'utf8', timeout: 5000 })
-    nvencCache = /h264_nvenc/.test(r.stdout || '')
+    const r = spawnSync(ff, [
+      '-hide_banner', '-v', 'error',
+      '-f', 'lavfi', '-i', 'color=c=black:s=64x64:d=1',
+      '-frames:v', '1', '-c:v', 'h264_nvenc', '-f', 'null', '-'
+    ], { timeout: 15000 })
+    nvencCache = r.status === 0
   } catch {
     nvencCache = false
   }
@@ -488,6 +504,16 @@ function registerIpc() {
   })
 
   ipcMain.handle('media:probe', (_e, path: string) => probeMedia(path))
+  // cheap freshness check for the import dedupe — a re-import of a file
+  // overwritten with the same name should refresh, not reuse the stale asset
+  ipcMain.handle('media:stat', (_e, path: string) => {
+    try {
+      const s = statSync(path)
+      return { mtimeMs: s.mtimeMs, size: s.size }
+    } catch {
+      return null
+    }
+  })
 
   // sanitized basename + MIME-derived extension for downloaded/pasted media
   const mediaBase = (name: string, mime: string): string => {

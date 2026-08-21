@@ -80,13 +80,21 @@ export function findClip(p: Project, clipId: string): { track: Track; clip: Clip
  * non-finite values and broken keyframes are dropped — a single NaN reaching
  * WebAudio used to kill playback for the rest of the session.
  */
+// The easings evalAnim can interpolate — mirror of `ease` in engine/anim.ts.
+// A keyframe carrying anything else (or nothing) is coerced to 'linear' on load.
+const KNOWN_EASINGS = new Set(['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold'])
+
 export function sanitizeProject(p: Project): Project {
   const anim = (a: unknown, fallback: number): Anim => {
     if (typeof a === 'number') return { value: Number.isFinite(a) ? a : fallback }
     if (!a || typeof a !== 'object') return { value: fallback }
     const o = a as Anim
     if (o.keyframes) {
-      o.keyframes = o.keyframes.filter((k) => Number.isFinite(k?.time) && Number.isFinite(k?.value))
+      o.keyframes = o.keyframes
+        .filter((k) => Number.isFinite(k?.time) && Number.isFinite(k?.value))
+        // heal script-written / foreign keyframes: a missing or unknown `easing`
+        // makes evalAnim index ease[undefined] and throw, blacking out the frame.
+        .map((k) => (KNOWN_EASINGS.has(k.easing) ? k : { ...k, easing: 'linear' as const }))
       if (!o.keyframes.length) delete o.keyframes
     }
     if (!Number.isFinite(o.value)) o.value = o.keyframes?.[0]?.value ?? fallback
@@ -134,7 +142,8 @@ export function forEachAnim(c: Clip, fn: (a: Anim) => Anim) {
       ...c.maskShape,
       cx: fn(c.maskShape.cx), cy: fn(c.maskShape.cy),
       w: fn(c.maskShape.w), h: fn(c.maskShape.h),
-      featherIn: fn(c.maskShape.featherIn), featherOut: fn(c.maskShape.featherOut)
+      featherIn: fn(c.maskShape.featherIn), featherOut: fn(c.maskShape.featherOut),
+      ...(c.maskShape.radius ? { radius: fn(c.maskShape.radius) } : {})
     }
   }
   if (c.maskShapes) {
@@ -142,7 +151,8 @@ export function forEachAnim(c: Clip, fn: (a: Anim) => Anim) {
       ...s,
       cx: fn(s.cx), cy: fn(s.cy),
       w: fn(s.w), h: fn(s.h),
-      featherIn: fn(s.featherIn), featherOut: fn(s.featherOut)
+      featherIn: fn(s.featherIn), featherOut: fn(s.featherOut),
+      ...(s.radius ? { radius: fn(s.radius) } : {})
     }))
   }
 }
@@ -410,7 +420,9 @@ interface EditorState {
   insertFragmentClip(fragmentId: string, meta: FragmentSpec, start: number, duration: number): string
   /** Patch asset metadata (e.g. a freshly built proxy path); no history. */
   updateAsset(assetId: string, patch: Partial<MediaAsset>): void
-  addTrack(kind: TrackKind): void
+  /** Add a track. `at` (0 = topmost) overrides the default placement —
+      video defaults to the top, audio to the bottom. */
+  addTrack(kind: TrackKind, at?: number): void
   addTrackNear(refTrackId: string): void
   removeTrack(trackId: string): void
   moveTrack(trackId: string, toIndex: number): void
@@ -602,11 +614,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       return { project: p }
     }),
 
-  addTrack: (kind) => {
+  addTrack: (kind, at) => {
     get().pushHistory('hTrack')
     set((s) => {
       const p = clone(s.project)
-      p.tracks.splice(kind === 'video' ? 0 : p.tracks.length, 0, makeTrack(p, kind))
+      const idx = at == null
+        ? (kind === 'video' ? 0 : p.tracks.length) // default: video top, audio bottom
+        : Math.max(0, Math.min(p.tracks.length, Math.round(at)))
+      p.tracks.splice(idx, 0, makeTrack(p, kind))
       return { project: p }
     })
   },

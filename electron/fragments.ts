@@ -99,7 +99,12 @@ import { Player, PlayerRef } from '@remotion/player'
 import { fragments } from './src/fragments'
 
 function App() {
-  const id = new URLSearchParams(location.search).get('comp') || ''
+  const params = new URLSearchParams(location.search)
+  const id = params.get('comp') || ''
+  // Start on the requested frame so the very first offscreen paint already
+  // matches the playhead — otherwise a snapshot can capture frame 0 before the
+  // first sync lands (the message listener attaches a tick after mount).
+  const initialFrame = Math.max(0, Math.round(Number(params.get('frame')) || 0))
   const entry = (fragments as Record<string, any>)[id]
   const ref = useRef<PlayerRef>(null)
   // Drift against the editor clock is corrected by nudging playbackRate a
@@ -150,6 +155,7 @@ function App() {
     compositionWidth: entry.meta.width,
     compositionHeight: entry.meta.height,
     fps: entry.meta.fps,
+    initialFrame,
     playbackRate: rate,
     style: { width: '100vw', height: '100vh' },
     controls: false,
@@ -389,7 +395,9 @@ async function createFragment(spec: FragmentSpec): Promise<FragmentInfo> {
     name: spec.name,
     width: Math.round(spec.width),
     height: Math.round(spec.height),
-    fps: Math.max(60, Math.round(spec.fps)),
+    // honor the requested (project) fps — forcing ≥60 doubled the PNG frame
+    // pile on tmpfs for 30 fps projects (see renderFragment TMPDIR handling)
+    fps: Math.max(1, Math.round(spec.fps)),
     durationInFrames: Math.max(1, Math.round(spec.durationInFrames)),
     transparent: !!spec.transparent
   }
@@ -426,15 +434,47 @@ function fragmentHash(id: string): string {
 const renderDir = () => join(app.getPath('userData'), 'fragment-renders')
 let renderChain: Promise<unknown> = Promise.resolve()
 
+/** Fail fast (with a clear message) if the temp filesystem can't hold the PNG
+ *  frame pile Remotion produces. ~0.25 B/px/frame is conservative vs the
+ *  ~0.18 B/px measured on flat fills. Best-effort: skips if it can't estimate. */
+async function ensureRenderSpace(
+  dir: string,
+  meta: { width?: number; height?: number; durationInFrames?: number }
+): Promise<void> {
+  const { width, height, durationInFrames } = meta
+  if (!width || !height || !durationInFrames) return
+  let free: number
+  try {
+    const st = await fs.statfs(dir)
+    free = st.bavail * st.bsize
+  } catch {
+    return // statfs unavailable — skip the guard rather than block the render
+  }
+  const est = width * height * 0.25 * durationInFrames
+  if (free < est) {
+    const gb = (n: number) => (n / 1e9).toFixed(2)
+    throw new Error(
+      `Not enough disk for this fragment render: ~${gb(est)} GB of temp frames ` +
+      `(${durationInFrames} × ${width}×${height} PNG) but only ${gb(free)} GB free ` +
+      `at ${dir}. Free up space, or lower the fragment resolution/fps/length.`
+    )
+  }
+}
+
 async function renderFragment(
   id: string,
   opts: { transparent?: boolean } | undefined,
   onProgress: (p: number) => void
 ): Promise<{ path: string; cached: boolean }> {
   await ensureWorkspace()
+  // Heal the registry against the folders actually on disk BEFORE bundling: a
+  // fragment folder deleted outside the app (rm -rf) would otherwise leave a
+  // stale `import … from './<gone>'` in src/fragments/index.ts and fail the render.
+  await regenRegistry()
   let transparent = !!opts?.transparent
+  let meta: { width?: number; height?: number; durationInFrames?: number; transparent?: boolean } = {}
   try {
-    const meta = JSON.parse(await fs.readFile(join(FRAG_DIR(), id, 'meta.json'), 'utf8'))
+    meta = JSON.parse(await fs.readFile(join(FRAG_DIR(), id, 'meta.json'), 'utf8'))
     if (opts?.transparent === undefined) transparent = !!meta.transparent
   } catch { /* meta is optional for the decision */ }
   const ext = transparent ? 'webm' : 'mp4'
@@ -455,11 +495,20 @@ async function renderFragment(
   if (transparent) args.push('--codec=vp9', '--pixel-format=yuva420p', '--crf=12')
   else args.push('--codec=h264', '--crf=15')
 
+  // Remotion writes every frame as a full-res PNG to the OS temp dir before
+  // muxing. On this machine /tmp is a small tmpfs (~1.8 GB free) and a 4K
+  // fragment overflowed it mid-render (EDQUOT at ~90%). Redirect Remotion's
+  // temp to a disk-backed dir under userData, and pre-flight the space so we
+  // fail up front with a clear message instead of after a 10-minute render.
+  const tmpDir = join(app.getPath('userData'), 'fragment-tmp')
+  await fs.mkdir(tmpDir, { recursive: true })
+  await ensureRenderSpace(tmpDir, meta)
+
   const extraEnv = await netEnv()
   const job = renderChain.then(() => new Promise<void>((resolve, reject) => {
     const child = spawn('npx', args, {
       cwd: WORKSPACE,
-      env: { ...process.env, ...extraEnv },
+      env: { ...process.env, ...extraEnv, TMPDIR: tmpDir },
       stdio: ['ignore', 'pipe', 'pipe']
     })
     let all = ''

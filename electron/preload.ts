@@ -61,6 +61,7 @@ const api: KadrApi = {
 
   openMediaDialog: () => ipcRenderer.invoke('media:open-dialog'),
   probeMedia: (path) => ipcRenderer.invoke('media:probe', path),
+  statMedia: (path) => ipcRenderer.invoke('media:stat', path),
   fileUrl: (path) => {
     // Windows paths (D:\dir\file) must become /D:/dir/file — a raw drive
     // letter glued after the host ('kadr://mediaD:\…') is an INVALID URL:

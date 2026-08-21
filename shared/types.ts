@@ -35,6 +35,9 @@ export interface MediaAsset {
   proxyPath?: string
   /** this asset is a reversed render of a source range of another asset */
   reverseOf?: { assetId: string; start: number; duration: number }
+  /** source file mtime at probe time — lets a re-import of an overwritten
+      same-name file refresh the asset instead of reusing the stale one */
+  mtimeMs?: number
 }
 
 export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'hold'
@@ -85,7 +88,7 @@ export interface ClipMask {
   bottom: Anim
 }
 
-export type MaskShapeType = 'rect' | 'ellipse' | 'triangle'
+export type MaskShapeType = 'rect' | 'ellipse' | 'triangle' | 'roundrect'
 
 /** Drawn shape mask in layer UV space (0..1), with soft borders. */
 export interface MaskShape {
@@ -97,6 +100,8 @@ export interface MaskShape {
   /** soft border inward / outward, in layer-height fractions */
   featherIn: Anim
   featherOut: Anim
+  /** corner radius for 'roundrect', in layer-height fractions (0 = sharp) */
+  radius?: Anim
   /** exclude mode: the shape cuts a hole instead of keeping its inside */
   invert: boolean
 }
@@ -208,6 +213,8 @@ export interface PoseShape {
   h: number
   featherIn: number
   featherOut: number
+  /** corner radius for 'roundrect' (y-height fractions) */
+  radius?: number
 }
 
 export interface PosePreset {
@@ -370,6 +377,8 @@ export interface ProbeResult {
 export interface KadrApi {
   openMediaDialog(): Promise<string[]>
   probeMedia(path: string): Promise<ProbeResult>
+  /** cheap stat for the import dedupe (mtime/size), or null if unreadable */
+  statMedia(path: string): Promise<{ mtimeMs: number; size: number } | null>
   fileUrl(path: string): string
   /** Absolute path of a File dropped from the OS (File.path is gone since
       Electron 32 — this goes through webUtils.getPathForFile). */

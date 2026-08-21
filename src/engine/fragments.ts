@@ -52,7 +52,10 @@ export async function createFragment(
   if (!(opts.end > opts.start)) throw new Error('empty fragment range')
   const p = useEditor.getState().project
   await window.kadr.fragmentEnsure()
-  const fps = Math.max(60, p.fps)
+  // Match the project fps. Forcing ≥60 fps doubled the rendered frame count for
+  // 30 fps projects — and every frame is a full-res PNG on tmpfs, so a 4K
+  // fragment overflowed /tmp. The project fps is what the timeline samples anyway.
+  const fps = Math.max(1, p.fps)
   const info = await window.kadr.fragmentCreate({
     name: opts.name,
     width: p.width,

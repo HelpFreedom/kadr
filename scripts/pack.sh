@@ -26,7 +26,15 @@ PYTHON_VERSION="3.12.8"                    # cpython version within that release
 # so the "GPU encoding (NVENC)" export option works in the packaged app too. It
 # dlopens the user's NVIDIA driver libs at runtime — no NVIDIA, no problem, the
 # app's nvencAvailable() check just leaves the option off and x264 is used.
-FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+#
+# PINNED, not `latest`, on purpose: BtbN's current builds require NVENC API 13.1
+# (driver ≥ 610), so h264_nvenc won't open on the common 5xx driver line. The
+# 2026-05-31 dated build is the last one built against nv-codec-headers API 13.0
+# — verified encoding on driver 580 — and works on 610+ too via NVENC back-compat.
+# Bump to `latest` once driver ≥ 610 is the norm. (BtbN prunes old dated builds
+# eventually; if this 404s, pick the newest dated build whose h264_nvenc still
+# opens on the target driver — see nvencAvailable()'s 1-frame test-encode.)
+FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-05-31-13-22/ffmpeg-N-124714-g49a77d37be-linux64-gpl.tar.xz"
 
 ARCH="x64"; UNAME_ARCH="x86_64"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

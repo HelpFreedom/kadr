@@ -48,6 +48,7 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
     audioCodec: audio?.codec_name
   }
   if (kind === 'video' && video?.codec_name) asset.codec = video.codec_name
+  try { asset.mtimeMs = Math.round((await fsp.stat(path)).mtimeMs) } catch { /* stat optional */ }
 
   if (kind !== 'audio') {
     try {
@@ -451,6 +452,13 @@ export class ExportMuxer {
         const outDur = s.duration / speed // timeline-domain length after atempo
         const chain = [
           'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+          // Input-seeked real files (`-ss inPoint -i file`) hand filter_complex a
+          // stream whose first sample carries a non-zero source PTS. adelay/atrim
+          // then work in that shifted time base and the per-clip delay is lost, so
+          // amix stacks every clip at t=0 (all audio collapses to the start). Zero
+          // the PTS here — as a lavfi source already is — so adelay places the clip
+          // at `ms` and atrim frames [0, job.duration) correctly.
+          'asetpts=PTS-STARTPTS',
           `volume=${s.gain.toFixed(4)}`,
           ...(Math.abs(speed - 1) > 1e-4 ? atempoChain(speed) : []),
           ...(s.fadeIn > 0.001 ? [`afade=t=in:st=0:d=${Math.min(s.fadeIn, outDur).toFixed(3)}`] : []),

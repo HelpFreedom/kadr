@@ -44,6 +44,12 @@ export function setElementGain(el: HTMLMediaElement, v: number) {
   if (g) g.gain.value = Number.isFinite(v) ? Math.max(0, v) : 0
 }
 
+/** Master output level for standalone-player volume and mute controls. */
+export function setMasterGain(v: number) {
+  ensureAudio()
+  master!.gain.value = Number.isFinite(v) ? Math.max(0, v) : 0
+}
+
 export function isRouted(el: HTMLMediaElement): boolean {
   return gains.has(el)
 }

@@ -2,5 +2,11 @@ node_modules/
 out/
 dist/
 *.log
+.DS_Store
 .claude/
 *.autosave.kadr
+scripts/__pycache__/
+.codebase-memory/
+projects/
+scripts/build_editable_quiz.mjs
+VOICEOVER_STUDIO.md

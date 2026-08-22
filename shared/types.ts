@@ -36,6 +36,33 @@ export interface MediaAsset {
   proxyPath?: string
   /** this asset is a reversed render of a source range of another asset */
   reverseOf?: { assetId: string; start: number; duration: number }
+  /** provenance/settings for microphone takes and generated speech */
+  voice?: VoiceAssetMeta
+}
+
+export interface VoiceEffectProfile {
+  inputGain: number
+  leveling: { enabled: boolean; targetLufs: number }
+  noiseReduction: { enabled: boolean; highPassHz: number }
+  compressor: {
+    enabled: boolean
+    threshold: number
+    ratio: number
+    attack: number
+    release: number
+  }
+  delay: { enabled: boolean; time: number; feedback: number; mix: number }
+}
+
+export interface VoiceAssetMeta {
+  source: 'microphone' | 'neural-tts'
+  recordedAt: string
+  deviceLabel?: string
+  /** capture before the WebAudio effect chain, retained for recovery */
+  rawPath?: string
+  effects?: VoiceEffectProfile
+  knownText?: string
+  provider?: string
 }
 
 export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'hold'
@@ -128,6 +155,124 @@ export interface TextStyle {
   background: string // '' = none
 }
 
+// ---------------------------------------------------------------------------
+// Local voice-over studio
+
+/** Parameters are persisted with each take. The UI reuses the latest recipe,
+ * while allowing voiceId and text to change before any new generation. */
+export interface VoiceoverSettings {
+  modelPath: string
+  pythonPath: string
+  vocabPath: string
+  voicesPath: string
+  voiceId: string
+  speed: number
+  nfeStep: number
+  cfgStrength: number
+  swaySamplingCoef: number
+  crossFadeDuration: number
+  seed: number
+  loudnessLufs: number
+  truePeakDb: number
+  /** A portable zero-shot reference for a user-created voice. When present,
+   * generation uses this exact file instead of a bundled numbered voice. */
+  customVoice?: VoiceoverCustomVoice
+}
+
+export interface VoiceoverCustomVoice {
+  id: string
+  name: string
+  description?: string
+  referencePath: string
+  /** Exact words spoken in the reference. New/edited voices require this so
+   * F5-TTS cannot mistake reference speech for generated speech. */
+  referenceText: string
+  createdAt: string
+  source: 'file' | 'microphone'
+  sourceLabel?: string
+}
+
+export interface VoiceCloneProcessingOptions {
+  normalization: { enabled: boolean; targetLufs: number }
+  noiseReduction: { enabled: boolean; strength: number }
+  compressor: { enabled: boolean; thresholdDb: number; ratio: number }
+}
+
+export interface VoiceClonePreview {
+  path: string
+  duration: number
+}
+
+export interface VoiceCloneSaveRequest {
+  /** Present when an existing library voice is being edited/replaced. */
+  voiceId?: string
+  processedPath: string
+  name: string
+  description?: string
+  referenceText: string
+  source: 'file' | 'microphone'
+  sourceLabel?: string
+}
+
+export interface VoiceoverVersion {
+  id: string
+  number: number
+  text: string
+  path: string
+  assetId: string
+  duration: number
+  createdAt: string
+  settings: VoiceoverSettings
+}
+
+export interface VoiceoverHistory {
+  activeVersionId?: string
+  versions: VoiceoverVersion[]
+  settings: VoiceoverSettings
+  /** Fixed timeline slot for SRT-generated speech. Takes are time-stretched to fit it. */
+  timedDuration?: number
+}
+
+export interface VoiceoverGenerateRequest {
+  clipId: string
+  projectPath: string | null
+  version: number
+  text: string
+  settings: VoiceoverSettings
+}
+
+export interface VoiceoverGenerateResult {
+  path: string
+  duration: number
+  seed: number
+}
+
+export interface VoiceoverStatus {
+  ready: boolean
+  reason?: string
+  engine?: 'F5-TTS'
+  pythonPath?: string
+  modelPath?: string
+  vocabPath?: string
+  voicesPath?: string
+  configPath: string
+}
+
+export interface VoiceoverProgress {
+  clipId: string
+  stage: 'loading' | 'generating' | 'mastering' | 'done' | 'error'
+  progress: number
+  message?: string
+}
+
+export interface VoiceoverInstallProgress {
+  stage: 'preparing' | 'runtime' | 'packages' | 'model' | 'voices' | 'validating' | 'done' | 'error'
+  progress: number
+  message: string
+  downloadedBytes?: number
+  totalBytes?: number
+}
+
 export interface Clip {
   id: string
   /** source asset; text clips have no asset */
@@ -140,6 +285,8 @@ export interface Clip {
   fragmentMeta?: FragmentSpec
   text?: string
   textStyle?: TextStyle
+  /** Local TTS takes and the currently selected take for narration clips. */
+  voiceover?: VoiceoverHistory
   /** position on the timeline */
   start: number
   duration: number
@@ -166,7 +313,34 @@ export interface Clip {
   label?: string
 }
 
-export type TrackKind = 'video' | 'audio'
+export type AnnotationStatus = 'new' | 'in_progress' | 'done'
+
+export interface AnnotationTask {
+  /** Stable random identity used by the editor and MCP; never derived from timing. */
+  id: string
+  text: string
+  status: AnnotationStatus
+  /** Fixed project-timeline seconds. Annotation timing never follows media clips. */
+  start: number
+  duration: number
+  /** Concise summary written when an agent completes the task. */
+  result?: string
+  createdAt: string
+  updatedAt: string
+  completedAt?: string
+}
+
+/** A named structural range shown in the amber band below the timeline ruler. */
+export interface Chapter {
+  /** Stable identity used by the UI and MCP. */
+  id: string
+  title: string
+  /** Inclusive visual start and exclusive visual end, in project seconds. */
+  start: number
+  end: number
+}
+
+export type TrackKind = 'video' | 'audio' | 'annotation'
 
 export interface Track {
   id: string
@@ -179,6 +353,8 @@ export interface Track {
   /** video tracks: animated whole-track transform */
   motion?: Transform3D
   clips: Clip[]
+  /** annotation tracks only; deliberately separate from renderable clips */
+  annotations?: AnnotationTask[]
 }
 
 export interface TimelineMarker {
@@ -200,8 +376,13 @@ export interface Project {
   background: string
   tracks: Track[]
   assets: MediaAsset[]
+  /** Named timeline sections/groups. They organize the edit and do not render. */
+  chapters?: Chapter[]
   /** transcripts and other text documents imported into the sources */
   texts?: TextDoc[]
+  /** Custom F5-TTS references used by this project. Their paths are embedded
+   * beside the .kadr file on save so the project remains portable. */
+  voiceClones?: VoiceoverCustomVoice[]
   /** free-floating timeline markers (M key / addMarker), track-independent */
   markers?: TimelineMarker[]
 }
@@ -365,10 +546,76 @@ export interface AudioSegment {
 }
 
 export interface ExportProgress {
-  phase: 'fragments' | 'video' | 'audio' | 'mux' | 'done' | 'error' | 'cancelled'
+  phase: 'fragments' | 'video' | 'audio' | 'mux' | 'files' | 'done' | 'error' | 'cancelled'
   /** 0..1 within the current phase */
   progress: number
   message?: string
+}
+
+export interface HtmlPlayerSettings {
+  showTimeline: boolean
+  allowSeeking: boolean
+  showControls: boolean
+}
+
+export const DEFAULT_HTML_PLAYER_SETTINGS: HtmlPlayerSettings = {
+  showTimeline: true,
+  allowSeeking: true,
+  showControls: true
+}
+
+export interface HtmlPlayerExportRequest {
+  parentDir: string
+  project: Project
+  lang: 'ru' | 'en'
+  player: HtmlPlayerSettings
+}
+
+export type MenuCommand = 'new' | 'open' | 'save' | 'saveAs' | 'export' | 'undo' | 'redo' | 'cut'
+
+export interface ProjectPackageOptions {
+  includeDependencies: boolean
+  zip: boolean
+}
+
+export interface ProjectPackageResult {
+  projectPath: string
+  folderPath: string
+  zipPath?: string
+}
+
+export type ProxyBuildState =
+  | 'queued'
+  | 'building'
+  | 'validating'
+  | 'retrying'
+  | 'ready'
+  | 'error'
+
+export interface ProxyBuildUpdate {
+  path: string
+  state: ProxyBuildState
+  progress: number
+  attempt?: number
+  retryInMs?: number
+  error?: string
+  cached?: boolean
+}
+
+export interface TimelineThumbnailRequest {
+  kind: 'media' | 'remotion'
+  sourcePath?: string
+  fragmentId?: string
+  times: number[]
+  width: number
+  height: number
+  /** Extra renderer-side identity (clip metadata/profile); disk identity is added in main. */
+  cacheKey?: string
+}
+
+export interface TimelineThumbnailFrame {
+  time: number
+  dataUrl: string
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +647,17 @@ export interface KadrApi {
   dropLog(entry: unknown): void
 
   saveProjectDialog(currentName: string): Promise<string | null>
+  saveProjectPackageDialog(currentName: string): Promise<string | null>
+  packageProject(
+    parentDir: string,
+    sourceProjectPath: string | null,
+    project: Project,
+    options: ProjectPackageOptions
+  ): Promise<ProjectPackageResult>
   openProjectDialog(): Promise<string | null>
+  newEditorWindow(): void
+  takeInitialProjectPath(): Promise<string | null>
+  setWindowProjectState(state: { path: string | null; name: string; dirty: boolean }): void
   readProject(path: string): Promise<Project>
   writeProject(path: string, project: Project): Promise<void>
   /** write <name>.autosave.kadr next to the project (atomic); returns path */
@@ -421,11 +678,17 @@ export interface KadrApi {
     cb: (p: { path: string; start: number; duration: number; progress: number }) => void
   ): () => void
 
-  /** Build (or reuse) a preview proxy; resolves with the proxy file path.
-      Alpha sources get a VP9+alpha WebM proxy instead of H.264. */
+  /** Build (or reuse) a preview proxy; alpha sources retain transparency. */
   requestProxy(path: string, duration: number,
     opts?: { alpha?: boolean; codec?: string }): Promise<string>
-  onProxyProgress(cb: (p: { path: string; progress: number }) => void): () => void
+  /** Build a fresh proxy even when a validated cache entry already exists. */
+  rebuildProxy(path: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string }): Promise<string>
+  onProxyProgress(cb: (p: ProxyBuildUpdate) => void): () => void
+  /** Small background frames used by the zoom-adaptive timeline filmstrip. */
+  timelineThumbnails(request: TimelineThumbnailRequest): Promise<TimelineThumbnailFrame[]>
+  /** External-media + Remotion content identity for stale-safe visual caches. */
+  visualFingerprint(paths: string[], fragmentIds: string[]): Promise<string>
   /** Full-resolution intermediate for sources Chromium cannot decode
       (e.g. HEVC without VAAPI, ProRes): H.264, or VP9+alpha WebM for alpha
       sources; cached like proxies, video-only. */
@@ -436,10 +699,13 @@ export interface KadrApi {
   /** Write a frame snapshot PNG into dir (Downloads when null) under a
       collision-free name derived from baseName; resolves with the path. */
   saveSnapshot(dir: string | null, baseName: string, png: ArrayBuffer): Promise<string>
+  /** Write/replace an agent storyboard image in the app-managed visual cache. */
+  saveStoryboardImage(cacheKey: string, baseName: string, png: ArrayBuffer): Promise<string>
   /** EBU R128 loudness of a source range: integrated LUFS + true peak dBTP. */
   measureLoudness(path: string, start: number, duration: number): Promise<{ i: number; tp: number }>
 
   exportDialog(defaultName: string, ext: string): Promise<string | null>
+  htmlPlayerExport(request: HtmlPlayerExportRequest): Promise<string>
   exportBegin(job: ExportJob): Promise<void>
   exportVideoChunk(data: ArrayBuffer, position: number): Promise<void>
   /** Direct encode in the renderer process: preload spawns ffmpeg and pipes
@@ -498,6 +764,28 @@ export interface KadrApi {
   writeTextFile(path: string, content: string): Promise<void>
   /** mtime in ms, or null when missing — used to pick up external edits */
   statFile(path: string): Promise<number | null>
+  /** Create a user-chosen SRT file seeded with one three-second cue. */
+  createSrtFile(suggestedName: string, start: number): Promise<string | null>
+  /** Convert a Word scenario into an editable app-owned UTF-8 text document. */
+  prepareTextDocument(path: string): Promise<{ path: string; name: string }>
+
+  /** Generate one local F5-TTS voice-over take. The model process stays warm
+      between requests; generated files are stored next to the .kadr project. */
+  voiceoverStatus(settings: VoiceoverSettings): Promise<VoiceoverStatus>
+  voiceoverInstall(settings: VoiceoverSettings): Promise<VoiceoverStatus>
+  voiceoverInstallCancel(): Promise<void>
+  onVoiceoverInstallProgress(cb: (p: VoiceoverInstallProgress) => void): () => void
+  voiceCloneList(): Promise<VoiceoverCustomVoice[]>
+  voiceClonePickFile(): Promise<string | null>
+  voiceClonePrepare(sourcePath: string): Promise<VoiceClonePreview>
+  voiceCloneProcess(sourcePath: string, options: VoiceCloneProcessingOptions): Promise<VoiceClonePreview>
+  voiceCloneTranscribe(sourcePath: string): Promise<string>
+  voiceCloneSave(request: VoiceCloneSaveRequest): Promise<VoiceoverCustomVoice>
+  voiceCloneDelete(voiceId: string): Promise<boolean>
+  voiceCloneDiscard(paths: string[]): Promise<void>
+  voiceoverGenerate(req: VoiceoverGenerateRequest): Promise<VoiceoverGenerateResult>
+  voiceoverCancel(): Promise<void>
+  onVoiceoverProgress(cb: (p: VoiceoverProgress) => void): () => void
 
   /** Embedded Claude Code terminal session (PTY in main + MCP bridge). */
   claudeOpen(cols: number, rows: number, cwd: string | null):
@@ -507,4 +795,7 @@ export interface KadrApi {
   claudeClose(): Promise<void>
   onClaudeData(cb: (data: string) => void): () => void
   onClaudeExit(cb: (code: number) => void): () => void
+
+  /** Native menu commands (File/Edit) forwarded from the main process. */
+  onMenuCommand(cb: (cmd: MenuCommand) => void): () => void
 }

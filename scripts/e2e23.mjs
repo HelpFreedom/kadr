@@ -6,7 +6,10 @@ import { spawn, execFileSync } from 'child_process'
 import { writeFileSync, unlinkSync, readFileSync } from 'fs'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
-const ENV_FILE = `${process.env.HOME}/.config/kadr/claude-env.json`
+const USER_DATA = process.env.KADR_USER_DATA || (process.platform === 'darwin'
+  ? `${process.env.HOME}/Library/Application Support/kadr`
+  : `${process.env.HOME}/.config/kadr`)
+const ENV_FILE = `${USER_DATA}/claude-env.json`
 
 async function getPageWs() {
   for (let i = 0; i < 30; i++) {

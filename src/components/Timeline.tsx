@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
-import type { Clip, MediaAsset, Track } from '@shared/types'
+import type { AnnotationTask, Chapter, Clip, MediaAsset, Track, VoiceoverStatus } from '@shared/types'
 import {
-  useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM
+  useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM,
+  TRACK_HEADER_MIN, TRACK_HEADER_MAX, TRACK_HEADER_DEFAULT
 } from '@/state/store'
 import { useT } from '@/i18n'
 import { TRANSITIONS } from '@/gl/transitions'
@@ -10,9 +11,16 @@ import { EDGE_TRANSITIONS } from '@/gl/edges'
 import { CtxMenu } from './CtxMenu'
 import { reverseClip, useReverseUi } from '@/engine/reverse'
 import { normalizeClip, useNormalizeUi } from '@/engine/normalize'
-import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/mediaImport'
+import {
+  clearMediaDropPreview, dragHasMedia, dropPayload, dropUsable,
+  getInternalMediaDragAssetId, importDrop, showMediaDropPreview, useMediaDropUi,
+  type MediaDropGhost
+} from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
+import { useVoiceoverUi } from './VoiceoverStudio'
+import { hasPrimaryModifier } from '@/shortcuts'
+import { useTimelineThumbnails } from '@/engine/timelineThumbnails'
 
 /** Transcribe the selected range (Shift-drag on the ruler) into SRT/TXT. */
 function TranscribeRangeButton() {
@@ -32,7 +40,6 @@ function TranscribeRangeButton() {
   )
 }
 
-const HEADER_W = 150
 const RULER_H = 28
 
 function niceStep(zoom: number): number {
@@ -152,54 +159,119 @@ export function Timeline({ height }: { height: number }) {
   const tracks = useEditor((s) => s.project.tracks)
   const zoom = useEditor((s) => s.zoom)
   const trackH = useSettings((s) => s.trackH)
+  const headerW = useSettings((s) => s.trackHeaderW)
   const duration = useEditor((s) => projectDuration(s.project))
+  const annotationDuration = useEditor((s) => s.project.tracks.reduce(
+    (end, track) => Math.max(end, ...(track.annotations ?? []).map((item) => item.start + item.duration)),
+    0
+  ))
+  const chapterDuration = useEditor((s) => Math.max(0, ...(s.project.chapters ?? []).map((chapter) => chapter.end)))
+  const selectedId = useEditor((s) => s.selection[0])
+  const annotationId = useEditor((s) => s.annotationId)
+  const timelineRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const horizontalScrollRef = useRef<HTMLDivElement>(null)
   const [view, setView] = useState({ start: 0, end: 60 })
+  const [viewportW, setViewportW] = useState(800)
   const [menu, setMenu] = useState<MenuState | null>(null)
 
-  const contentW = Math.max(800, (duration + 30) * zoom)
+  const contentW = Math.max(800, viewportW, (Math.max(duration, annotationDuration, chapterDuration) + 30) * zoom)
+  const trackAreaH = tracks.length * trackH
 
   useEffect(() => {
     const el = scrollRef.current
-    if (!el) return
+    const horizontal = horizontalScrollRef.current
+    const timeline = timelineRef.current
+    if (!el || !horizontal || !timeline) return
     let raf = 0
     const updateView = () => {
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const z = useEditor.getState().zoom
-        setView({
+        const visibleW = Math.max(0, el.clientWidth - useSettings.getState().trackHeaderW)
+        const next = {
           start: el.scrollLeft / z,
-          end: (el.scrollLeft + el.clientWidth - HEADER_W) / z
-        })
+          end: (el.scrollLeft + visibleW) / z
+        }
+        setViewportW((prev) => Math.abs(prev - visibleW) < 0.5 ? prev : visibleW)
+        setView((prev) =>
+          Math.abs(prev.start - next.start) < 0.001 && Math.abs(prev.end - next.end) < 0.001
+            ? prev
+            : next
+        )
       })
     }
+    const onTimelineScroll = () => {
+      if (Math.abs(horizontal.scrollLeft - el.scrollLeft) > 0.5) {
+        horizontal.scrollLeft = el.scrollLeft
+      }
+      updateView()
+    }
+    const onHorizontalScroll = () => {
+      if (Math.abs(el.scrollLeft - horizontal.scrollLeft) > 0.5) {
+        el.scrollLeft = horizontal.scrollLeft
+      }
+    }
+    horizontal.scrollLeft = el.scrollLeft
     updateView()
-    el.addEventListener('scroll', updateView)
+    el.addEventListener('scroll', onTimelineScroll)
+    horizontal.addEventListener('scroll', onHorizontalScroll)
     const ro = new ResizeObserver(updateView)
     ro.observe(el)
 
     const onWheel = (e: WheelEvent) => {
-      // plain wheel (and Ctrl+wheel) zooms around the cursor; Shift+wheel pans
-      if (e.shiftKey) return
-      // the gain/opacity slider row has its own precise ±1% wheel
-      if ((e.target as HTMLElement).closest?.('.track-gain-row')) return
+      // macOS trackpads send ordinary two-finger navigation as deltaX/deltaY.
+      // The visible horizontal scrollbar is a separate synchronized element, so
+      // forward horizontal gestures to the hidden x-axis of the main scroller.
+      // Pinch gestures are reported by Chromium as Ctrl+wheel; Cmd/Ctrl+wheel is
+      // the keyboard form.
+      const zoomGesture = e.ctrlKey || e.metaKey
+      const modeScale = e.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? el.clientHeight
+          : 1
+      if (!zoomGesture) {
+        if (!el.contains(e.target as Node)) return
+        const dx = e.deltaX * modeScale
+        const dy = e.deltaY * modeScale
+        // A mouse has no horizontal wheel, so Shift maps its vertical delta to
+        // the time axis. Trackpad gestures keep both axes for diagonal movement.
+        const horizontalDelta = e.shiftKey && Math.abs(dx) < Math.abs(dy) ? dy : dx
+        if (Math.abs(horizontalDelta) < 0.01) return
+        e.preventDefault()
+        el.scrollLeft += horizontalDelta
+        if (!e.shiftKey) el.scrollTop += dy
+        updateView()
+        return
+      }
       e.preventDefault()
+      e.stopPropagation()
       const s = useEditor.getState()
       const rect = el.getBoundingClientRect()
-      const cx = e.clientX - rect.left - HEADER_W + el.scrollLeft
+      const pointerX = Math.max(0, e.clientX - rect.left - useSettings.getState().trackHeaderW)
+      const cx = pointerX + el.scrollLeft
       const tAtCursor = cx / s.zoom
-      const nz = Math.min(MAX_ZOOM, Math.max(4, s.zoom * Math.exp(-e.deltaY * 0.0015)))
+      const delta = Math.max(-40, Math.min(40, e.deltaY * modeScale))
+      // Chromium synthesizes Ctrl+wheel for a trackpad pinch: pinch-out has a
+      // negative delta and must increase the timeline scale; pinch-in reduces it.
+      // Cmd+wheel is a manual shortcut and follows the same wheel direction.
+      const exponent = e.ctrlKey && !e.metaKey ? -delta * 0.01 : -delta * 0.008
+      const nz = Math.min(MAX_ZOOM, Math.max(4, s.zoom * Math.exp(exponent)))
       // commit the new content width NOW: scrollLeft set against the stale
       // (narrower) width gets clamped by the browser, so zooming near the
       // end of a long timeline used to anchor somewhere left of the cursor
       flushSync(() => s.setZoom(nz))
-      el.scrollLeft = tAtCursor * nz - (e.clientX - rect.left - HEADER_W)
+      el.scrollLeft = tAtCursor * nz - pointerX
       updateView()
     }
-    el.addEventListener('wheel', onWheel, { passive: false })
+    // Capture on the whole timeline: macOS may target a pinch at the ruler,
+    // sticky track header or toolbar rather than the scrolling lane itself.
+    timeline.addEventListener('wheel', onWheel, { passive: false, capture: true })
     return () => {
-      el.removeEventListener('wheel', onWheel)
-      el.removeEventListener('scroll', updateView)
+      timeline.removeEventListener('wheel', onWheel, true)
+      el.removeEventListener('scroll', onTimelineScroll)
+      horizontal.removeEventListener('scroll', onHorizontalScroll)
       ro.disconnect()
       cancelAnimationFrame(raf)
     }
@@ -208,11 +280,28 @@ export function Timeline({ height }: { height: number }) {
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
+    const visibleW = Math.max(0, el.clientWidth - headerW)
+    setViewportW((prev) => Math.abs(prev - visibleW) < 0.5 ? prev : visibleW)
     setView({
       start: el.scrollLeft / zoom,
-      end: (el.scrollLeft + el.clientWidth - HEADER_W) / zoom
+      end: (el.scrollLeft + visibleW) / zoom
     })
-  }, [zoom])
+  }, [zoom, headerW])
+
+  // Selection and annotation focus are independent requests. In particular,
+  // closing an annotation must not reveal an old selected clip and yank the
+  // timeline viewport back to the beginning of the project.
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller || !selectedId || useEditor.getState().annotationId) return
+    return revealTimelineItem(scroller, selectedId, headerW)
+  }, [selectedId, headerW])
+
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller || !annotationId) return
+    return revealTimelineItem(scroller, annotationId, headerW)
+  }, [annotationId, headerW])
 
   useEffect(() => {
     if (!menu) return
@@ -227,16 +316,18 @@ export function Timeline({ height }: { height: number }) {
   const onAnyDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     if (e.defaultPrevented) return
     if (e.dataTransfer.types.includes('kadr/asset') || dragHasMedia(e)) {
+      clearMediaDropPreview()
       e.preventDefault()
       e.dataTransfer.dropEffect = 'copy'
     }
   }
   const onAnyDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    clearMediaDropPreview()
     if (e.defaultPrevented) return
     const sc = e.currentTarget
     const rect = sc.getBoundingClientRect()
     const time = Math.max(0,
-      (e.clientX - rect.left + sc.scrollLeft - HEADER_W) / useEditor.getState().zoom)
+      (e.clientX - rect.left + sc.scrollLeft - headerW) / useEditor.getState().zoom)
     const assetId = e.dataTransfer.getData('kadr/asset')
     if (assetId) {
       e.preventDefault()
@@ -251,10 +342,11 @@ export function Timeline({ height }: { height: number }) {
   }
 
   return (
-    <div className="timeline" style={{ height }}>
+    <div className="timeline" ref={timelineRef} style={{ height }}>
       <div className="tl-toolbar">
         <button onClick={() => useEditor.getState().addTrack('video')}>{t('addVideoTrack')}</button>
         <button onClick={() => useEditor.getState().addTrack('audio')}>{t('addAudioTrack')}</button>
+        <button onClick={() => useEditor.getState().addTrack('annotation')}>{t('addAnnotationTrack')}</button>
         <TranscribeRangeButton />
         <button
           title={t('capButtonHint')}
@@ -287,24 +379,38 @@ export function Timeline({ height }: { height: number }) {
           />
         </label>
       </div>
-      <div className="tl-scroll" ref={scrollRef} onDragOver={onAnyDragOver} onDrop={onAnyDrop}>
-        <div className="tl-content" style={{ width: HEADER_W + contentW }}>
-          <RulerRow contentW={contentW} />
-          {tracks.map((track) => (
-            <TrackRow
-              key={track.id}
-              track={track}
-              trackH={trackH}
-              contentW={contentW}
-              view={view}
-              onMenu={setMenu}
-            />
-          ))}
-          <RangeOverlay />
-          <KfMarker />
-          <Markers />
-          <Playhead />
+      <div className="tl-scroll-shell">
+        <div className="tl-scroll" ref={scrollRef} onDragOver={onAnyDragOver} onDrop={onAnyDrop}>
+          <div className="tl-content" style={{ width: headerW + contentW }}>
+            <RulerRow contentW={contentW} headerW={headerW} />
+            {tracks.map((track) => (
+              <TrackRow
+                key={track.id}
+                track={track}
+                trackH={trackH}
+                headerW={headerW}
+                contentW={contentW}
+                view={view}
+                onMenu={setMenu}
+              />
+            ))}
+            <RangeOverlay headerW={headerW} />
+            <KfMarker headerW={headerW} trackAreaH={trackAreaH} />
+            <Markers headerW={headerW} />
+            <Playhead headerW={headerW} trackAreaH={trackAreaH} />
+          </div>
         </div>
+        <div className="tl-track-header-underlay" style={{ width: headerW }} aria-hidden="true" />
+        <div
+          className="tl-horizontal-scroll"
+          ref={horizontalScrollRef}
+          style={{ left: headerW }}
+          aria-hidden="true"
+        >
+          <div className="tl-horizontal-scroll-content" style={{ width: contentW }} />
+        </div>
+        <div className="tl-scrollbar-corner" aria-hidden="true" />
+        <TrackHeaderResizer width={headerW} />
       </div>
       {menu && <TrackMenu menu={menu} onClose={() => setMenu(null)} />}
     </div>
@@ -314,6 +420,28 @@ export function Timeline({ height }: { height: number }) {
 function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) {
   const t = useT()
   const selCount = useEditor((s) => s.selection.length)
+  const voiceSettings = useEditor((s) => {
+    if (!menu.clipId) return null
+    return findClip(s.project, menu.clipId)?.clip.voiceover?.settings ?? null
+  })
+  const [voiceStatus, setVoiceStatus] = useState<VoiceoverStatus | null>(null)
+  useEffect(() => {
+    let current = true
+    setVoiceStatus(null)
+    if (voiceSettings) {
+      void window.kadr.voiceoverStatus(voiceSettings).then((status) => {
+        if (current) setVoiceStatus(status)
+      }).catch(() => {
+        if (current) setVoiceStatus({
+          ready: false,
+          reason: 'Не удалось проверить TTS',
+          configPath: '~/.config/kadr/tts.json'
+        })
+      })
+    }
+    return () => { current = false }
+  }, [menu.clipId, voiceSettings?.modelPath, voiceSettings?.pythonPath,
+    voiceSettings?.vocabPath, voiceSettings?.voicesPath])
   const transCur = useEditor((s) => {
     if (menu.kind !== 'transition' || !menu.clipId) return null
     const f = findClip(s.project, menu.clipId)
@@ -412,7 +540,11 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
               onClose()
             }}
           >
-            {menu.trackKind === 'video' ? t('addVideoTrack') : t('addAudioTrack')}
+            {menu.trackKind === 'video'
+              ? t('addVideoTrack')
+              : menu.trackKind === 'audio'
+                ? t('addAudioTrack')
+                : t('addAnnotationTrack')}
           </button>
           <button
             className="danger"
@@ -449,6 +581,32 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
               </button>
             )
           )}
+          {(() => {
+            const f = findClip(useEditor.getState().project, menu.clipId!)
+            if (f?.track.kind !== 'audio' || !f.clip.voiceover) return null
+            const ready = voiceStatus?.ready === true
+            return (
+              <>
+                <button
+                  className="voice-menu-item"
+                  title={ready ? 'Создать новый дубль' : voiceStatus?.reason ??
+                    'Открыть переозвучку; первая проверка F5-TTS может занять несколько секунд'}
+                  onClick={() => {
+                    useVoiceoverUi.getState().open(menu.clipId!)
+                    onClose()
+                  }}
+                >
+                  <span className="ctx-voice-mark">{voiceStatus ? '●' : '◌'}</span>{' '}
+                  {voiceStatus ? 'Переозвучить…' : 'Проверяю F5-TTS…'}
+                </button>
+                {voiceStatus && !ready && (
+                  <div className="ctx-voice-disabled-note">
+                    {voiceStatus.reason}. Откройте переозвучку, чтобы установить F5-TTS.
+                  </div>
+                )}
+              </>
+            )
+          })()}
           <button
             onClick={() => {
               const st = useEditor.getState()
@@ -516,7 +674,53 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
   )
 }
 
-function RulerRow({ contentW }: { contentW: number }) {
+function TrackHeaderResizer({ width }: { width: number }) {
+  const t = useT()
+  const drag = useRef<{ startX: number; startWidth: number } | null>(null)
+  useEffect(() => () => document.body.classList.remove('track-header-resizing'), [])
+  const stop = () => {
+    drag.current = null
+    document.body.classList.remove('track-header-resizing')
+  }
+  return (
+    <div
+      className="track-header-resizer"
+      style={{ left: width - 5 }}
+      role="separator"
+      aria-label={t('trackHeaderResize')}
+      aria-orientation="vertical"
+      aria-valuemin={TRACK_HEADER_MIN}
+      aria-valuemax={TRACK_HEADER_MAX}
+      aria-valuenow={width}
+      tabIndex={0}
+      title={t('trackHeaderResizeHint')}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return
+        e.preventDefault()
+        e.stopPropagation()
+        e.currentTarget.setPointerCapture(e.pointerId)
+        drag.current = { startX: e.clientX, startWidth: width }
+        document.body.classList.add('track-header-resizing')
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current
+        if (d) useSettings.getState().setTrackHeaderW(d.startWidth + e.clientX - d.startX)
+      }}
+      onPointerUp={stop}
+      onPointerCancel={stop}
+      onLostPointerCapture={stop}
+      onDoubleClick={() => useSettings.getState().setTrackHeaderW(TRACK_HEADER_DEFAULT)}
+      onKeyDown={(e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+        e.preventDefault()
+        const step = e.shiftKey ? 20 : 5
+        useSettings.getState().setTrackHeaderW(width + (e.key === 'ArrowRight' ? step : -step))
+      }}
+    />
+  )
+}
+
+function RulerRow({ contentW, headerW }: { contentW: number; headerW: number }) {
   const zoom = useEditor((s) => s.zoom)
   const step = niceStep(zoom)
   const ticks = useMemo(() => {
@@ -526,41 +730,144 @@ function RulerRow({ contentW }: { contentW: number }) {
   }, [step, zoom, contentW])
 
   return (
-    <div className="tl-row" style={{ height: RULER_H }}>
-      <div className="tl-head" style={{ width: HEADER_W, height: RULER_H }} />
+    <div className="tl-row tl-ruler-row" style={{ height: RULER_H }}>
+      <div className="tl-head" style={{ width: headerW, height: RULER_H }} />
       <div
         className="ruler"
         style={{ width: contentW, backgroundSize: `${step * zoom}px 100%` }}
-        onPointerDown={(e) => startScrubOrRange(e, e.currentTarget)}
       >
-        {ticks.map((tt) => (
-          <span key={tt} style={{ left: tt * zoom }}>{tickLabel(tt)}</span>
-        ))}
+        <div
+          className="ruler-scrub-area"
+          onPointerDown={(e) => startScrubOrRange(e, e.currentTarget.parentElement!)}
+        >
+          {ticks.map((tt) => (
+            <span key={tt} style={{ left: tt * zoom }}>{tickLabel(tt)}</span>
+          ))}
+        </div>
+        <ChapterBand />
+        <RulerCursors />
       </div>
     </div>
   )
 }
 
-function Playhead() {
-  const playhead = useEditor((s) => s.playhead)
+function ChapterBand() {
+  const t = useT()
+  const chapters = useEditor((s) => s.project.chapters ?? [])
   const zoom = useEditor((s) => s.zoom)
-  return <div className="playhead" style={{ left: HEADER_W + playhead * zoom }} />
+
+  const timeAt = (lane: HTMLElement, clientX: number) => {
+    const rect = lane.getBoundingClientRect()
+    return Math.max(0, (clientX - rect.left) / useEditor.getState().zoom)
+  }
+
+  const startCreate = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || e.target !== e.currentTarget) return
+    e.preventDefault()
+    e.stopPropagation()
+    const lane = e.currentTarget
+    const st = useEditor.getState()
+    const points = [
+      ...snapPoints(st.project, '', st.playhead),
+      ...(st.project.chapters ?? []).flatMap((chapter) => [chapter.start, chapter.end])
+    ]
+    const anchor = snapTime(timeAt(lane, e.clientX), points, st.zoom)
+    let current = anchor
+    windowDrag(e, (_dx, ev) => {
+      const s = useEditor.getState()
+      current = snapTime(timeAt(lane, ev.clientX), points, s.zoom)
+      s.setRange({ start: Math.min(anchor, current), end: Math.max(anchor, current) })
+    }, () => {
+      const s = useEditor.getState()
+      s.setRange(null)
+      if (Math.abs(current - anchor) < 0.05) return
+      const fallback = `${t('chapterDefault')} ${(s.project.chapters?.length ?? 0) + 1}`
+      const title = window.prompt(t('chapterNamePrompt'), fallback)
+      if (title === null) return
+      s.addChapter(title || fallback, Math.min(anchor, current), Math.max(anchor, current))
+    })
+  }
+
+  const startEdgeDrag = (chapter: Chapter, edge: 'start' | 'end') =>
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const lane = e.currentTarget.closest('.chapter-band') as HTMLElement
+      const st = useEditor.getState()
+      const points = [
+        ...snapPoints(st.project, '', st.playhead),
+        ...(st.project.chapters ?? [])
+          .filter((item) => item.id !== chapter.id)
+          .flatMap((item) => [item.start, item.end])
+      ]
+      let started = false
+      windowDrag(e, (_dx, ev) => {
+        const s = useEditor.getState()
+        const current = s.project.chapters?.find((item) => item.id === chapter.id)
+        if (!current) return
+        if (!started) {
+          s.pushHistory('hChapter')
+          started = true
+        }
+        const raw = snapTime(timeAt(lane, ev.clientX), points, s.zoom)
+        const value = edge === 'start'
+          ? Math.min(raw, current.end - 0.05)
+          : Math.max(raw, current.start + 0.05)
+        s.updateChapter(chapter.id, { [edge]: Math.max(0, value) })
+      })
+    }
+
+  const rename = (chapter: Chapter) => {
+    const title = window.prompt(t('chapterNamePrompt'), chapter.title)
+    if (title === null || !title.trim() || title.trim() === chapter.title) return
+    const s = useEditor.getState()
+    s.pushHistory('hChapter')
+    s.updateChapter(chapter.id, { title })
+  }
+  return (
+    <div className="chapter-band" title={t('chapterBandHint')} onPointerDown={startCreate}>
+      {chapters.map((chapter) => (
+        <div
+          key={chapter.id}
+          className="timeline-chapter"
+          style={{ left: chapter.start * zoom, width: Math.max(2, (chapter.end - chapter.start) * zoom) }}
+          title={`${chapter.title} · ${tickLabel(chapter.start)}–${tickLabel(chapter.end)}`}
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={() => rename(chapter)}
+        >
+          <div className="chapter-marker start" onPointerDown={startEdgeDrag(chapter, 'start')} />
+          <span>{chapter.title}</span>
+          <button
+            className="chapter-delete"
+            title={t('chapterDelete')}
+            aria-label={t('chapterDelete')}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation()
+              useEditor.getState().deleteChapter(chapter.id)
+            }}
+          >×</button>
+          <div className="chapter-marker end" onPointerDown={startEdgeDrag(chapter, 'end')} />
+        </div>
+      ))}
+    </div>
+  )
 }
 
 /** Track-independent user markers: M adds one at the playhead, the flag
     drags along the timeline (snapping), right-click removes. */
-function Markers() {
+function Markers({ headerW }: { headerW: number }) {
   const markers = useEditor((s) => s.project.markers)
   const zoom = useEditor((s) => s.zoom)
   const t = useT()
   if (!markers?.length) return null
   return (
     <>
-      {markers.map((m) => (
+      {markers.map((marker) => (
         <div
-          key={m.id}
+          key={marker.id}
           className="tl-marker"
-          style={{ left: HEADER_W + m.time * zoom }}
+          style={{ left: headerW + marker.time * zoom }}
           onPointerDown={(e) => {
             if (e.button !== 0) return
             e.stopPropagation()
@@ -568,38 +875,69 @@ function Markers() {
             st.pushHistory('hMarkerMove')
             const points = snapPoints(st.project, '', st.playhead)
             const startX = e.clientX
-            const t0 = m.time
+            const initialTime = marker.time
             windowDrag(e, (_dx, ev) => {
               const s = useEditor.getState()
-              s.moveMarker(m.id, snapTime(t0 + (ev.clientX - startX) / s.zoom, points, s.zoom))
+              s.moveMarker(
+                marker.id,
+                snapTime(initialTime + (ev.clientX - startX) / s.zoom, points, s.zoom)
+              )
             })
           }}
           onContextMenu={(e) => {
             e.preventDefault()
             e.stopPropagation()
-            useEditor.getState().removeMarker(m.id)
+            useEditor.getState().removeMarker(marker.id)
           }}
         >
-          <span className="tl-marker-flag" title={t('markerTip')}>{m.label}</span>
+          <span className="tl-marker-flag" title={t('markerTip')}>{marker.label}</span>
         </div>
       ))}
     </>
   )
 }
 
+function RulerCursors() {
+  const playhead = useEditor((s) => s.playhead)
+  const kfMarker = useEditor((s) => s.kfMarker)
+  const zoom = useEditor((s) => s.zoom)
+  return (
+    <>
+      <div className="ruler-playhead" style={{ left: playhead * zoom }} />
+      {kfMarker !== null && (
+        <div className="ruler-kf-marker" style={{ left: kfMarker * zoom }}>
+          <div className="ruler-kf-diamond" />
+        </div>
+      )}
+    </>
+  )
+}
+
+function Playhead({ headerW, trackAreaH }: { headerW: number; trackAreaH: number }) {
+  const playhead = useEditor((s) => s.playhead)
+  const zoom = useEditor((s) => s.zoom)
+  return (
+    <div
+      className="playhead"
+      style={{ left: headerW + playhead * zoom, height: trackAreaH }}
+    />
+  )
+}
+
 /** Yellow marker mirroring a keyframe being dragged in a mini-timeline. */
-function KfMarker() {
+function KfMarker({ headerW, trackAreaH }: { headerW: number; trackAreaH: number }) {
   const kfMarker = useEditor((s) => s.kfMarker)
   const zoom = useEditor((s) => s.zoom)
   if (kfMarker === null) return null
   return (
-    <div className="kf-marker" style={{ left: HEADER_W + kfMarker * zoom }}>
-      <div className="kf-marker-diamond" />
-    </div>
+    <div
+      className="kf-marker"
+      style={{ left: headerW + kfMarker * zoom, height: trackAreaH }}
+    />
   )
 }
 
-function RangeOverlay() {
+function RangeOverlay({ headerW }: { headerW: number }) {
   const range = useEditor((s) => s.range)
   const zoom = useEditor((s) => s.zoom)
   if (!range) return null
@@ -616,7 +954,7 @@ function RangeOverlay() {
       const r = s.range
       if (!r) return
       const time = snapTime(
-        Math.max(0, (ev.clientX - contentLeft - HEADER_W) / s.zoom),
+        Math.max(0, (ev.clientX - contentLeft - headerW) / s.zoom),
         points,
         s.zoom
       )
@@ -629,7 +967,7 @@ function RangeOverlay() {
   return (
     <div
       className="range-overlay"
-      style={{ left: HEADER_W + range.start * zoom, width: (range.end - range.start) * zoom }}
+      style={{ left: headerW + range.start * zoom, width: (range.end - range.start) * zoom }}
     >
       <div className="range-edge left" onPointerDown={dragEdge('start')} />
       <div className="range-edge right" onPointerDown={dragEdge('end')} />
@@ -650,10 +988,32 @@ interface ViewWindow {
   end: number
 }
 
+function revealTimelineItem(
+  scroller: HTMLDivElement,
+  focusedId: string,
+  headerW: number
+): () => void {
+  const raf = requestAnimationFrame(() => {
+    const item = scroller.querySelector<HTMLElement>(
+      `[data-clip-id="${CSS.escape(focusedId)}"], [data-annotation-id="${CSS.escape(focusedId)}"]`
+    )
+    if (!item) return
+    const viewport = scroller.getBoundingClientRect()
+    const bounds = item.getBoundingClientRect()
+    const topEdge = viewport.top + RULER_H
+    const leftEdge = viewport.left + headerW
+    if (bounds.top < topEdge) scroller.scrollTop -= topEdge - bounds.top + 6
+    else if (bounds.bottom > viewport.bottom) scroller.scrollTop += bounds.bottom - viewport.bottom + 6
+    if (bounds.left < leftEdge) scroller.scrollLeft -= leftEdge - bounds.left + 12
+    else if (bounds.right > viewport.right) scroller.scrollLeft += bounds.right - viewport.right + 12
+  })
+  return () => cancelAnimationFrame(raf)
+}
+
 // groups a burst of wheel notches over one gain slider into a single undo entry
 const gainWheelMark = { id: '', ts: 0 }
 
-// Ctrl-drag speed range and the round multipliers the drag snaps to.
+// Primary-modifier drag speed range and the round multipliers it snaps to.
 // Preview playback is clamped to Chromium's 0.0625–16× element range and
 // relies on resync seeks beyond it; export is exact at any speed.
 const SPEED_MIN = 0.02
@@ -664,10 +1024,11 @@ const SPEED_SNAPS = [
 ]
 
 function TrackRow({
-  track, trackH, contentW, view, onMenu
+  track, trackH, headerW, contentW, view, onMenu
 }: {
   track: Track
   trackH: number
+  headerW: number
   contentW: number
   view: ViewWindow
   onMenu: (m: MenuState) => void
@@ -675,13 +1036,26 @@ function TrackRow({
   const t = useT()
   const reorder = useRef<{ pushed: boolean } | null>(null)
   const gainRef = useRef<HTMLInputElement>(null)
+  const renameCancelled = useRef(false)
+  const [renaming, setRenaming] = useState(false)
+  const [nameDraft, setNameDraft] = useState(track.name)
+  const activeAnnotationTrackId = useEditor((s) => s.activeAnnotationTrackId)
+  const dropGhost = useMediaDropUi((s) => s.ghosts.find((ghost) => ghost.trackId === track.id))
+  // Paint longer clips first so a short clip remains both visible and clickable
+  // wherever it overlaps a long recording on the same lane.
+  const orderedClips = useMemo(
+    () => [...track.clips].sort((a, b) => b.duration - a.duration),
+    [track.clips]
+  )
 
-  // wheel over the volume/opacity slider: precise ±1% per notch (a drag can't
-  // hit exact values); consecutive notches merge into one history entry
+  // Option+wheel over the volume/opacity slider: precise ±1%. A plain
+  // two-finger gesture must keep scrolling the timeline on macOS.
   useEffect(() => {
+    if (track.kind === 'annotation') return
     const el = gainRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
+      if (!e.altKey) return
       e.preventDefault()
       e.stopPropagation() // the timeline zoom listener must not see this
       const st = useEditor.getState()
@@ -700,6 +1074,8 @@ function TrackRow({
   }, [track.id, trackH < 46]) // the slider row mounts only when tall enough
 
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (track.kind === 'annotation') return
+    clearMediaDropPreview()
     const rect = e.currentTarget.getBoundingClientRect()
     const time = Math.max(0, (e.clientX - rect.left) / useEditor.getState().zoom)
     const assetId = e.dataTransfer.getData('kadr/asset')
@@ -720,7 +1096,12 @@ function TrackRow({
 
   const onLaneDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return
-    if (e.ctrlKey) {
+    if (track.kind === 'annotation') {
+      useEditor.getState().setActiveAnnotationTrack(track.id)
+      startScrubOrRange(e, e.currentTarget)
+      return
+    }
+    if (hasPrimaryModifier(e)) {
       const rect = e.currentTarget.getBoundingClientRect()
       const time = (e.clientX - rect.left) / useEditor.getState().zoom
       useEditor.getState().closeGapAt(track.id, time)
@@ -759,22 +1140,93 @@ function TrackRow({
     reorder.current = null
   }
 
+  const beginRename = () => {
+    renameCancelled.current = false
+    setNameDraft(track.name)
+    setRenaming(true)
+  }
+  const finishRename = () => {
+    setRenaming(false)
+    if (renameCancelled.current) {
+      renameCancelled.current = false
+      setNameDraft(track.name)
+      return
+    }
+    const name = nameDraft.trim()
+    if (!name || name === track.name) {
+      setNameDraft(track.name)
+      return
+    }
+    const state = useEditor.getState()
+    state.pushHistory('hTrack')
+    state.updateTrack(track.id, { name })
+  }
+
   return (
-    <div className="tl-row" style={{ height: trackH }}>
+    <div className={dropGhost ? 'tl-row media-drop-target' : 'tl-row'} style={{ height: trackH }}>
       <div
-        className={`tl-head track-head ${track.kind}`}
-        style={{ width: HEADER_W, height: trackH }}
+        className={`tl-head track-head ${track.kind}${
+          track.kind === 'annotation' && activeAnnotationTrackId === track.id
+            ? ' active-annotation-track'
+            : ''
+        }`}
+        style={{ width: headerW, height: trackH }}
         data-trackhead={track.id}
         onPointerDown={onHeadDown}
         onPointerMove={onHeadMove}
         onPointerUp={onHeadUp}
+        onClick={() => {
+          if (track.kind === 'annotation') useEditor.getState().setActiveAnnotationTrack(track.id)
+        }}
         onContextMenu={(e) => {
           e.preventDefault()
           onMenu({ x: e.clientX, y: e.clientY, kind: 'track', trackId: track.id, trackKind: track.kind })
         }}
       >
         <div className="track-head-row">
-          <span className="track-name">{track.name}</span>
+          {renaming ? (
+            <input
+              className="track-name-input"
+              value={nameDraft}
+              autoFocus
+              aria-label={t('renameTrack')}
+              onFocus={(e) => e.currentTarget.select()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={finishRename}
+              onKeyDown={(e) => {
+                e.stopPropagation()
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  e.currentTarget.blur()
+                } else if (e.key === 'Escape') {
+                  e.preventDefault()
+                  renameCancelled.current = true
+                  e.currentTarget.blur()
+                }
+              }}
+            />
+          ) : (
+            <span
+              className="track-name"
+              title={`${track.name} · ${t('renameTrackHint')}`}
+              role="button"
+              tabIndex={0}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                beginRename()
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return
+                e.preventDefault()
+                e.stopPropagation()
+                beginRename()
+              }}
+            >
+              {track.name}
+            </span>
+          )}
           {track.kind === 'video' && (
             <button
               className={track.motion ? 'toggled-on' : ''}
@@ -784,13 +1236,17 @@ function TrackRow({
               ✥
             </button>
           )}
-          <button
-            className={track.muted ? 'toggled' : ''}
-            title={t('mute')}
-            onClick={() => useEditor.getState().updateTrack(track.id, { muted: !track.muted })}
-          >
-            {track.muted ? '🔇' : '🔊'}
-          </button>
+          {track.kind === 'annotation' ? (
+            <span className="annotation-track-mark" aria-hidden="true">◆</span>
+          ) : (
+            <button
+              className={track.muted ? 'toggled' : ''}
+              title={t('mute')}
+              onClick={() => useEditor.getState().updateTrack(track.id, { muted: !track.muted })}
+            >
+              {track.muted ? '🔇' : '🔊'}
+            </button>
+          )}
           <button
             className={track.locked ? 'toggled' : ''}
             title={t('lock')}
@@ -799,7 +1255,7 @@ function TrackRow({
             {track.locked ? '🔒' : '🔓'}
           </button>
         </div>
-        {trackH >= 46 && (
+        {track.kind !== 'annotation' && trackH >= 46 && (
           <div className="track-gain-row">
             <input
               ref={gainRef}
@@ -809,7 +1265,7 @@ function TrackRow({
               max={track.kind === 'audio' ? 2 : 1}
               step={0.01}
               value={track.gain}
-              title={track.kind === 'audio' ? t('volume') : t('opacity')}
+              title={`${track.kind === 'audio' ? t('volume') : t('opacity')} · ⌥ + scroll: ±1%`}
               onPointerDown={(e) => {
                 e.stopPropagation()
                 useEditor.getState().pushHistory('hEdit')
@@ -823,23 +1279,167 @@ function TrackRow({
         )}
       </div>
       <div
-        className={`lane ${track.kind}`}
+        className={`lane ${track.kind}${dropGhost ? ' media-drop-target' : ''}`}
         data-lane={track.id}
         style={{ width: contentW, height: trackH }}
         onDragOver={(e) => {
+          if (track.kind === 'annotation') return
           if (e.dataTransfer.types.includes('kadr/asset') || dragHasMedia(e)) {
             e.preventDefault()
             e.dataTransfer.dropEffect = 'copy'
+            const rect = e.currentTarget.getBoundingClientRect()
+            const state = useEditor.getState()
+            const start = Math.max(0, (e.clientX - rect.left) / state.zoom)
+            const assetId = getInternalMediaDragAssetId() || e.dataTransfer.getData('kadr/asset')
+            const asset = assetId ? state.project.assets.find((item) => item.id === assetId) : null
+
+            if (!asset) {
+              showMediaDropPreview([{
+                trackId: track.id,
+                start,
+                duration: Math.max(1, 96 / state.zoom),
+                label: t('dropImportPreview'),
+                kind: 'external',
+                blocked: track.locked
+              }])
+              return
+            }
+
+            const wantKind = asset.kind === 'audio' ? 'audio' : 'video'
+            const primaryTrack = track.kind === wantKind && !track.locked
+              ? track
+              : state.project.tracks.find((candidate) => candidate.kind === wantKind && !candidate.locked)
+            const duration = asset.kind === 'image' ? 5 : asset.duration
+            if (!primaryTrack) {
+              showMediaDropPreview([{
+                trackId: track.id,
+                start,
+                duration,
+                label: asset.name,
+                kind: wantKind,
+                blocked: true
+              }])
+              return
+            }
+
+            const ghosts: MediaDropGhost[] = [{
+              trackId: primaryTrack.id,
+              start,
+              duration,
+              label: asset.name,
+              kind: wantKind
+            }]
+            if (asset.kind === 'video' && asset.hasAudio) {
+              const audioTrack = state.project.tracks.find(
+                (candidate) => candidate.kind === 'audio' && !candidate.locked
+              )
+              if (audioTrack) ghosts.push({
+                trackId: audioTrack.id,
+                start,
+                duration,
+                label: `🔗 ${asset.name}`,
+                kind: 'audio',
+                secondary: true
+              })
+            }
+            showMediaDropPreview(ghosts)
           }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) clearMediaDropPreview()
         }}
         onDrop={onDrop}
         onPointerDown={onLaneDown}
       >
-        {track.clips.map((c) => (
-          <ClipView key={c.id} clip={c} track={track} laneHeight={trackH} view={view} onMenu={onMenu} />
-        ))}
-        <TransitionZones track={track} onMenu={onMenu} />
+        {dropGhost && (
+          <div
+            className={[
+              'media-drop-preview', dropGhost.kind,
+              dropGhost.secondary ? 'secondary' : '',
+              dropGhost.blocked ? 'blocked' : ''
+            ].filter(Boolean).join(' ')}
+            style={{
+              left: dropGhost.start * useEditor.getState().zoom,
+              width: Math.max(24, dropGhost.duration * useEditor.getState().zoom)
+            }}
+          >
+            <span>{dropGhost.blocked ? '⛔ ' : ''}{dropGhost.label}</span>
+            <small>{tickLabel(dropGhost.start)}</small>
+          </div>
+        )}
+        {track.kind === 'annotation'
+          ? (track.annotations ?? []).map((annotation) => (
+              <AnnotationView key={annotation.id} annotation={annotation} track={track} />
+            ))
+          : orderedClips.map((c) => (
+              <ClipView key={c.id} clip={c} track={track} laneHeight={trackH} view={view} onMenu={onMenu} />
+            ))}
+        {track.kind !== 'annotation' && <TransitionZones track={track} onMenu={onMenu} />}
       </div>
+    </div>
+  )
+}
+
+function AnnotationView({ annotation, track }: { annotation: AnnotationTask; track: Track }) {
+  const t = useT()
+  const zoom = useEditor((s) => s.zoom)
+  const open = useEditor((s) => s.annotationId === annotation.id)
+  const title = annotation.text.split(/\r?\n/, 1)[0].trim()
+
+  const startMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (track.locked || e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const original = annotation.start
+    let moved = false
+    windowDrag(e, (dx) => {
+      if (!moved && Math.abs(dx) < 2) return
+      if (!moved) useEditor.getState().pushHistory('hAnnotationMove')
+      moved = true
+      useEditor.getState().moveAnnotation(annotation.id, original + dx / useEditor.getState().zoom)
+    }, () => {
+      useEditor.getState().setActiveAnnotationTrack(track.id)
+    })
+  }
+
+  const startResize = (edge: 'start' | 'end') => (e: React.PointerEvent<HTMLDivElement>) => {
+    if (track.locked || e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const original = edge === 'start' ? annotation.start : annotation.start + annotation.duration
+    let moved = false
+    windowDrag(e, (dx) => {
+      if (!moved && Math.abs(dx) < 2) return
+      if (!moved) useEditor.getState().pushHistory('hAnnotationResize')
+      moved = true
+      useEditor.getState().resizeAnnotation(
+        annotation.id,
+        edge,
+        original + dx / useEditor.getState().zoom
+      )
+    })
+  }
+
+  return (
+    <div
+      className={`annotation-clip status-${annotation.status}${open ? ' selected' : ''}`}
+      data-annotation-id={annotation.id}
+      style={{ left: annotation.start * zoom, width: Math.max(12, annotation.duration * zoom) }}
+      title={`${title ? `${title}\n` : ''}${t('annotationTimelineHint')}`}
+      onPointerDown={startMove}
+      onDoubleClick={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        const st = useEditor.getState()
+        st.setActiveAnnotationTrack(track.id)
+        st.setPlayhead(annotation.start)
+        st.setAnnotation(annotation.id)
+      }}
+    >
+      <div className="annotation-resize left" onPointerDown={startResize('start')} />
+      <span className="annotation-clip-status" />
+      <span className="annotation-clip-label">{title || '…'}</span>
+      <div className="annotation-resize right" onPointerDown={startResize('end')} />
     </div>
   )
 }
@@ -957,7 +1557,7 @@ function ClipView({
   const drag = useRef<DragState | null>(null)
   const waveRef = useRef<HTMLCanvasElement>(null)
   const [levelDrag, setLevelDrag] = useState<number | null>(null)
-  // live ×N readout during a Ctrl speed drag; highlighted when snapped
+  // live ×N readout during a modifier speed drag; highlighted when snapped
   const [speedBadge, setSpeedBadge] =
     useState<{ x: number; y: number; speed: number; snapped: boolean } | null>(null)
 
@@ -969,6 +1569,15 @@ function ClipView({
       ? Math.max(0.05, asset.duration - clip.inPoint) / speed
       : Infinity
   const loops = isFinite(natural) && clip.duration > natural + 0.01
+
+  const filmstrip = useTimelineThumbnails({
+    clip,
+    asset,
+    zoom,
+    viewStart: view.start,
+    viewEnd: view.end,
+    enabled: track.kind === 'video' && !clip.text
+  })
 
   // visible slice in clip-local px — waveform drawn 1:1 with device pixels
   const margin = 64
@@ -1019,8 +1628,8 @@ function ClipView({
     e.stopPropagation()
     const st = useEditor.getState()
     const linkedIds = withLinked(st.project, [clip.id])
-    if (e.ctrlKey) {
-      // Ctrl+drag near EITHER edge = speed (Vegas-style time stretch) —
+    if (hasPrimaryModifier(e)) {
+      // Primary-modifier drag near EITHER edge = speed (Vegas-style time stretch) —
       // the same gesture as the extend handles, but forgiving about where
       // exactly the clip is grabbed
       const rect = e.currentTarget.getBoundingClientRect()
@@ -1179,8 +1788,8 @@ function ClipView({
 
   // ---------------------------------------------------- extend/speed drag
   // Works from BOTH clip ends. Right: the start stays put (resize = loop-
-  // extend, Ctrl = speed). Left: the RIGHT edge stays anchored (resize =
-  // trim-in, Ctrl = speed with the start moving instead).
+  // extend, primary modifier = speed). Left: the RIGHT edge stays anchored
+  // (resize = trim-in, primary modifier = speed with the start moving).
   const startExtendDrag = (edge: 'left' | 'right') =>
     (e: React.PointerEvent<HTMLDivElement>) => {
     if (track.locked || e.button !== 0) return
@@ -1188,7 +1797,7 @@ function ClipView({
     e.preventDefault()
     const st = useEditor.getState()
     if (!selected) st.select([clip.id])
-    const speedMode = e.ctrlKey && !!asset && asset.kind !== 'image'
+    const speedMode = hasPrimaryModifier(e) && !!asset && asset.kind !== 'image'
     const leftTrim = edge === 'left' && !speedMode
     st.pushHistory(speedMode ? 'hSpeed' : leftTrim ? 'hTrim' : 'hResize')
     const origStart = clip.start
@@ -1303,6 +1912,7 @@ function ClipView({
   return (
     <div
       className={cls}
+      data-clip-id={clip.id}
       style={{ left: clip.start * zoom, width: Math.max(4, w) }}
       onPointerDown={onPointerDown}
       onDoubleClick={(e) => {
@@ -1330,6 +1940,24 @@ function ClipView({
           alt=""
           draggable={false}
         />
+      )}
+      {track.kind === 'video' && !isText && filmstrip.length > 0 && (
+        <div className="clip-filmstrip" aria-hidden="true">
+          {filmstrip.map((frame) => (
+            <img
+              key={frame.key}
+              className="clip-filmstrip-frame"
+              src={frame.url}
+              alt=""
+              draggable={false}
+              decoding="async"
+              style={{
+                left: frame.localTime * zoom,
+                width: Math.max(1, frame.duration * zoom)
+              }}
+            />
+          ))}
+        </div>
       )}
       {track.kind === 'audio' && visW > 0 && (
         <canvas ref={waveRef} className="clip-wave" style={{ left: vis0, width: visW }} />
@@ -1402,12 +2030,12 @@ function ClipView({
           />
           <div
             className="extend-handle"
-            title="Drag: resize/loop · Ctrl: speed"
+            title={t('clipResizeLoopHint')}
             onPointerDown={startExtendDrag('right')}
           />
           <div
             className="extend-handle left"
-            title="Drag: resize · Ctrl: speed"
+            title={t('clipResizeHint')}
             onPointerDown={startExtendDrag('left')}
           />
         </>

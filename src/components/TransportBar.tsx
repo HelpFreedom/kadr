@@ -15,7 +15,13 @@ export function formatTime(t: number, fps: number): string {
   return `${sign}${pad(h)}:${pad(m)}:${pad(s)}.${pad(f)}`
 }
 
-export function TransportBar() {
+export function TransportBar({
+  previewDetached = false,
+  onPreviewToggle
+}: {
+  previewDetached?: boolean
+  onPreviewToggle?: () => void
+}) {
   const t = useT()
   const [shot, setShot] = useState<'idle' | 'busy' | 'ok' | 'fail'>('idle')
   const playing = useEditor((s) => s.playing)
@@ -24,6 +30,7 @@ export function TransportBar() {
   const duration = useEditor((s) => projectDuration(s.project))
   const undoLabel = useEditor((s) => s.past[s.past.length - 1]?.label)
   const redoLabel = useEditor((s) => s.future[0]?.label)
+  const canCut = useEditor((s) => s.selection.length > 0 || s.range !== null)
   const st = useEditor.getState
 
   return (
@@ -56,8 +63,20 @@ export function TransportBar() {
       </button>
       <span className="sep" />
       <button title={t('split')} onClick={() => st().splitAtPlayhead()}>✂</button>
+      <button
+        title={t('cut')}
+        disabled={!canCut}
+        onClick={() => {
+          const s = st()
+          if (s.selection.length) s.cutSelection()
+          else if (s.range) s.cutRange()
+        }}
+      >
+        ✂ X
+      </button>
       <button title={t('delete')} onClick={() => st().deleteSelection()}>🗑</button>
       <button title={t('addText')} onClick={() => st().insertTextClip(playhead)}>T+</button>
+      <button title={t('addAnnotation')} onClick={() => st().insertAnnotation(playhead)}>A+</button>
       <button
         title={shot === 'fail' ? t('snapshotFail') : t('snapshot')}
         disabled={shot === 'busy'}
@@ -82,6 +101,17 @@ export function TransportBar() {
           <span> / {Math.floor(duration * fps + 1e-6)}</span>
         </span>
       </span>
+      {onPreviewToggle && (
+        <button
+          className={`preview-window-toggle${previewDetached ? ' active' : ''}`}
+          title={t(previewDetached ? 'previewDockHint' : 'previewDetachHint')}
+          aria-label={t(previewDetached ? 'previewDockHint' : 'previewDetachHint')}
+          aria-pressed={previewDetached}
+          onClick={onPreviewToggle}
+        >
+          <span className="split-screen-icon" aria-hidden="true" />
+        </button>
+      )}
     </div>
   )
 }

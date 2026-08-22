@@ -1,9 +1,21 @@
 import { create } from 'zustand'
 import type {
-  Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec
+  Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec,
+  AnnotationTask, AnnotationStatus, Chapter, VoiceoverHistory
 } from '@shared/types'
 
 export const uid = () => Math.random().toString(36).slice(2, 10)
+const annotationUid = () => globalThis.crypto?.randomUUID?.() ?? uid()
+const chapterUid = () => globalThis.crypto?.randomUUID?.() ?? uid()
+
+export interface TimedVoiceoverInsert {
+  asset: MediaAsset
+  start: number
+  duration: number
+  speed: number
+  label: string
+  voiceover: VoiceoverHistory
+}
 
 export const defaultTextStyle = (): TextStyle => ({
   fontFamily: 'sans-serif',
@@ -56,7 +68,9 @@ export function newProject(): Project {
       { id: uid(), kind: 'video', name: 'V1', muted: false, locked: false, gain: 1, clips: [] },
       { id: uid(), kind: 'audio', name: 'A1', muted: false, locked: false, gain: 1, clips: [] }
     ],
-    assets: []
+    assets: [],
+    chapters: [],
+    markers: []
   }
 }
 
@@ -70,6 +84,17 @@ export function findClip(p: Project, clipId: string): { track: Track; clip: Clip
   for (const track of p.tracks) {
     const clip = track.clips.find((c) => c.id === clipId)
     if (clip) return { track, clip }
+  }
+  return null
+}
+
+export function findAnnotation(
+  p: Project,
+  annotationId: string
+): { track: Track; annotation: AnnotationTask } | null {
+  for (const track of p.tracks) {
+    const annotation = track.annotations?.find((item) => item.id === annotationId)
+    if (annotation) return { track, annotation }
   }
   return null
 }
@@ -97,6 +122,22 @@ export function sanitizeProject(p: Project): Project {
   if (!Number.isFinite(p.height) || p.height <= 0) p.height = 1080
   if (!Number.isFinite(p.fps) || p.fps <= 0) p.fps = 30
   p.assets ??= []
+  p.tracks ??= []
+  p.chapters = (p.chapters ?? [])
+    .filter((chapter): chapter is Chapter => !!chapter && typeof chapter === 'object')
+    .map((chapter) => {
+      const start = Number.isFinite(chapter.start) ? Math.max(0, chapter.start) : 0
+      const end = Number.isFinite(chapter.end) ? Math.max(start + 0.05, chapter.end) : start + 1
+      return {
+        id: typeof chapter.id === 'string' && chapter.id ? chapter.id : chapterUid(),
+        title: typeof chapter.title === 'string' && chapter.title.trim()
+          ? chapter.title.trim().slice(0, 160)
+          : 'Chapter',
+        start,
+        end
+      }
+    })
+    .sort((a, b) => a.start - b.start || a.end - b.end)
   p.markers = (p.markers ?? []).filter(
     (m) => m && typeof m.id === 'string' && Number.isFinite(m.time)
   )
@@ -106,6 +147,31 @@ export function sanitizeProject(p: Project): Project {
   }
   for (const track of p.tracks) {
     if (!Number.isFinite(track.gain)) track.gain = 1
+    track.clips ??= []
+    if (track.kind === 'annotation') {
+      track.annotations ??= []
+      track.annotations = track.annotations
+        .filter((item): item is AnnotationTask => !!item && typeof item === 'object')
+        .map((item) => {
+          const now = new Date().toISOString()
+          const status: AnnotationStatus =
+            item.status === 'in_progress' || item.status === 'done' ? item.status : 'new'
+          return {
+            id: typeof item.id === 'string' && item.id ? item.id : annotationUid(),
+            text: typeof item.text === 'string' ? item.text : '',
+            status,
+            start: Number.isFinite(item.start) ? Math.max(0, item.start) : 0,
+            duration: Number.isFinite(item.duration) ? Math.max(0.05, item.duration) : 4,
+            result: typeof item.result === 'string' ? item.result : undefined,
+            createdAt: typeof item.createdAt === 'string' ? item.createdAt : now,
+            updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : now,
+            completedAt: status === 'done'
+              ? (typeof item.completedAt === 'string' ? item.completedAt : now)
+              : undefined
+          }
+        })
+        .sort((a, b) => a.start - b.start)
+    }
     for (const c of track.clips) {
       for (const k of ['start', 'duration', 'inPoint'] as const)
         if (!Number.isFinite(c[k])) c[k] = 0
@@ -208,13 +274,24 @@ interface SettingsState {
   lang: 'ru' | 'en'
   /** uniform lane height for all tracks, px */
   trackH: number
+  /** width of the sticky track-controls column, px */
+  trackHeaderW: number
   setLang(l: 'ru' | 'en'): void
   setTrackH(h: number): void
+  setTrackHeaderW(w: number): void
 }
+
+export const TRACK_HEADER_MIN = 160
+export const TRACK_HEADER_MAX = 520
+export const TRACK_HEADER_DEFAULT = 240
 
 export const useSettings = create<SettingsState>((set) => ({
   lang: (localStorage.getItem('kadr.lang') as 'ru' | 'en') || 'ru',
   trackH: Math.min(140, Math.max(32, Number(localStorage.getItem('kadr.trackh')) || 56)),
+  trackHeaderW: Math.min(
+    TRACK_HEADER_MAX,
+    Math.max(TRACK_HEADER_MIN, Number(localStorage.getItem('kadr.trackHeaderW')) || TRACK_HEADER_DEFAULT)
+  ),
   setLang: (lang) => {
     localStorage.setItem('kadr.lang', lang)
     set({ lang })
@@ -223,6 +300,11 @@ export const useSettings = create<SettingsState>((set) => ({
     const trackH = Math.min(140, Math.max(32, h))
     localStorage.setItem('kadr.trackh', String(trackH))
     set({ trackH })
+  },
+  setTrackHeaderW: (w) => {
+    const trackHeaderW = Math.min(TRACK_HEADER_MAX, Math.max(TRACK_HEADER_MIN, Math.round(w)))
+    localStorage.setItem('kadr.trackHeaderW', String(trackHeaderW))
+    set({ trackHeaderW })
   }
 }))
 
@@ -391,6 +473,10 @@ interface EditorState {
   animClipId: string | null
   /** video track whose Track Motion editor is open */
   motionTrackId: string | null
+  /** annotation card currently open */
+  annotationId: string | null
+  /** destination for A+; falls back to the last available annotation track */
+  activeAnnotationTrackId: string | null
   /** absolute time of a keyframe being dragged in a mini-timeline,
       highlighted on the main timeline while the drag lasts */
   kfMarker: number | null
@@ -422,16 +508,37 @@ interface EditorState {
   moveTrack(trackId: string, toIndex: number): void
   updateTrack(trackId: string, patch: Partial<Track>): void
 
+  /** Add a named timeline section as one undoable edit. */
+  addChapter(title: string, start: number, end: number): string
+  /** Low-level chapter patch; callers doing a drag must push history once first. */
+  updateChapter(id: string, patch: Partial<Pick<Chapter, 'title' | 'start' | 'end'>>): boolean
+  deleteChapter(id: string): boolean
+  /** Replace the full chapter map as one undoable edit (used by MCP). */
+  replaceChapters(chapters: Chapter[]): void
+
+  /** Create a four-second task at/after the playhead and open its card. */
+  insertAnnotation(at: number): string
+  updateAnnotation(id: string, patch: Partial<Pick<AnnotationTask, 'text' | 'status' | 'result'>>): boolean
+  deleteAnnotation(id: string): boolean
+  moveAnnotation(id: string, start: number): void
+  resizeAnnotation(id: string, edge: 'start' | 'end', time: number): void
+  setAnnotation(id: string | null): void
+  setActiveAnnotationTrack(id: string | null): void
+
   insertClipFromAsset(assetId: string, trackId: string | null, at: number): void
   /** Place several assets back-to-back starting at `at` (one undo entry);
       audio assets go to an audio track regardless of the drop lane. */
   insertClipsFromAssets(assetIds: string[], trackId: string | null, at: number): void
+  /** Insert a generated SRT voiceover as one exact-timing audio track and one undo step. */
+  insertTimedVoiceovers(items: TimedVoiceoverInsert[], trackName: string): string[]
   insertTextClip(at: number): void
   /** Add a track-independent timeline marker (auto-numbered); returns id. */
   addMarker(time: number): string
   moveMarker(id: string, time: number): void
   removeMarker(id: string): void
   updateClip(clipId: string, patch: Partial<Clip>): void
+  /** Replace one clip with timeline-relative kept ranges, preserving gaps. */
+  splitClipIntoRanges(clipId: string, ranges: { start: number; end: number }[]): string[]
   /** Change speed/duration, rescaling keyframes and fades to stay on content.
       Optional `start` moves the clip too (a speed drag from the LEFT edge
       keeps the right edge anchored). */
@@ -451,12 +558,14 @@ interface EditorState {
   setClipStarts(entries: { id: string; start: number; trackId?: string }[]): void
   trimClip(clipId: string, edge: 'in' | 'out', time: number): void
   splitAtPlayhead(): void
-  deleteSelection(): void
-  /** Close the gap between clips around `time` on a track (Ctrl+click). */
+  deleteSelection(historyLabel?: string): void
+  /** Close the gap around `time` (primary-modifier click). */
   closeGapAt(trackId: string, time: number): void
   copySelection(): void
   copyRange(): void
-  deleteRange(): void
+  cutSelection(): void
+  cutRange(): void
+  deleteRange(historyLabel?: string): void
   pasteAtPlayhead(): void
 
   select(ids: string[]): void
@@ -486,6 +595,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   range: null,
   animClipId: null,
   motionTrackId: null,
+  annotationId: null,
+  activeAnnotationTrackId: null,
   kfMarker: null,
   clipboard: [],
   past: [],
@@ -494,7 +605,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   setProject: (project, path = null) =>
     set({
       project: sanitizeProject(project), projectPath: path, past: [], future: [],
-      selection: [], playhead: 0, playing: false, range: null
+      selection: [], playhead: 0, playing: false, range: null,
+      annotationId: null, activeAnnotationTrackId: null
     }),
   setProjectPath: (projectPath) => set({ projectPath }),
 
@@ -614,8 +726,18 @@ export const useEditor = create<EditorState>((set, get) => ({
     get().pushHistory('hTrack')
     set((s) => {
       const p = clone(s.project)
-      p.tracks.splice(kind === 'video' ? 0 : p.tracks.length, 0, makeTrack(p, kind))
-      return { project: p }
+      const track = makeTrack(p, kind)
+      const firstAudio = p.tracks.findIndex((t) => t.kind === 'audio')
+      const at = kind === 'video'
+        ? 0
+        : kind === 'annotation'
+          ? (firstAudio < 0 ? p.tracks.length : firstAudio)
+          : p.tracks.length
+      p.tracks.splice(at, 0, track)
+      return {
+        project: p,
+        activeAnnotationTrackId: kind === 'annotation' ? track.id : s.activeAnnotationTrackId
+      }
     })
   },
 
@@ -658,9 +780,13 @@ export const useEditor = create<EditorState>((set, get) => ({
     s.pushHistory('hTrack')
     set((st) => {
       const p = clone(st.project)
-      // video stacks above the clicked track, audio below it
-      p.tracks.splice(kind === 'video' ? idx : idx + 1, 0, makeTrack(p, kind))
-      return { project: p }
+      // video stacks above the clicked track; audio/annotation below it
+      const track = makeTrack(p, kind)
+      p.tracks.splice(kind === 'video' ? idx : idx + 1, 0, track)
+      return {
+        project: p,
+        activeAnnotationTrackId: kind === 'annotation' ? track.id : st.activeAnnotationTrackId
+      }
     })
   },
 
@@ -671,7 +797,16 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((st) => {
       const p = clone(st.project)
       p.tracks = p.tracks.filter((t) => t.id !== trackId)
-      return { project: p, selection: [] }
+      const openTrackId = st.annotationId
+        ? findAnnotation(st.project, st.annotationId)?.track.id
+        : undefined
+      return {
+        project: p,
+        selection: [],
+        annotationId: openTrackId === trackId ? null : st.annotationId,
+        activeAnnotationTrackId:
+          st.activeAnnotationTrackId === trackId ? null : st.activeAnnotationTrackId
+      }
     })
   },
 
@@ -692,6 +827,186 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (t) Object.assign(t, patch)
       return { project: p }
     }),
+
+  addChapter: (title, start, end) => {
+    const id = chapterUid()
+    get().pushHistory('hChapter')
+    set((s) => {
+      const p = clone(s.project)
+      const lo = Math.max(0, Math.min(start, end))
+      const hi = Math.max(lo + 0.05, Math.max(start, end))
+      p.chapters = [
+        ...(p.chapters ?? []),
+        { id, title: title.trim().slice(0, 160) || 'Chapter', start: lo, end: hi }
+      ].sort((a, b) => a.start - b.start || a.end - b.end)
+      return { project: p }
+    })
+    return id
+  },
+
+  updateChapter: (id, patch) => {
+    let changed = false
+    set((s) => {
+      const p = clone(s.project)
+      const chapter = p.chapters?.find((item) => item.id === id)
+      if (!chapter) return s
+      if (patch.title !== undefined) chapter.title = patch.title.trim().slice(0, 160) || chapter.title
+      if (patch.start !== undefined && Number.isFinite(patch.start)) chapter.start = Math.max(0, patch.start)
+      if (patch.end !== undefined && Number.isFinite(patch.end)) chapter.end = Math.max(0, patch.end)
+      if (chapter.end < chapter.start) [chapter.start, chapter.end] = [chapter.end, chapter.start]
+      chapter.end = Math.max(chapter.start + 0.05, chapter.end)
+      p.chapters!.sort((a, b) => a.start - b.start || a.end - b.end)
+      changed = true
+      return { project: p }
+    })
+    return changed
+  },
+
+  deleteChapter: (id) => {
+    if (!get().project.chapters?.some((chapter) => chapter.id === id)) return false
+    get().pushHistory('hChapterDelete')
+    set((s) => ({
+      project: {
+        ...s.project,
+        chapters: (s.project.chapters ?? []).filter((chapter) => chapter.id !== id)
+      }
+    }))
+    return true
+  },
+
+  replaceChapters: (chapters) => {
+    get().pushHistory('hChapter')
+    set((s) => {
+      const p = clone(s.project)
+      p.chapters = chapters.map((chapter) => ({ ...chapter }))
+      sanitizeProject(p)
+      return { project: p }
+    })
+  },
+
+  insertAnnotation: (at) => {
+    const s = get()
+    s.pushHistory('hAnnotation')
+    const id = annotationUid()
+    set((st) => {
+      const p = clone(st.project)
+      let track = st.activeAnnotationTrackId
+        ? p.tracks.find((item) => item.id === st.activeAnnotationTrackId && item.kind === 'annotation')
+        : undefined
+      if (!track || track.locked) {
+        const candidates = p.tracks.filter((item) => item.kind === 'annotation' && !item.locked)
+        track = candidates[candidates.length - 1]
+      }
+      if (!track) {
+        track = makeTrack(p, 'annotation')
+        const audioAt = p.tracks.findIndex((item) => item.kind === 'audio')
+        p.tracks.splice(audioAt < 0 ? p.tracks.length : audioAt, 0, track)
+      }
+      const duration = 4
+      let start = Math.max(0, at)
+      const existing = [...(track.annotations ?? [])].sort((a, b) => a.start - b.start)
+      // Preserve the four-second default. If the playhead is occupied, place the
+      // task in the first following gap instead of silently overlapping it.
+      for (const item of existing) {
+        if (start + duration <= item.start + 1e-6) break
+        if (start < item.start + item.duration - 1e-6) start = item.start + item.duration
+      }
+      const now = new Date().toISOString()
+      const annotation: AnnotationTask = {
+        id, text: '', status: 'new', start, duration, createdAt: now, updatedAt: now
+      }
+      track.annotations ??= []
+      track.annotations.push(annotation)
+      track.annotations.sort((a, b) => a.start - b.start)
+      return {
+        project: p,
+        annotationId: id,
+        activeAnnotationTrackId: track.id,
+        playhead: start
+      }
+    })
+    return id
+  },
+
+  updateAnnotation: (id, patch) => {
+    const s = get()
+    if (!findAnnotation(s.project, id)) return false
+    s.pushHistory('hAnnotation')
+    set((st) => {
+      const p = clone(st.project)
+      const found = findAnnotation(p, id)
+      if (!found) return st
+      if (patch.text !== undefined) found.annotation.text = patch.text
+      if (patch.result !== undefined) found.annotation.result = patch.result
+      if (patch.status !== undefined) {
+        found.annotation.status = patch.status
+        found.annotation.completedAt = patch.status === 'done' ? new Date().toISOString() : undefined
+      }
+      found.annotation.updatedAt = new Date().toISOString()
+      return { project: p }
+    })
+    return true
+  },
+
+  deleteAnnotation: (id) => {
+    const s = get()
+    if (!findAnnotation(s.project, id)) return false
+    s.pushHistory('hAnnotationDelete')
+    set((st) => {
+      const p = clone(st.project)
+      for (const track of p.tracks) {
+        if (track.annotations) track.annotations = track.annotations.filter((item) => item.id !== id)
+      }
+      return { project: p, annotationId: st.annotationId === id ? null : st.annotationId }
+    })
+    return true
+  },
+
+  moveAnnotation: (id, desiredStart) =>
+    set((st) => {
+      const p = clone(st.project)
+      const found = findAnnotation(p, id)
+      if (!found || found.track.locked) return st
+      const current = found.annotation
+      const ordered = (found.track.annotations ?? []).filter((item) => item.id !== id)
+        .sort((a, b) => a.start - b.start)
+      const previous = ordered.filter((item) => item.start < current.start).at(-1)
+      const next = ordered.find((item) => item.start > current.start)
+      const min = previous ? previous.start + previous.duration : 0
+      const max = next ? next.start - current.duration : Infinity
+      current.start = Math.max(min, Math.min(max, Math.max(0, desiredStart)))
+      current.updatedAt = new Date().toISOString()
+      found.track.annotations!.sort((a, b) => a.start - b.start)
+      return { project: p }
+    }),
+
+  resizeAnnotation: (id, edge, time) =>
+    set((st) => {
+      const p = clone(st.project)
+      const found = findAnnotation(p, id)
+      if (!found || found.track.locked) return st
+      const current = found.annotation
+      const ordered = (found.track.annotations ?? []).filter((item) => item.id !== id)
+        .sort((a, b) => a.start - b.start)
+      const previous = ordered.filter((item) => item.start < current.start).at(-1)
+      const next = ordered.find((item) => item.start > current.start)
+      const minDuration = Math.max(0.05, 1 / Math.max(1, p.fps))
+      if (edge === 'start') {
+        const end = current.start + current.duration
+        const min = previous ? previous.start + previous.duration : 0
+        const start = Math.max(min, Math.min(end - minDuration, time))
+        current.start = start
+        current.duration = end - start
+      } else {
+        const max = next ? next.start : Infinity
+        current.duration = Math.max(minDuration, Math.min(max, time) - current.start)
+      }
+      current.updatedAt = new Date().toISOString()
+      return { project: p }
+    }),
+
+  setAnnotation: (annotationId) => set({ annotationId }),
+  setActiveAnnotationTrack: (activeAnnotationTrackId) => set({ activeAnnotationTrackId }),
 
   insertClipFromAsset: (assetId, trackId, at) =>
     get().insertClipsFromAssets([assetId], trackId, at),
@@ -749,6 +1064,38 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (!ids.length) return st
       return { project: p, selection: ids }
     })
+  },
+
+  insertTimedVoiceovers: (items, trackName) => {
+    if (!items.length) return []
+    const s = get()
+    const clipIds = items.map(() => uid())
+    s.pushHistory('hVoiceGeneration')
+    set((st) => {
+      const p = clone(st.project)
+      const track = makeTrack(p, 'audio')
+      track.name = trackName
+      p.tracks.push(track)
+      items.forEach((item, index) => {
+        const asset = clone(item.asset)
+        if (!p.assets.some((existing) => existing.id === asset.id)) p.assets.push(asset)
+        track.clips.push({
+          id: clipIds[index],
+          assetId: asset.id,
+          kind: 'media',
+          start: Math.max(0, item.start),
+          duration: Math.max(0.05, item.duration),
+          inPoint: 0,
+          label: item.label,
+          voiceover: clone(item.voiceover),
+          ...newClipDefaults(),
+          // newClipDefaults supplies speed=1; exact SRT fitting wins.
+          speed: Math.max(0.01, item.speed)
+        })
+      })
+      return { project: p, selection: clipIds }
+    })
+    return clipIds
   },
 
   setClipSpeed: (clipId, speed, duration, start) =>
@@ -867,6 +1214,42 @@ export const useEditor = create<EditorState>((set, get) => ({
       return { project: p }
     }),
 
+  splitClipIntoRanges: (clipId, ranges) => {
+    const s = get()
+    const original = findClip(s.project, clipId)
+    if (!original || original.track.locked) return []
+    const clean = ranges
+      .map((r) => ({
+        start: Math.max(0, Math.min(original.clip.duration, r.start)),
+        end: Math.max(0, Math.min(original.clip.duration, r.end))
+      }))
+      .filter((r) => r.end - r.start >= 0.05)
+      .sort((a, b) => a.start - b.start)
+    if (!clean.length) return []
+    s.pushHistory('hAutoCut')
+    const ids = clean.map(() => uid())
+    set((st) => {
+      const p = clone(st.project)
+      const found = findClip(p, clipId)
+      if (!found) return st
+      const index = found.track.clips.findIndex((c) => c.id === clipId)
+      const pieces = clean.map((r, i): Clip => ({
+        ...clone(found.clip),
+        id: ids[i],
+        start: found.clip.start + r.start,
+        duration: r.end - r.start,
+        inPoint: found.clip.inPoint + r.start * (found.clip.speed || 1),
+        label: `${found.clip.label || 'Voice'} · ${i + 1}`,
+        linkId: undefined,
+        fadeIn: Math.min(found.clip.fadeIn || 0, (r.end - r.start) / 2),
+        fadeOut: Math.min(found.clip.fadeOut || 0, (r.end - r.start) / 2)
+      }))
+      found.track.clips.splice(index, 1, ...pieces)
+      return { project: p, selection: ids }
+    })
+    return ids
+  },
+
   setClipStarts: (entries) =>
     set((s) => {
       const p = clone(s.project)
@@ -983,10 +1366,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     })
   },
 
-  deleteSelection: () => {
+  deleteSelection: (historyLabel = 'hDelete') => {
     const s = get()
     if (!s.selection.length) return
-    s.pushHistory('hDelete')
+    s.pushHistory(historyLabel)
     set((st) => {
       const p = clone(st.project)
       for (const tr of p.tracks) {
@@ -1032,7 +1415,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         }
       }
     }
-    set({ clipboard: items })
+    if (items.length) set({ clipboard: items })
   },
 
   copyRange: () => {
@@ -1045,14 +1428,39 @@ export const useEditor = create<EditorState>((set, get) => ({
         if (piece) items.push({ kind: track.kind, trackId: track.id, clip: piece })
       }
     }
-    if (items.length) set({ clipboard: items })
+    set({ clipboard: items })
   },
 
-  deleteRange: () => {
+  cutSelection: () => {
+    const s = get()
+    if (!s.selection.length) return
+    s.copySelection()
+    get().deleteSelection('hCut')
+  },
+
+  cutRange: () => {
+    const s = get()
+    const range = s.range
+    if (!range) return
+    const items: ClipboardItem[] = []
+    for (const track of s.project.tracks) {
+      if (track.locked) continue
+      for (const clip of track.clips) {
+        const piece = clipIntersection(clip, range.start, range.end)
+        if (piece) items.push({ kind: track.kind, trackId: track.id, clip: piece })
+      }
+    }
+    if (!items.length) return
+    set({ clipboard: items })
+    get().deleteRange('hCut')
+    get().setRange(null)
+  },
+
+  deleteRange: (historyLabel = 'hDeleteRange') => {
     const s = get()
     const r = s.range
     if (!r) return
-    s.pushHistory('hDeleteRange')
+    s.pushHistory(historyLabel)
     set((st) => {
       const p = clone(st.project)
       for (const tr of p.tracks) {
@@ -1156,11 +1564,12 @@ function makeTrack(p: Project, kind: TrackKind): Track {
   return {
     id: uid(),
     kind,
-    name: (kind === 'video' ? 'V' : 'A') + n,
+    name: (kind === 'video' ? 'V' : kind === 'audio' ? 'A' : 'AN') + n,
     muted: false,
     locked: false,
     gain: 1,
-    clips: []
+    clips: [],
+    annotations: kind === 'annotation' ? [] : undefined
   }
 }
 

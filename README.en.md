@@ -17,13 +17,15 @@ captions to this part», watch it happen live in the preview.
 
 - 🎬 **Real multi-track editing** — video/audio/text tracks, trimming,
   looping, fades, linked AV clips, ripple delete, full undo history.
-  Clip speed from ×0.02 to ×100 by Ctrl-dragging **either** clip edge
+  Clip speed from ×0.02 to ×100 by ⌘-dragging on macOS or Ctrl-dragging
+  on Windows/Linux over **either** clip edge
   (the left one anchors the right boundary), snapping to round
   multipliers and to neighbouring clips' edges, with a live ×N badge.
 - 📥 **Media from anywhere** — drop files onto any spot of the window
   (onto a track they land as clips back-to-back at the drop point, audio
   routes to an audio track), drag a picture straight out of a browser
-  (fetched by URL), or hit Ctrl+V — clipboard paste understands both
+  (fetched by URL), or hit ⌘V on macOS / Ctrl+V on Windows and Linux —
+  clipboard paste understands both
   copied files and "Copy image" (e.g. from Telegram, which won't let
   photos be dragged out at all). XDG-portal drags from sandboxed apps
   are supported too. The media bin gets multi-select and deletion that
@@ -65,26 +67,22 @@ captions to this part», watch it happen live in the preview.
   terminal panel, wired to the live project over MCP: it reads the
   timeline, edits clips, transcribes, creates and iterates Remotion
   fragments while you watch the preview update. The panel is draggable,
-  resizable and remembers its place across launches.
+  resizable and remembers its place across launches; pressing Claude again
+  minimizes it without losing the session context.
 - 📍 **Timeline markers** — press **M** to drop a numbered marker at the
-  playhead: drag it, right-click to remove it, it lives in the project
-  file and the embedded Claude can see and place them too ("retime
-  everything between marker 3 and marker 4").
+  playhead: drag it, right-click to remove it, and use it from Claude too.
 - 📤 **Uncompromised export** — video is encoded by ffmpeg x264 at the
   preset's true bitrate (Chromium's built-in encoder ignored the bitrate
   and softened the picture — measured and replaced; frames reach ffmpeg
-  with zero copies), 8-sample motion blur, automatic frame blending for
-  fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3, and a
+  with zero copies), mp4box-based fast decode (~8× over element seeks,
+  with graceful fallback), 8-sample motion blur, automatic frame blending
+  for fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3, and a
   short chime when the render is done.
-- 🚀 **Fast on every source** — seeking a `<video>` element costs ~0.2 s
-  per frame, so the exporter avoids it everywhere: alpha video (every
-  transparent Remotion fragment included) is read through a **lossless**
-  colour-over-matte intermediate, MP4s with the index at the end of the
-  file are picked up from their tail, undecodable codecs go through an
-  H.264 intermediate. A real 11-minute project full of transparent
-  fragments now exports in **13 minutes instead of hours** (58 fps at
-  1080p60).
-- 🛟 **Quality-of-life** — background 540p preview proxies, autosave every
+- 🚀 **Fast on every source** — alpha video is read through a **lossless**
+  colour-over-matte intermediate, MP4s with the index at the end are picked
+  up from their tail, and undecodable codecs use an H.264 intermediate.
+- 🛟 **Quality-of-life** — background adaptive 720p preview proxies with
+  validation and automatic repair of corrupt caches, autosave every
   5 minutes (atomic, skipped during exports/AI sessions), an
   unsaved-changes indicator with “✓ Saved” feedback, self-healing after
   hard closes (no lingering processes), effect & pose presets shared
@@ -112,6 +110,12 @@ npm install        # postinstall rebuilds node-pty for Electron
 npm run dev
 ```
 
+For an Apple Silicon macOS build, run `npm run package:mac`, open the DMG,
+and move Kadr to Applications. The installed app registers `.kadr` files:
+double-clicking one in Finder opens that project in its own window. Create a
+blank window with File → New Window (`⌘N`) or the matching Kadr Dock menu item;
+`⇧⌘N` resets the project in the current window.
+
 Import media, edit, press Export. For the AI assistant press 🤖 (the
 `claude` CLI must be installed and logged in). If your network needs a
 proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
@@ -123,14 +127,17 @@ proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
 ## How the AI integration works
 
 Kadr starts a local HTTP bridge into the renderer and hands Claude an MCP
-server with five tools:
+server with a focused tool set:
 
 | Tool | What it does |
 |---|---|
+| `kadr_capabilities` | current editor contract: project files, models, ranges, effects, transitions, animation, and available actions |
 | `kadr_state` | full live project: tracks, clips, asset paths, transcripts, presets |
+| `kadr_snapshot` | save a source-quality WYSIWYG PNG frame for visual verification |
 | `kadr_eval` | run JS against the editor API (every edit lands in undo history) |
 | `kadr_export` | render the project or a range and wait for the file |
 | `kadr_transcribe` | local Whisper over a file or a timeline range |
+| `kadr_voices` | available F5-TTS voices with stable ids, numbers, and descriptions |
 | `kadr_fragment_create` | scaffold a Remotion composition as a timeline clip |
 
 The killer loop: Claude creates a fragment, edits its TSX with normal file

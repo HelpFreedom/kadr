@@ -6,8 +6,11 @@
   "author": "Black Triangle",
   "license": "GPL-3.0",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "dev": "npm run build:html-player && electron-vite dev",
+    "build": "electron-vite build && npm run build:html-player",
+    "build:html-player": "vite build --config vite.html-player.config.ts",
+    "icon": "node build/make-icon.mjs",
+    "package:mac": "npm run build && electron-builder --mac --arm64",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
     "postinstall": "electron-rebuild -f -w node-pty"
@@ -16,6 +19,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "archiver": "^8.0.0",
     "mp4-muxer": "^5.1.5",
     "mp4box": "^2.3.0",
     "node-pty": "^1.1.0",
@@ -27,12 +31,14 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.4",
+    "@types/archiver": "^8.0.0",
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "^42.4.0",
+    "electron": "^42.9.1",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "typescript": "^5.5.4",
     "vite": "^7.3.1"

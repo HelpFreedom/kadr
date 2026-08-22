@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { create } from 'zustand'
 import { useEditor, projectDuration } from '@/state/store'
 import { autoCaptions, CAPTION_DEFAULTS, type CaptionStyle } from '@/engine/captions'
+import { transcribeErrorMessage } from '@/engine/subtitles'
 import { useT } from '@/i18n'
 
 export const useCaptionsUi = create<{ open: boolean; setOpen(v: boolean): void }>((set) => ({
@@ -21,6 +22,7 @@ export function CaptionsDialog() {
   const [progress, setProgress] = useState(0)
   const [liveText, setLiveText] = useState('')
   const [error, setError] = useState('')
+  const cancelRequested = useRef(false)
 
   useEffect(() => {
     if (!running) return
@@ -44,18 +46,33 @@ export function CaptionsDialog() {
   }
 
   async function run() {
+    cancelRequested.current = false
     setRunning(true)
     setError('')
     setProgress(0)
     setLiveText('')
     try {
       await autoCaptions({ range, style, maxWords, model, language })
+      cancelRequested.current = false
       setRunning(false)
       useCaptionsUi.getState().setOpen(false)
     } catch (err) {
       setRunning(false)
-      setError(String((err as Error)?.message ?? err))
+      if (cancelRequested.current) {
+        cancelRequested.current = false
+        setError('')
+        setLiveText('')
+        setProgress(0)
+        useCaptionsUi.getState().setOpen(false)
+      } else {
+        setError(transcribeErrorMessage(err))
+      }
     }
+  }
+
+  function cancel() {
+    cancelRequested.current = true
+    void window.kadr.transcribeCancel()
   }
 
   return (
@@ -180,7 +197,7 @@ export function CaptionsDialog() {
         {error && <div className="tr-error">{error}</div>}
         <div className="modal-actions">
           {running ? (
-            <button onClick={() => window.kadr.transcribeCancel()}>{t('cancel')}</button>
+            <button onClick={cancel}>{t('cancel')}</button>
           ) : (
             <>
               <button onClick={close}>{t('cancel')}</button>

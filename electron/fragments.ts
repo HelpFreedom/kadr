@@ -4,15 +4,42 @@
 // iteration); `remotion render` runs exactly once per fragment content hash
 // at export time.
 import { app, ipcMain, BrowserWindow } from 'electron'
+import type { WebContents } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import { promises as fs, existsSync, readdirSync, statSync } from 'fs'
 import { join, basename, dirname } from 'path'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { homedir } from 'os'
 import type { FragmentSpec, FragmentInfo } from '@shared/types'
 
 export const WORKSPACE = process.env.KADR_FRAGMENTS_DIR || join(homedir(), 'kadr-fragments')
 const FRAG_DIR = () => join(WORKSPACE, 'src', 'fragments')
+
+/** Copy the complete editable sources and local assets used by project fragments. */
+export async function copyProjectFragments(fragmentIds: string[], targetRoot: string): Promise<void> {
+  await fs.mkdir(targetRoot, { recursive: true })
+  for (const id of [...new Set(fragmentIds)]) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid fragment id: ${id}`)
+    const source = join(FRAG_DIR(), id)
+    if (!existsSync(source)) throw new Error(`Fragment dependency is missing: ${id}`)
+    await fs.cp(source, join(targetRoot, id), { recursive: true, force: true })
+  }
+}
+
+/** Restore bundled fragment sources into the shared workspace when a portable project opens. */
+export async function restoreProjectFragments(sourceRoot: string, fragmentIds: string[]): Promise<void> {
+  if (!existsSync(sourceRoot)) return
+  await fs.mkdir(FRAG_DIR(), { recursive: true })
+  let restored = false
+  for (const id of [...new Set(fragmentIds)]) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) continue
+    const source = join(sourceRoot, id)
+    if (!existsSync(source)) continue
+    await fs.cp(source, join(FRAG_DIR(), id), { recursive: true, force: true })
+    restored = true
+  }
+  if (restored) await regenRegistry()
+}
 
 // npm install and remotion's headless-chrome download may need the user's
 // network settings (proxies etc.) — shared with the Claude session config:
@@ -316,6 +343,129 @@ async function ensureWorkspace(
   return { dir: WORKSPACE, installed }
 }
 
+async function inlineFragmentBundle(outputDir: string): Promise<void> {
+  const indexPath = join(outputDir, 'index.html')
+  let html = await fs.readFile(indexPath, 'utf8')
+  const scriptTag = html.match(/<script type="module"[^>]*\ssrc="\.\/([^"]+)"[^>]*><\/script>/)
+  if (!scriptTag) throw new Error('Fragment bundle entry script was not generated')
+  const scriptPath = join(outputDir, scriptTag[1])
+  const script = (await fs.readFile(scriptPath, 'utf8')).replace(/<\/script/gi, '<\\/script')
+  html = html.replace(scriptTag[0], () => `<script type="module">${script}</script>`)
+  await fs.rm(scriptPath, { force: true })
+
+  const stylePattern = /<link\b[^>]*href="\.\/([^"]+\.css)"[^>]*>/g
+  for (const match of [...html.matchAll(stylePattern)]) {
+    const stylePath = join(outputDir, match[1])
+    const style = (await fs.readFile(stylePath, 'utf8')).replace(/<\/style/gi, '<\\/style')
+    html = html.replace(match[0], () => `<style>${style}</style>`)
+    await fs.rm(stylePath, { force: true })
+  }
+  await fs.writeFile(indexPath, html, 'utf8')
+}
+
+export interface BundledFragmentAsset {
+  path: string
+  fragmentId?: string
+}
+
+async function bundledAssetPaths(root: string): Promise<BundledFragmentAsset[]> {
+  const manifestPath = join(root, '.vite', 'manifest.json')
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as Record<
+    string, { file: string; src?: string; isEntry?: boolean }
+  >
+  const assets = Object.values(manifest).filter((entry) => !entry.isEntry).map((entry) => {
+    const match = entry.src?.match(/\/src\/fragments\/([^/]+)\//)
+    return { path: entry.file, fragmentId: match?.[1] }
+  })
+  await fs.rm(join(root, '.vite'), { recursive: true, force: true })
+  return [...new Map(assets.map((asset) => [asset.path, asset])).values()]
+    .sort((left, right) => left.path.localeCompare(right.path, undefined, { numeric: true }))
+}
+
+/** Build the selected live compositions as a portable browser runtime.
+ * This compiles TSX once; it never renders timeline frames. */
+export async function bundleFragments(
+  fragmentIds: string[],
+  outputDir: string,
+  signal: AbortSignal
+): Promise<BundledFragmentAsset[]> {
+  if (!fragmentIds.length) return []
+  await ensureWorkspace()
+  const ids = [...new Set(fragmentIds)].sort()
+  for (const id of ids) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid fragment id: ${id}`)
+    await fs.access(join(FRAG_DIR(), id, 'index.tsx'))
+  }
+  if (signal.aborted) throw new Error('cancelled')
+
+  const tempDir = join(WORKSPACE, `.kadr-html-export-${process.pid}-${randomUUID()}`)
+  try {
+    await fs.mkdir(tempDir, { recursive: true })
+    const imports = ids.map((id, index) =>
+      `import { fragment as f${index} } from '../src/fragments/${id}'`
+    )
+    const registry = [
+      ...imports,
+      '',
+      'export const fragments = {',
+      ...ids.map((id, index) => `  ${JSON.stringify(id)}: f${index},`),
+      '}',
+      ''
+    ].join('\n')
+    const player = PLAYER_TSX.replace(
+      "import { fragments } from './src/fragments'",
+      "import { fragments } from './registry'"
+    )
+    const config = `import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+export default defineConfig({
+  root: ${JSON.stringify(tempDir)},
+  plugins: [react()],
+  base: './',
+  build: {
+    outDir: ${JSON.stringify(outputDir)},
+    emptyOutDir: true,
+    assetsDir: '.',
+    manifest: true,
+    rollupOptions: { output: { inlineDynamicImports: true } }
+  }
+})
+`
+    await Promise.all([
+      fs.writeFile(join(tempDir, 'registry.ts'), registry, 'utf8'),
+      fs.writeFile(join(tempDir, 'player.tsx'), player, 'utf8'),
+      fs.writeFile(join(tempDir, 'index.html'), INDEX_HTML.replace('src="/player.tsx"', 'src="./player.tsx"'), 'utf8'),
+      fs.writeFile(join(tempDir, 'vite.config.ts'), config, 'utf8')
+    ])
+
+    const vite = join(WORKSPACE, 'node_modules', '.bin', 'vite')
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(vite, ['build', '--config', join(tempDir, 'vite.config.ts')], {
+        cwd: tempDir,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+      let output = ''
+      const onData = (chunk: Buffer) => { output += chunk }
+      child.stdout.on('data', onData)
+      child.stderr.on('data', onData)
+      const cancel = () => child.kill('SIGTERM')
+      signal.addEventListener('abort', cancel, { once: true })
+      child.on('error', reject)
+      child.on('close', (code) => {
+        signal.removeEventListener('abort', cancel)
+        if (signal.aborted) reject(new Error('cancelled'))
+        else if (code === 0) resolve()
+        else reject(new Error(`Fragment bundle failed (${code}): ${output.slice(-1200)}`))
+      })
+    })
+    await inlineFragmentBundle(outputDir)
+    return await bundledAssetPaths(outputDir)
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true })
+  }
+}
+
 // --------------------------------------------------------------- dev server
 
 let server: { child: ChildProcess | null; url: string } | null = null
@@ -513,6 +663,27 @@ function fragmentHash(id: string): string {
   return h.digest('hex').slice(0, 16)
 }
 
+export function fragmentContentVersion(id: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid fragment id: ${id}`)
+  return fragmentHash(id)
+}
+
+/** Stable version + live-player metadata for cached preview thumbnails. */
+export async function fragmentPreviewInfo(id: string): Promise<{
+  url: string
+  version: string
+  fps: number
+}> {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid fragment id: ${id}`)
+  const { url } = await ensureServer()
+  let fps = 60
+  try {
+    const meta = JSON.parse(await fs.readFile(join(FRAG_DIR(), id, 'meta.json'), 'utf8'))
+    if (Number.isFinite(meta?.fps) && meta.fps > 0) fps = meta.fps
+  } catch { /* the player uses the same 60 fps fallback */ }
+  return { url, version: fragmentContentVersion(id), fps }
+}
+
 const renderDir = () => join(app.getPath('userData'), 'fragment-renders')
 let renderChain: Promise<unknown> = Promise.resolve()
 
@@ -580,16 +751,19 @@ async function renderFragment(
 // where the fragment becomes a regular compositor layer.
 
 const captures = new Map<string, BrowserWindow>()
+const captureKey = (ownerId: number, id: string) => `${ownerId}:${id}`
 
 async function captureStart(
-  getWin: () => BrowserWindow | null,
+  target: WebContents,
   id: string,
   url: string,
   w: number,
   h: number,
   fps: number
 ): Promise<void> {
-  if (captures.has(id)) return
+  const ownerId = target.id
+  const key = captureKey(ownerId, id)
+  if (captures.has(key)) return
   const cw = Math.max(64, Math.round(w))
   const ch = Math.max(36, Math.round(h))
   const win = new BrowserWindow({
@@ -606,27 +780,29 @@ async function captureStart(
     // paused-editor snapshots captured the PREVIOUS frame (stale-frame bug)
     webPreferences: { offscreen: true, backgroundThrottling: false }
   })
-  captures.set(id, win)
+  captures.set(key, win)
+  target.once('destroyed', () => captureStop(ownerId, id))
   win.setContentSize(cw, ch) // re-assert: creation may still have clamped
   win.webContents.setFrameRate(Math.max(10, Math.min(60, Math.round(fps))))
   win.webContents.on('paint', (_ev, _dirty, image) => {
     const size = image.getSize()
     // BGRA, premultiplied — the compositor shader undoes both
-    getWin()?.webContents.send('fragment:frame', {
+    if (!target.isDestroyed()) target.send('fragment:frame', {
       id, w: size.width, h: size.height, data: image.getBitmap()
     })
   })
   await win.loadURL(url)
 }
 
-function captureStop(id: string) {
-  const win = captures.get(id)
-  captures.delete(id)
+function captureStop(ownerId: number, id: string) {
+  const key = captureKey(ownerId, id)
+  const win = captures.get(key)
+  captures.delete(key)
   if (win && !win.isDestroyed()) win.destroy()
 }
 
-function captureSync(id: string, msg: unknown) {
-  const win = captures.get(id)
+function captureSync(ownerId: number, id: string, msg: unknown) {
+  const win = captures.get(captureKey(ownerId, id))
   if (!win || win.isDestroyed()) return
   win.webContents
     .executeJavaScript(`window.postMessage(${JSON.stringify(msg)}, '*'); 0`, true)
@@ -634,8 +810,8 @@ function captureSync(id: string, msg: unknown) {
 }
 
 /** The fragment player's CURRENT frame (−1 page not ready, −2 no window). */
-async function captureQuery(id: string): Promise<number> {
-  const win = captures.get(id)
+async function captureQuery(ownerId: number, id: string): Promise<number> {
+  const win = captures.get(captureKey(ownerId, id))
   if (!win || win.isDestroyed()) return -2
   try {
     const v = await win.webContents.executeJavaScript('window.__kadrFrame ?? -1', true)
@@ -646,17 +822,21 @@ async function captureQuery(id: string): Promise<number> {
 }
 
 function stopAllCaptures() {
-  for (const id of [...captures.keys()]) captureStop(id)
+  for (const win of captures.values()) {
+    if (!win.isDestroyed()) win.destroy()
+  }
+  captures.clear()
 }
 
 // ---------------------------------------------------------------------- IPC
 
-export function registerFragmentIpc(getWin: () => BrowserWindow | null) {
-  const send = (id: string, phase: string, progress: number) =>
-    getWin()?.webContents.send('fragment:progress', { id, phase, progress })
+export function registerFragmentIpc() {
+  const send = (target: WebContents, id: string, phase: string, progress: number) => {
+    if (!target.isDestroyed()) target.send('fragment:progress', { id, phase, progress })
+  }
 
-  ipcMain.handle('fragment:ensure', () =>
-    ensureWorkspace((phase, p) => send('workspace', phase, p))
+  ipcMain.handle('fragment:ensure', (event) =>
+    ensureWorkspace((phase, p) => send(event.sender, 'workspace', phase, p))
   )
   ipcMain.handle('fragment:server', () => ensureServer())
   ipcMain.handle('fragment:create', (_e, spec: FragmentSpec, projectDir?: string | null) =>
@@ -664,15 +844,18 @@ export function registerFragmentIpc(getWin: () => BrowserWindow | null) {
   ipcMain.handle('fragment:delete', (_e, id: string) => deleteFragment(id))
   ipcMain.handle('fragment:relocate', (_e, projectDir: string, ids: string[]) =>
     relocateFragments(projectDir, ids))
-  ipcMain.handle('fragment:render', (_e, id: string, opts?: { transparent?: boolean }) =>
-    renderFragment(id, opts, (p) => send(id, 'render', p))
+  ipcMain.handle('fragment:render', (event, id: string, opts?: { transparent?: boolean }) =>
+    renderFragment(id, opts, (p) => send(event.sender, id, 'render', p))
   )
-  ipcMain.handle('fragment:capture-start', (_e, id: string, url: string, w: number, h: number, fps: number) =>
-    captureStart(getWin, id, url, w, h, fps)
+  ipcMain.handle('fragment:capture-start', (event, id: string, url: string, w: number, h: number, fps: number) =>
+    captureStart(event.sender, id, url, w, h, fps)
   )
-  ipcMain.handle('fragment:capture-stop', (_e, id: string) => captureStop(id))
-  ipcMain.handle('fragment:capture-query', (_e, id: string) => captureQuery(id))
-  ipcMain.on('fragment:capture-sync', (_e, id: string, msg: unknown) => captureSync(id, msg))
+  ipcMain.handle('fragment:capture-stop', (event, id: string) => captureStop(event.sender.id, id))
+  ipcMain.on('fragment:capture-sync', (event, id: string, msg: unknown) =>
+    captureSync(event.sender.id, id, msg)
+  )
+  ipcMain.handle('fragment:capture-query', (event, id: string) =>
+    captureQuery(event.sender.id, id))
   app.on('before-quit', () => {
     stopServer()
     stopAllCaptures()

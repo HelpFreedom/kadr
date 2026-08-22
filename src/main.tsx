@@ -17,9 +17,13 @@ import { wireAutosave, autosaveNow, activity } from './engine/autosave'
 import { autoCaptions, captionsTsx } from './engine/captions'
 import { reverseClip } from './engine/reverse'
 import { importFiles, wireDropDiagnostics } from './engine/mediaImport'
-import { snapshotFrame } from './engine/snapshot'
+import { snapshotFrame, storyboardFrames } from './engine/snapshot'
 import { wireExportChime } from './engine/chime'
 import { normalizeClip } from './engine/normalize'
+import { getEditorCapabilities } from './engine/capabilities'
+import {
+  applyAnnotationTask, getAnnotationTasks, startAnnotationTask, updateAnnotationTask
+} from './engine/annotationTasks'
 
 wireProxies()
 wireFragmentCapture()
@@ -33,7 +37,13 @@ wireDropDiagnostics()
   useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, PRESETS, startExport, evalAnim,
   transcribe: transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues,
   createFragment, ensureFragmentServer, deleteFragment, autoCaptions, captionsTsx, autosaveNow, activity,
-  reverseClip, importFiles, snapshotFrame, normalizeClip, syncProjectFragments
+  reverseClip, importFiles, snapshotFrame, storyboardFrames, normalizeClip,
+  getAnnotationTasks, startAnnotationTask, applyAnnotationTask, updateAnnotationTask,
+  getCapabilities: (section = 'all') => getEditorCapabilities(
+    section,
+    Object.entries(useEditor.getState()).filter(([, value]) => typeof value === 'function').map(([name]) => name).sort()
+  ),
+  syncProjectFragments
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

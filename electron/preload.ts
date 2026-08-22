@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import type { KadrApi, ExportProgress } from '@shared/types'
+import type { KadrApi, ExportProgress, MenuCommand } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
 
 // Direct export encoder: ffmpeg is spawned HERE, in the renderer process
@@ -87,7 +87,13 @@ const api: KadrApi = {
   dropLog: (entry) => ipcRenderer.send('debug:drop-log', entry),
 
   saveProjectDialog: (name) => ipcRenderer.invoke('project:save-dialog', name),
+  saveProjectPackageDialog: (name) => ipcRenderer.invoke('project:package-dialog', name),
+  packageProject: (parentDir, sourceProjectPath, project, options) =>
+    ipcRenderer.invoke('project:package', parentDir, sourceProjectPath, project, options),
   openProjectDialog: () => ipcRenderer.invoke('project:open-dialog'),
+  newEditorWindow: () => ipcRenderer.send('window:new'),
+  takeInitialProjectPath: () => ipcRenderer.invoke('window:initial-project'),
+  setWindowProjectState: (state) => ipcRenderer.send('window:project-state', state),
   readProject: (path) => ipcRenderer.invoke('project:read', path),
   writeProject: (path, project) => ipcRenderer.invoke('project:write', path, project),
   autosaveProject: (project, mainPath) => ipcRenderer.invoke('project:autosave', project, mainPath),
@@ -103,17 +109,24 @@ const api: KadrApi = {
     return () => ipcRenderer.removeListener('reverse:progress', handler)
   },
   requestProxy: (path, duration, opts) => ipcRenderer.invoke('proxy:request', path, duration, opts),
+  rebuildProxy: (path, duration, opts) => ipcRenderer.invoke('proxy:rebuild', path, duration, opts),
+  timelineThumbnails: (request) => ipcRenderer.invoke('thumbnail:timeline', request),
+  visualFingerprint: (paths, fragmentIds) =>
+    ipcRenderer.invoke('visual:fingerprint', paths, fragmentIds),
   requestDecoded: (path, duration, opts) => ipcRenderer.invoke('media:decoded', path, duration, opts),
   pickDirectory: (title) => ipcRenderer.invoke('dialog:pick-dir', title),
   saveSnapshot: (dir, baseName, png) => ipcRenderer.invoke('snapshot:save', dir, baseName, png),
+  saveStoryboardImage: (cacheKey, baseName, png) =>
+    ipcRenderer.invoke('storyboard:save-image', cacheKey, baseName, png),
   measureLoudness: (path, start, duration) => ipcRenderer.invoke('media:loudness', path, start, duration),
   onProxyProgress: (cb) => {
-    const handler = (_e: unknown, p: { path: string; progress: number }) => cb(p)
+    const handler = (_e: unknown, p: Parameters<typeof cb>[0]) => cb(p)
     ipcRenderer.on('proxy:progress', handler)
     return () => ipcRenderer.removeListener('proxy:progress', handler)
   },
 
   exportDialog: (name, ext) => ipcRenderer.invoke('export:dialog', name, ext),
+  htmlPlayerExport: (request) => ipcRenderer.invoke('html-player:export', request),
   exportBegin: (job) => ipcRenderer.invoke('export:begin', job),
   exportVideoChunk: (data, position) => ipcRenderer.invoke('export:video-chunk', data, position),
   exportRawBegin: (width, height, fps, outWidth, outHeight) =>
@@ -161,6 +174,32 @@ const api: KadrApi = {
   readTextFile: (path) => ipcRenderer.invoke('file:read-text', path),
   writeTextFile: (path, content) => ipcRenderer.invoke('file:write-text', path, content),
   statFile: (path) => ipcRenderer.invoke('file:stat', path),
+  createSrtFile: (suggestedName, start) => ipcRenderer.invoke('text:create-srt', suggestedName, start),
+  prepareTextDocument: (path) => ipcRenderer.invoke('text:prepare-document', path),
+
+  voiceoverStatus: (settings) => ipcRenderer.invoke('voiceover:status', settings),
+  voiceoverInstall: (settings) => ipcRenderer.invoke('voiceover:install', settings),
+  voiceoverInstallCancel: () => ipcRenderer.invoke('voiceover:install-cancel'),
+  onVoiceoverInstallProgress: (cb) => {
+    const handler = (_e: unknown, p: Parameters<typeof cb>[0]) => cb(p)
+    ipcRenderer.on('voiceover:install-progress', handler)
+    return () => ipcRenderer.removeListener('voiceover:install-progress', handler)
+  },
+  voiceCloneList: () => ipcRenderer.invoke('voice-clone:list'),
+  voiceClonePickFile: () => ipcRenderer.invoke('voice-clone:pick-file'),
+  voiceClonePrepare: (sourcePath) => ipcRenderer.invoke('voice-clone:prepare', sourcePath),
+  voiceCloneProcess: (sourcePath, options) => ipcRenderer.invoke('voice-clone:process', sourcePath, options),
+  voiceCloneTranscribe: (sourcePath) => ipcRenderer.invoke('voice-clone:transcribe', sourcePath),
+  voiceCloneSave: (request) => ipcRenderer.invoke('voice-clone:save', request),
+  voiceCloneDelete: (voiceId) => ipcRenderer.invoke('voice-clone:delete', voiceId),
+  voiceCloneDiscard: (paths) => ipcRenderer.invoke('voice-clone:discard', paths),
+  voiceoverGenerate: (req) => ipcRenderer.invoke('voiceover:generate', req),
+  voiceoverCancel: () => ipcRenderer.invoke('voiceover:cancel'),
+  onVoiceoverProgress: (cb) => {
+    const handler = (_e: unknown, p: Parameters<typeof cb>[0]) => cb(p)
+    ipcRenderer.on('voiceover:progress', handler)
+    return () => ipcRenderer.removeListener('voiceover:progress', handler)
+  },
 
   claudeOpen: (cols, rows, cwd) => ipcRenderer.invoke('claude:open', cols, rows, cwd),
   claudeInput: (data) => ipcRenderer.send('claude:input', data),
@@ -175,6 +214,11 @@ const api: KadrApi = {
     const handler = (_e: unknown, code: number) => cb(code)
     ipcRenderer.on('claude:exit', handler)
     return () => ipcRenderer.removeListener('claude:exit', handler)
+  },
+  onMenuCommand: (cb) => {
+    const handler = (_e: unknown, cmd: MenuCommand) => cb(cmd)
+    ipcRenderer.on('menu:command', handler)
+    return () => ipcRenderer.removeListener('menu:command', handler)
   }
 }
 

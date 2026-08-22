@@ -1,13 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { SidePanel } from './components/SidePanel'
-import { Preview } from './components/Preview'
+import { PreviewWindow } from './components/PreviewWindow'
 import { Inspector } from './components/Inspector'
 import { Timeline } from './components/Timeline'
-import { TransportBar, LangSwitch } from './components/TransportBar'
+import { LangSwitch } from './components/TransportBar'
 import { ExportDialog } from './components/ExportDialog'
 import { ClaudePanel } from './components/ClaudePanel'
 import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
 import { CaptionsDialog } from './components/CaptionsDialog'
+import { VoiceoverStudio } from './components/VoiceoverStudio'
+import { MicStudio } from './components/MicStudio'
+import { SaveAsDialog, requestSaveAsOptions, setSaveAsBusy } from './components/SaveAsDialog'
+import { AnnotationDialog } from './components/AnnotationDialog'
 import { useEditor, newProject } from './state/store'
 import { dropPayload, dropUsable, importDrop, importFiles } from './engine/mediaImport'
 import { syncProjectFragments } from './engine/fragments'
@@ -15,9 +19,10 @@ import { useT, type TKey } from './i18n'
 import { create } from 'zustand'
 import { baseOf } from '@shared/paths'
 import type { Project } from '@shared/types'
+import { hasPrimaryModifier, IS_MAC, shortcut } from './shortcuts'
 
 // Save feedback: which project snapshot is on disk (→ the ● dirty dot) and
-// a transient "✓ saved" flash in the topbar.
+// a transient "✓ saved" toast that never changes the toolbar layout.
 const useSaveUi = create<{
   savedProject: Project | null
   flash: { key: TKey; detail: string; error: boolean } | null
@@ -52,6 +57,8 @@ async function writeAndConfirm(path: string) {
 
 async function saveProject() {
   const s = useEditor.getState()
+  const savedProject = useSaveUi.getState().savedProject
+  if (savedProject === null || s.project === savedProject) return
   let path = s.projectPath
   if (!path) {
     path = await window.kadr.saveProjectDialog(s.project.name)
@@ -63,28 +70,130 @@ async function saveProject() {
 /** Always ask for a (new) location; the project lives there from now on. */
 async function saveProjectAs() {
   const s = useEditor.getState()
-  const path = await window.kadr.saveProjectDialog(s.project.name)
-  if (!path) return
-  await writeAndConfirm(path)
+  const options = await requestSaveAsOptions()
+  if (!options) return
+  if (!options.includeDependencies && !options.zip) {
+    const path = await window.kadr.saveProjectDialog(s.project.name)
+    if (!path) return
+    await writeAndConfirm(path)
+    return
+  }
+  const parentDir = await window.kadr.saveProjectPackageDialog(s.project.name)
+  if (!parentDir) return
+  const project = useEditor.getState().project
+  const sourceProjectPath = useEditor.getState().projectPath
+  setSaveAsBusy(true)
+  try {
+    const result = await window.kadr.packageProject(
+      parentDir, sourceProjectPath, project, options
+    )
+    const saved = await window.kadr.readProject(result.projectPath)
+    useEditor.setState({ project: saved, projectPath: result.projectPath, past: [], future: [] })
+    markProjectSaved(saved)
+    flashSave('saved', baseOf(result.zipPath ?? result.folderPath))
+  } catch (err) {
+    flashSave('saveError', String(err), true)
+  } finally {
+    setSaveAsBusy(false)
+  }
+}
+
+async function openProjectPath(path: string) {
+  try {
+    const p = await window.kadr.readProject(path)
+    useEditor.getState().setProject(p, path)
+    markProjectSaved(useEditor.getState().project)
+    // Restore workspace links for project-owned Remotion fragment sources.
+    void syncProjectFragments(useEditor.getState().project, path)
+  } catch (err) {
+    flashSave('openError', String(err), true)
+  }
 }
 
 async function openProject() {
   const path = await window.kadr.openProjectDialog()
-  if (!path) return
-  const p = await window.kadr.readProject(path)
-  useEditor.getState().setProject(p, path)
-  markProjectSaved(useEditor.getState().project)
-  // restore workspace symlinks for fragments living next to the .kadr file
-  // (project moved from another machine / cleaned workspace)
-  void syncProjectFragments(useEditor.getState().project, path)
+  if (path) await openProjectPath(path)
 }
 
 const TL_MIN = 160
+
+function handleEditorKey(e: KeyboardEvent) {
+  if (document.querySelector('.modal-back')) return
+  const tag = (e.target as HTMLElement)?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+  const s = useEditor.getState()
+  const primary = hasPrimaryModifier(e) && !e.altKey && (IS_MAC ? !e.ctrlKey : !e.metaKey)
+  const systemModified = e.ctrlKey || e.metaKey || e.altKey
+  // e.code is keyboard-layout independent (works for ru/en)
+  if (e.code === 'Space' && !systemModified) {
+    e.preventDefault()
+    s.setPlaying(!s.playing)
+  } else if (e.code === 'KeyS' && primary) {
+    e.preventDefault()
+    if (e.shiftKey) void saveProjectAs()
+    else void saveProject()
+  } else if (e.code === 'KeyZ' && primary) {
+    e.preventDefault()
+    if (e.shiftKey) s.redo()
+    else s.undo()
+  } else if (e.code === 'KeyY' && primary && !e.shiftKey && !IS_MAC) {
+    e.preventDefault()
+    s.redo()
+  } else if (e.code === 'KeyC' && primary && !e.shiftKey) {
+    if (s.selection.length || s.range) e.preventDefault()
+    if (s.selection.length) s.copySelection()
+    else if (s.range) s.copyRange()
+  } else if (e.code === 'KeyX' && primary && !e.shiftKey) {
+    if (s.selection.length || s.range) e.preventDefault()
+    if (s.selection.length) s.cutSelection()
+    else if (s.range) s.cutRange()
+  } else if (e.code === 'KeyV' && primary && !e.shiftKey) {
+    e.preventDefault()
+    if (s.clipboard.length) {
+      s.pasteAtPlayhead()
+    } else {
+      // Nothing copied inside the editor — try the OS clipboard: copied
+      // files or an image from Telegram/the browser.
+      void window.kadr.clipboardMedia().then((paths) => {
+        if (paths.length) {
+          return importFiles(paths, { trackId: null, at: useEditor.getState().playhead })
+        }
+      }).catch((err) => console.error('clipboard paste failed', err))
+    }
+  } else if (systemModified) {
+    // Never turn an unknown system shortcut (for example ⌘D on macOS)
+    // into the editor's unmodified D/S/U action.
+    return
+  } else if (e.code === 'KeyS') {
+    s.splitAtPlayhead()
+  } else if (e.code === 'KeyD' || e.code === 'Delete' || e.code === 'Backspace') {
+    if (s.selection.length) s.deleteSelection()
+    else if (s.range) s.deleteRange()
+  } else if (e.code === 'KeyU') {
+    s.toggleLinkSelection()
+  } else if (e.code === 'KeyM') {
+    s.addMarker(s.playhead)
+  } else if (e.code === 'ArrowLeft') {
+    // Step the playhead by frames; preventDefault keeps the timeline from scrolling.
+    e.preventDefault()
+    s.setPlayhead(s.playhead - (e.shiftKey ? 1 : 1 / s.project.fps))
+  } else if (e.code === 'ArrowRight') {
+    e.preventDefault()
+    s.setPlayhead(s.playhead + (e.shiftKey ? 1 : 1 / s.project.fps))
+  } else if (e.code === 'Home') {
+    e.preventDefault()
+    s.setPlayhead(0)
+  } else if (e.code === 'Escape') {
+    if (s.animClipId) s.setAnimClip(null)
+    else s.setRange(null)
+  }
+}
 
 export default function App() {
   const t = useT()
   const name = useEditor((s) => s.project.name)
   const project = useEditor((s) => s.project)
+  const projectPath = useEditor((s) => s.projectPath)
   const savedProject = useSaveUi((s) => s.savedProject)
   const flash = useSaveUi((s) => s.flash)
   // a fresh (empty) session isn't "unsaved work" yet
@@ -92,12 +201,29 @@ export default function App() {
     if (useSaveUi.getState().savedProject === null) markProjectSaved(useEditor.getState().project)
   }, [])
   const dirty = savedProject !== null && project !== savedProject
+
+  useEffect(() => {
+    let active = true
+    void window.kadr.takeInitialProjectPath().then((path) => {
+      if (active && path) return openProjectPath(path)
+    }).catch((err) => {
+      if (active) flashSave('openError', String(err), true)
+    })
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    window.kadr.setWindowProjectState({ path: projectPath, name, dirty })
+  }, [projectPath, name, dirty])
   const undoLabel = useEditor((s) => s.past[s.past.length - 1]?.label)
   const redoLabel = useEditor((s) => s.future[0]?.label)
   const [tlHeight, setTlHeight] = useState(() =>
     Math.min(Number(localStorage.getItem('kadr.tlh')) || 330, window.innerHeight - 220)
   )
-  const [claudeOpen, setClaudeOpen] = useState(false)
+  const [claudeMounted, setClaudeMounted] = useState(false)
+  const [claudeVisible, setClaudeVisible] = useState(false)
+  const [micOpen, setMicOpen] = useState(false)
+  const [previewDetached, setPreviewDetached] = useState(false)
   const [sideW, setSideW] = useState(() =>
     Math.min(640, Math.max(200, Number(localStorage.getItem('kadr.sidew')) || 280))
   )
@@ -123,66 +249,44 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+    window.addEventListener('keydown', handleEditorKey)
+    return () => window.removeEventListener('keydown', handleEditorKey)
+  }, [])
+
+  // Native application menu (File/Edit) → reuse the toolbar handlers.
+  useEffect(() => {
+    return window.kadr.onMenuCommand((cmd) => {
       const s = useEditor.getState()
-      // e.code is keyboard-layout independent (works for ru/en)
-      if (e.code === 'Space') {
-        e.preventDefault()
-        s.setPlaying(!s.playing)
-      } else if (e.code === 'KeyS') {
-        if (e.ctrlKey) {
-          e.preventDefault()
-          if (e.shiftKey) saveProjectAs()
-          else saveProject()
-        } else s.splitAtPlayhead()
-      } else if (e.code === 'KeyD' || e.code === 'Delete' || e.code === 'Backspace') {
-        if (s.selection.length) s.deleteSelection()
-        else if (s.range) s.deleteRange()
-      } else if (e.code === 'KeyZ' && e.ctrlKey) {
-        e.preventDefault()
-        if (e.shiftKey) s.redo()
-        else s.undo()
-      } else if (e.code === 'KeyY' && e.ctrlKey) {
-        e.preventDefault()
-        s.redo()
-      } else if (e.code === 'KeyC' && e.ctrlKey) {
-        if (s.selection.length) s.copySelection()
-        else if (s.range) s.copyRange()
-      } else if (e.code === 'KeyV' && e.ctrlKey) {
-        if (s.clipboard.length) {
-          s.pasteAtPlayhead()
-        } else {
-          // nothing copied inside the editor — try the OS clipboard:
-          // copied files or a copied image (e.g. from Telegram/browser)
-          void window.kadr.clipboardMedia().then((paths) => {
-            if (paths.length) {
-              return importFiles(paths, { trackId: null, at: useEditor.getState().playhead })
-            }
-          }).catch((err) => console.error('clipboard paste failed', err))
+      switch (cmd) {
+        case 'new': {
+          s.setProject(newProject())
+          markProjectSaved(useEditor.getState().project)
+          break
         }
-      } else if (e.code === 'KeyU') {
-        s.toggleLinkSelection()
-      } else if (e.code === 'KeyM' && !e.ctrlKey && !e.altKey) {
-        s.addMarker(s.playhead)
-      } else if (e.code === 'ArrowLeft') {
-        // step the playhead by frames; preventDefault keeps the timeline from scrolling
-        e.preventDefault()
-        s.setPlayhead(s.playhead - (e.shiftKey ? 1 : 1 / s.project.fps))
-      } else if (e.code === 'ArrowRight') {
-        e.preventDefault()
-        s.setPlayhead(s.playhead + (e.shiftKey ? 1 : 1 / s.project.fps))
-      } else if (e.code === 'Home') {
-        e.preventDefault()
-        s.setPlayhead(0)
-      } else if (e.code === 'Escape') {
-        if (s.animClipId) s.setAnimClip(null)
-        else s.setRange(null)
+        case 'open': void openProject(); break
+        case 'save': void saveProject(); break
+        case 'saveAs': void saveProjectAs(); break
+        case 'export': s.setExportOpen(true); break
+        case 'undo':
+        case 'redo': {
+          // Defer to native text undo/redo while editing in a field.
+          const active = document.activeElement as HTMLElement | null
+          const editsText = active?.matches('input, textarea') || active?.isContentEditable
+          if (editsText) document.execCommand(cmd)
+          else if (cmd === 'undo') s.undo()
+          else s.redo()
+          break
+        }
+        case 'cut': {
+          const active = document.activeElement as HTMLElement | null
+          const editsText = active?.matches('input, textarea') || active?.isContentEditable
+          if (editsText) document.execCommand('cut')
+          else if (s.selection.length) s.cutSelection()
+          else if (s.range) s.cutRange()
+          break
+        }
       }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    })
   }, [])
 
   const startSideResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -225,6 +329,20 @@ export default function App() {
   const undoTitle = t('undo') + (undoLabel ? `: ${t(undoLabel as TKey)}` : '')
   const redoTitle = t('redo') + (redoLabel ? `: ${t(redoLabel as TKey)}` : '')
 
+  const toggleClaude = useCallback(() => {
+    if (!claudeMounted) {
+      setClaudeMounted(true)
+      setClaudeVisible(true)
+      return
+    }
+    setClaudeVisible((visible) => !visible)
+  }, [claudeMounted])
+
+  const closeClaude = useCallback(() => {
+    setClaudeVisible(false)
+    setClaudeMounted(false)
+  }, [])
+
   return (
     <div className="app">
       <div className="topbar">
@@ -233,12 +351,6 @@ export default function App() {
           {name}
           {dirty && <span className="dirty-dot" title={t('unsavedChanges')}> ●</span>}
         </span>
-        {flash && (
-          <span className={flash.error ? 'save-flash error' : 'save-flash'}>
-            {flash.error ? '✕' : '✓'} {t(flash.key)}
-            {flash.detail ? ` · ${flash.detail}` : ''}
-          </span>
-        )}
         <span className="flex1" />
         <button title={undoTitle} disabled={!undoLabel} onClick={() => useEditor.getState().undo()}>
           ↶ {t('undoShort')}
@@ -255,26 +367,48 @@ export default function App() {
           {t('newProject')}
         </button>
         <button onClick={openProject}>{t('open')}</button>
-        <button onClick={saveProject} title="Ctrl+S">{t('save')}</button>
-        <button onClick={saveProjectAs} title="Ctrl+Shift+S">{t('saveAs')}</button>
+        <button disabled={!dirty} onClick={saveProject} title={shortcut('S')}>{t('save')}</button>
+        <button onClick={saveProjectAs} title={shortcut('S', true)}>{t('saveAs')}</button>
         <button className="primary" onClick={() => useEditor.getState().setExportOpen(true)}>
           {t('export')}
         </button>
+        <button className={micOpen ? 'mic-top-btn active' : 'mic-top-btn'} onClick={() => setMicOpen(true)}>
+          🎙 {t('micStudio')}
+        </button>
         <button
-          className={claudeOpen ? 'claude-btn active' : 'claude-btn'}
-          title={t('claudeTitle')}
-          onClick={() => setClaudeOpen((v) => !v)}
+          className={`claude-btn${claudeMounted ? ' active' : ''}${
+            claudeMounted && !claudeVisible ? ' minimized' : ''
+          }`}
+          title={claudeMounted && !claudeVisible ? t('claudeMinimizedTitle') : t('claudeTitle')}
+          aria-pressed={claudeMounted}
+          aria-expanded={claudeVisible}
+          onClick={toggleClaude}
         >
           🤖 Claude
         </button>
         <LangSwitch />
       </div>
-      <div className="main-row">
+      {flash && (
+        <div
+          className={flash.error ? 'save-toast error' : 'save-toast'}
+          role={flash.error ? 'alert' : 'status'}
+          aria-live={flash.error ? 'assertive' : 'polite'}
+        >
+          <span className="save-toast-icon" aria-hidden="true">{flash.error ? '✕' : '✓'}</span>
+          <span>
+            <b>{t(flash.key)}</b>
+            {flash.detail && <small>{flash.detail}</small>}
+          </span>
+        </div>
+      )}
+      <div className={previewDetached ? 'main-row preview-detached-layout' : 'main-row'}>
         <SidePanel width={sideW} />
         <div className="h-resizer" onPointerDown={startSideResize} title="⇔" />
-        <div className="center-col">
-          <Preview />
-          <TransportBar />
+        <div className={previewDetached ? 'center-col preview-column-detached' : 'center-col'}>
+          <PreviewWindow
+            onKeyDown={handleEditorKey}
+            onDetachedChange={setPreviewDetached}
+          />
         </div>
         <Inspector />
       </div>
@@ -284,7 +418,13 @@ export default function App() {
       <TranscribeDialog />
       <SubtitlePanel />
       <CaptionsDialog />
-      {claudeOpen && <ClaudePanel onClose={() => setClaudeOpen(false)} />}
+      <VoiceoverStudio />
+      <MicStudio open={micOpen} onClose={() => setMicOpen(false)} />
+      <SaveAsDialog />
+      <AnnotationDialog />
+      {claudeMounted && (
+        <ClaudePanel visible={claudeVisible} onClose={closeClaude} />
+      )}
     </div>
   )
 }

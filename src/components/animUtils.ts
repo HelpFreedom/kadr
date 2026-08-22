@@ -26,6 +26,30 @@ export function applyValue(anim: Anim, rel: number, value: number, linked: boole
   return { ...anim, value }
 }
 
+/**
+ * Change the base value while preserving the shape of an existing animation.
+ * Simple inspector/gizmo edits reposition the whole motion; the animation
+ * editor remains the place for changing an individual keyframe.
+ */
+export function rebaseAnim(anim: Anim, value: number, mode: 'offset' | 'ratio'): Anim {
+  const previous = Number.isFinite(anim.value) ? anim.value : 0
+  const delta = value - previous
+  const keyframeReference = [...(anim.keyframes ?? [])]
+    .reverse()
+    .find((kf) => Math.abs(kf.value) > 1e-9)?.value
+  const reference = Math.abs(previous) > 1e-9 ? previous : keyframeReference
+  const canScale = mode === 'ratio' && reference !== undefined
+  const ratio = canScale ? value / reference : 1
+  return {
+    ...anim,
+    value,
+    keyframes: anim.keyframes?.map((kf) => ({
+      ...kf,
+      value: canScale ? kf.value * ratio : kf.value + delta
+    }))
+  }
+}
+
 /** Reset helper: keyframed params get a default keyframe, static ones reset. */
 export function resetValue(anim: Anim, rel: number, def: number): Anim {
   return anim.keyframes?.length ? upsertKf(anim, rel, def) : { ...anim, value: def }

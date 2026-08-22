@@ -1,17 +1,32 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'electron'
-import { join, dirname, basename } from 'path'
+import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard, Menu, screen } from 'electron'
+import type { WebContents } from 'electron'
+import { join, dirname, basename, extname, resolve } from 'path'
+import { buildDockMenu, buildMenu } from './menu'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 import { createHash } from 'crypto'
-import { execFile } from 'child_process'
+import { execFile, execFileSync } from 'child_process'
+import { fileURLToPath } from 'url'
 import {
-  probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, canPackAlpha, sourceMatrix,
+  probeMedia, makeProxy, validateProxy, makeDecoded, makeReversed,
+  measureLoudness, canPackAlpha, sourceMatrix,
   ExportMuxer, RawVideoEncoder
 } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
-import { registerFragmentIpc } from './fragments'
-import type { ExportJob, Project } from '@shared/types'
+import { bundleFragments, registerFragmentIpc } from './fragments'
+import { registerVoiceoverIpc } from './voiceover'
+import { registerThumbnailIpc } from './thumbnails'
+import { writeHtmlPlayerExport } from './html-player'
+import {
+  embedProjectVoiceClones,
+  packageProject,
+  projectForDisk,
+  readProjectFile
+} from './project-package'
+import type {
+  ExportJob, HtmlPlayerExportRequest, Project, ProjectPackageOptions, ProxyBuildUpdate
+} from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
 // file content regardless of its own origin (http in dev, file in prod).
@@ -46,14 +61,48 @@ app.commandLine.appendSwitch('password-store', 'basic')
   }
 }
 
-// Let Chromium use VAAPI for hardware video encode/decode where the driver
-// allows it (Intel iGPU on this machine); WebCodecs then picks it up via
-// hardwareAcceleration: 'prefer-hardware'.
-app.commandLine.appendSwitch('ignore-gpu-blocklist')
-app.commandLine.appendSwitch(
-  'enable-features',
-  'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
-)
+// A GUI app launched from Finder/LaunchServices inherits only a minimal PATH
+// (/usr/bin:/bin:/usr/sbin:/sbin) — none of Homebrew, ~/.local/bin, nvm, etc.
+// That silently breaks every external tool the editor shells out to: the
+// `claude` CLI (its PTY just exits → "session ended"), `node` for the MCP
+// bridge, and ffmpeg/ffprobe/python3. So adopt the user's real login-shell
+// PATH before anything spawns. Only needed for packaged macOS launches; a
+// dev run already inherits the terminal's environment.
+function fixUserPath() {
+  if (process.platform !== 'darwin' || !app.isPackaged) return
+  const fallback = [
+    '/opt/homebrew/bin', '/opt/homebrew/sbin',
+    '/usr/local/bin', '/usr/local/sbin',
+    join(homedir(), '.local/bin'),
+    '/usr/bin', '/bin', '/usr/sbin', '/sbin'
+  ]
+  let shellPath = ''
+  try {
+    const shell = process.env.SHELL || '/bin/zsh'
+    // login+interactive so ~/.zprofile / ~/.zshrc (nvm, pyenv, custom dirs)
+    // are sourced; markers isolate $PATH from any shell-startup banner noise.
+    const out = execFileSync(shell, ['-ilc', 'printf "_KP_<%s>_KP_" "$PATH"'], {
+      encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore']
+    })
+    shellPath = out.match(/_KP_<(.*)>_KP_/)?.[1] ?? ''
+  } catch { /* shell unavailable — fall back to the known dirs */ }
+  const parts = [...shellPath.split(':'), ...fallback].filter(Boolean)
+  process.env.PATH = [...new Set(parts)].join(':')
+}
+fixUserPath()
+
+// Hardware video encode/decode. On Linux this means VAAPI (Intel/AMD iGPU);
+// macOS and Windows already expose their native accelerators (VideoToolbox /
+// Media Foundation) to Chromium + WebCodecs without these Linux-only flags,
+// and forcing them off-platform only risks the GPU sandbox. WebCodecs then
+// picks the hardware path up via hardwareAcceleration: 'prefer-hardware'.
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('ignore-gpu-blocklist')
+  app.commandLine.appendSwitch(
+    'enable-features',
+    'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
+  )
+}
 
 // Last line of defense: a stray async error (e.g. a stream racing a request
 // abort) must be logged, not shown as a modal error dialog over the editor.
@@ -61,10 +110,77 @@ process.on('uncaughtException', (err) => {
   console.error('[kadr] uncaught exception in main:', err)
 })
 
-let win: BrowserWindow | null = null
+const editorWindows = new Set<BrowserWindow>()
+const initialProjects = new Map<number, string>()
+const windowProjects = new Map<BrowserWindow, string>()
+const pendingProjectPaths: string[] = []
 
-function createWindow() {
-  win = new BrowserWindow({
+function focusedEditorWindow(): BrowserWindow | null {
+  const focused = BrowserWindow.getFocusedWindow()
+  if (focused && editorWindows.has(focused)) return focused
+  return [...editorWindows].at(-1) ?? null
+}
+
+function senderWindow(sender: WebContents): BrowserWindow {
+  const owner = BrowserWindow.fromWebContents(sender)
+  if (!owner || !editorWindows.has(owner)) throw new Error('no editor window')
+  return owner
+}
+
+function sendTo(sender: WebContents, channel: string, ...args: unknown[]) {
+  if (!sender.isDestroyed()) sender.send(channel, ...args)
+}
+
+function projectKey(path: string): string {
+  return resolve(path)
+}
+
+function focusWindow(win: BrowserWindow) {
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+function openProjectWindow(path: string): BrowserWindow {
+  const key = projectKey(path)
+  app.addRecentDocument(key)
+  const existing = [...windowProjects].find(([win, current]) => !win.isDestroyed() && current === key)?.[0]
+  if (existing) {
+    focusWindow(existing)
+    return existing
+  }
+  return createWindow(key)
+}
+
+function safePreviewPosition(features: string): { x?: number; y?: number } {
+  const values = new Map(
+    features.split(',').map((part) => {
+      const [key, value = ''] = part.split('=', 2)
+      return [key.trim(), value.trim()]
+    })
+  )
+  const x = Number(values.get('left') ?? values.get('x'))
+  const y = Number(values.get('top') ?? values.get('y'))
+  const width = Number(values.get('width')) || 960
+  const height = Number(values.get('height')) || 540
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return {}
+
+  const visible = screen.getAllDisplays().some(({ workArea }) => {
+    const overlapW = Math.min(x + width, workArea.x + workArea.width) - Math.max(x, workArea.x)
+    const overlapH = Math.min(y + height, workArea.y + workArea.height) - Math.max(y, workArea.y)
+    return overlapW >= 80 && overlapH >= 40
+  })
+  if (visible) return {}
+
+  const { workArea } = screen.getPrimaryDisplay()
+  return {
+    x: Math.round(workArea.x + (workArea.width - width) / 2),
+    y: Math.round(workArea.y + (workArea.height - height) / 2)
+  }
+}
+
+function createWindow(initialProjectPath?: string): BrowserWindow {
+  const win = new BrowserWindow({
     width: 1500,
     height: 900,
     minWidth: 1000,
@@ -81,22 +197,63 @@ function createWindow() {
       sandbox: false
     }
   })
+  const windowId = win.webContents.id
+  editorWindows.add(win)
+  if (initialProjectPath) {
+    const key = projectKey(initialProjectPath)
+    initialProjects.set(windowId, key)
+    windowProjects.set(win, key)
+  }
+  win.on('closed', () => {
+    editorWindows.delete(win)
+    initialProjects.delete(windowId)
+    windowProjects.delete(win)
+    htmlExportAborts.get(windowId)?.abort()
+    void cleanupExport(windowId)
+  })
   win.setMenuBarVisibility(false)
-  // a killed/crashed renderer leaves a dead window and an immortal main
-  // process (the running project is lost either way — autosave has it);
-  // exit cleanly so the next launch starts fresh instead of being blocked
+  win.webContents.setWindowOpenHandler(({ frameName, features }) => {
+    if (frameName !== 'kadr-preview') return { action: 'allow' }
+    return {
+      action: 'allow',
+      overrideBrowserWindowOptions: {
+        minWidth: 480,
+        minHeight: 320,
+        backgroundColor: '#15171c',
+        autoHideMenuBar: true,
+        title: 'Kadr — Preview',
+        ...safePreviewPosition(features)
+      }
+    }
+  })
+  win.webContents.on('did-create-window', (child, details) => {
+    if (details.frameName === 'kadr-preview') child.setMenuBarVisibility(false)
+  })
+  // A renderer crash should close only its editor window. Other projects are
+  // independent and must keep running.
   win.webContents.on('render-process-gone', (_e, details) => {
     if (details.reason !== 'clean-exit') {
-      console.error('[kadr] renderer gone:', details.reason, '— exiting')
-      app.exit(1)
+      console.error('[kadr] renderer gone:', details.reason, '— closing window')
+      if (!win.isDestroyed()) win.destroy()
     }
   })
   if (process.env.ELECTRON_RENDERER_URL) {
-    win.loadURL(process.env.ELECTRON_RENDERER_URL)
+    void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    win.loadFile(join(__dirname, '../renderer/index.html'))
+    void win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  return win
 }
+
+// Finder and LaunchServices reuse the running process on macOS. Register the
+// handler before `ready`, otherwise a project dropped on the Dock or opened
+// while Kadr is closed can be lost.
+app.on('open-file', (event, path) => {
+  event.preventDefault()
+  if (extname(path).toLowerCase() !== '.kadr') return
+  if (!app.isReady()) pendingProjectPaths.push(projectKey(path))
+  else openProjectWindow(path)
+})
 
 /**
  * Wrap a Node read stream into a Web ReadableStream with guarded
@@ -140,9 +297,30 @@ function streamBody(stream: ReturnType<typeof createReadStream>): ReadableStream
   })
 }
 
+function mediaContentType(filePath: string): string {
+  switch (extname(filePath).toLowerCase()) {
+    case '.wav': return 'audio/wav'
+    case '.mp3': return 'audio/mpeg'
+    case '.m4a': return 'audio/mp4'
+    case '.aac': return 'audio/aac'
+    case '.flac': return 'audio/flac'
+    case '.ogg': return 'audio/ogg'
+    case '.mp4': return 'video/mp4'
+    case '.mov': return 'video/quicktime'
+    case '.webm': return 'video/webm'
+    case '.png': return 'image/png'
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg'
+    case '.webp': return 'image/webp'
+    case '.gif': return 'image/gif'
+    default: return 'application/octet-stream'
+  }
+}
+
 function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   const stat = statSync(filePath)
   const size = stat.size
+  const contentType = mediaContentType(filePath)
   const m = rangeHeader?.match(/bytes=(\d*)-(\d*)/)
   // CORS header keeps WebAudio (MediaElementSource) from silencing the stream
   if (m && (m[1] || m[2])) {
@@ -151,6 +329,7 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
     return new Response(streamBody(createReadStream(filePath, { start, end })), {
       status: 206,
       headers: {
+        'Content-Type': contentType,
         'Content-Range': `bytes ${start}-${end}/${size}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': String(end - start + 1),
@@ -161,6 +340,7 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   return new Response(streamBody(createReadStream(filePath)), {
     status: 200,
     headers: {
+      'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
       'Content-Length': String(size),
       'Access-Control-Allow-Origin': '*'
@@ -181,14 +361,23 @@ app.whenReady().then(() => {
       return new Response('not found', { status: 404 })
     }
   })
+  Menu.setApplicationMenu(buildMenu(focusedEditorWindow, createWindow))
+  app.dock?.setMenu(buildDockMenu(createWindow))
   registerIpc()
+  registerClaudeIpc()
+  registerTranscribeIpc()
+  registerFragmentIpc()
+  registerThumbnailIpc()
+  registerVoiceoverIpc()
   void pruneDecodedCache()
-  registerClaudeIpc(() => win)
-  registerTranscribeIpc(() => win)
-  registerFragmentIpc(() => win)
-  createWindow()
+  if (pendingProjectPaths.length) {
+    for (const path of [...new Set(pendingProjectPaths)]) openProjectWindow(path)
+    pendingProjectPaths.length = 0
+  } else {
+    createWindow()
+  }
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (!editorWindows.size) createWindow()
   })
 })
 
@@ -203,19 +392,22 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  exportState?.muxer?.cancel()
-  void cleanupExport()
+  for (const controller of htmlExportAborts.values()) controller.abort()
+  for (const [windowId, state] of exportStates) {
+    state.muxer?.cancel()
+    void cleanupExport(windowId)
+  }
 })
 
 // ---------------------------------------------------------------------------
 
 const MEDIA_FILTERS = [
-  { name: 'Media', extensions: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v', 'mts', 'mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'opus', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'srt', 'txt'] },
+  { name: 'Media and scripts', extensions: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v', 'mts', 'mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'opus', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'srt', 'txt', 'doc', 'docx'] },
   { name: 'All files', extensions: ['*'] }
 ]
 const PROJECT_FILTERS = [{ name: 'Kadr project', extensions: ['kadr'] }]
 
-let exportState: {
+type ExportState = {
   job: ExportJob
   videoTemp: string
   fh: fs.FileHandle | null
@@ -228,10 +420,12 @@ let exportState: {
   rawWss: import('ws').WebSocketServer | null
   rawChain: Promise<void>
   rawErr: Error | null
-} | null = null
+}
+const exportStates = new Map<number, ExportState>()
+const htmlExportAborts = new Map<number, AbortController>()
 
-function sendProgress(p: import('@shared/types').ExportProgress) {
-  win?.webContents.send('export:progress', p)
+function sendProgress(sender: WebContents, p: import('@shared/types').ExportProgress) {
+  sendTo(sender, 'export:progress', p)
 }
 
 // app-wide JSON stores (presets etc.) in userData — independent of the
@@ -239,48 +433,157 @@ function sendProgress(p: import('@shared/types').ExportProgress) {
 const userStorePath = (name: string) =>
   join(app.getPath('userData'), `${name.replace(/[^a-z0-9-]/gi, '')}.json`)
 
-// preview proxies: keyed by source identity, built one at a time (weak CPU)
+// Preview proxies: keyed by source identity + encode profile, built one at a
+// time (weak CPU). Changing the profile version automatically retires old
+// low-quality caches without having to scan or delete the cache directory.
 const proxyDir = () => join(app.getPath('userData'), 'proxies')
+const storyboardDir = () => join(app.getPath('userData'), 'storyboards')
+let lastStoryboardCleanup = 0
+
+async function cleanupStoryboardCache(): Promise<void> {
+  if (Date.now() - lastStoryboardCleanup < 60 * 60 * 1000) return
+  lastStoryboardCleanup = Date.now()
+  let names: string[]
+  try { names = await fs.readdir(storyboardDir()) } catch { return }
+  const entries = (await Promise.all(names.map(async (name) => {
+    const path = join(storyboardDir(), name)
+    try {
+      const stat = await fs.stat(path)
+      return stat.isDirectory() ? { path, mtimeMs: stat.mtimeMs } : null
+    } catch { return null }
+  }))).filter((entry): entry is NonNullable<typeof entry> => !!entry)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
+  for (const [index, entry] of entries.entries()) {
+    if (index >= 24 || entry.mtimeMs < cutoff) {
+      await fs.rm(entry.path, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+}
+
+const PROXY_PROFILE_VERSION = 'v2-portrait-720-crf22'
+const PROXY_MAX_ATTEMPTS = 3
 let proxyChain: Promise<unknown> = Promise.resolve()
+const validatedProxies = new Map<string, string>()
+
+function proxyError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 1000)
+}
+
+function proxyUpdate(
+  sender: WebContents,
+  srcPath: string,
+  update: Omit<ProxyBuildUpdate, 'path'>
+) {
+  sendTo(sender, 'proxy:progress', { path: srcPath, ...update } satisfies ProxyBuildUpdate)
+}
+
+async function proxyIsValid(path: string, duration: number): Promise<boolean> {
+  try {
+    const stat = await fs.stat(path)
+    const identity = `${stat.size}:${Math.round(stat.mtimeMs)}`
+    if (validatedProxies.get(path) === identity) return true
+    await validateProxy(path, duration)
+    validatedProxies.set(path, identity)
+    return true
+  } catch {
+    validatedProxies.delete(path)
+    await fs.unlink(path).catch(() => { /* already absent or in use */ })
+    return false
+  }
+}
+
+async function publishProxy(temp: string, out: string): Promise<void> {
+  try {
+    // Same-directory rename is atomic on the common desktop filesystems and
+    // replaces the old proxy only after the new one has passed validation.
+    await fs.rename(temp, out)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'EEXIST' && code !== 'EPERM') throw error
+    // Windows can refuse rename-over-existing. Preserve the valid old proxy
+    // as a rollback target until the new file is in its final location.
+    const backup = `${out}.${process.pid}.old`
+    await fs.unlink(backup).catch(() => { /* stale backup absent */ })
+    await fs.rename(out, backup)
+    try {
+      await fs.rename(temp, out)
+      await fs.unlink(backup).catch(() => { /* cleanup is best effort */ })
+    } catch (publishError) {
+      await fs.rename(backup, out).catch(() => { /* retain original error */ })
+      throw publishError
+    }
+  }
+}
+
+const proxyBackoff = (attempt: number) => new Promise<void>((resolveDelay) => {
+  setTimeout(resolveDelay, 750 * (2 ** (attempt - 1)))
+})
 
 async function requestProxy(
+  sender: WebContents,
   srcPath: string,
   duration: number,
-  opts?: { alpha?: boolean; codec?: string }
+  opts?: { alpha?: boolean; codec?: string },
+  force = false
 ): Promise<string> {
   const stat = statSync(srcPath)
   // alpha proxies are a different artifact (webm) — separate cache identity
   const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}${opts?.alpha ? ':a' : ''}`)
+    .update(`${PROXY_PROFILE_VERSION}:${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}` +
+      `${opts?.alpha ? ':a' : ''}`)
     .digest('hex')
     .slice(0, 20)
   const ext = opts?.alpha ? 'webm' : 'mp4'
   const out = join(proxyDir(), `${key}.${ext}`)
-  try {
-    await fs.access(out)
-    return out
-  } catch { /* not built yet */ }
   await fs.mkdir(proxyDir(), { recursive: true })
+  if (!force && await proxyIsValid(out, duration)) {
+    proxyUpdate(sender, srcPath, { state: 'ready', progress: 1, cached: true })
+    return out
+  }
+  proxyUpdate(sender, srcPath, { state: 'queued', progress: 0, attempt: 1 })
+
   const job = proxyChain.then(async () => {
-    try {
-      await fs.access(out)
-      return // built while we waited in the queue
-    } catch { /* still missing */ }
-    const tmp = join(proxyDir(), `${key}.part.${ext}`)
-    try {
-      await makeProxy(srcPath, tmp, duration, (p) => {
-        win?.webContents.send('proxy:progress', { path: srcPath, progress: p })
-      }, opts)
-      await fs.rename(tmp, out)
-    } catch (err) {
-      fs.unlink(tmp).catch(() => { /* nothing to clean */ })
-      throw err
+    if (!force && await proxyIsValid(out, duration)) {
+      proxyUpdate(sender, srcPath, { state: 'ready', progress: 1, cached: true })
+      return out
     }
+
+    let lastError: unknown = new Error('proxy generation did not start')
+    for (let attempt = 1; attempt <= PROXY_MAX_ATTEMPTS; attempt++) {
+      const tmp = join(proxyDir(), `${key}.${process.pid}.${Date.now()}.${attempt}.part.${ext}`)
+      try {
+        proxyUpdate(sender, srcPath, { state: 'building', progress: 0, attempt })
+        await makeProxy(srcPath, tmp, duration, (progress) => {
+          proxyUpdate(sender, srcPath, { state: 'building', progress, attempt })
+        }, opts)
+        proxyUpdate(sender, srcPath, { state: 'validating', progress: 1, attempt })
+        await validateProxy(tmp, duration)
+        await publishProxy(tmp, out)
+        const outStat = await fs.stat(out)
+        validatedProxies.set(out, `${outStat.size}:${Math.round(outStat.mtimeMs)}`)
+        proxyUpdate(sender, srcPath, { state: 'ready', progress: 1, attempt, cached: false })
+        return out
+      } catch (error) {
+        lastError = error
+        await fs.unlink(tmp).catch(() => { /* partial output absent */ })
+        if (attempt < PROXY_MAX_ATTEMPTS) {
+          const retryInMs = 750 * (2 ** (attempt - 1))
+          proxyUpdate(sender, srcPath, {
+            state: 'retrying', progress: 0, attempt, retryInMs, error: proxyError(error)
+          })
+          await proxyBackoff(attempt)
+        }
+      }
+    }
+    const message = proxyError(lastError)
+    proxyUpdate(sender, srcPath, {
+      state: 'error', progress: 0, attempt: PROXY_MAX_ATTEMPTS, error: message
+    })
+    throw new Error(`proxy generation failed after ${PROXY_MAX_ATTEMPTS} attempts: ${message}`)
   })
   proxyChain = job.catch(() => { /* keep the queue alive */ })
-  await job
-  win?.webContents.send('proxy:progress', { path: srcPath, progress: 1 })
-  return out
+  return job
 }
 
 // full-res H.264 intermediates for sources Chromium cannot decode (export
@@ -290,6 +593,7 @@ const decodedDir = () => join(app.getPath('userData'), 'decoded')
 let decodedChain: Promise<unknown> = Promise.resolve()
 
 async function requestDecoded(
+  sender: WebContents,
   srcPath: string,
   duration: number,
   opts?: { alpha?: boolean; codec?: string; packed?: boolean; matrix?: string }
@@ -337,7 +641,7 @@ async function requestDecoded(
     const tmp = join(decodedDir(), `${key}.part.${ext}`)
     try {
       await makeDecoded(srcPath, tmp, duration, (p) => {
-        win?.webContents.send('proxy:progress', { path: srcPath, progress: p })
+        sendTo(sender, 'proxy:progress', { path: srcPath, progress: p })
       }, opts)
       await fs.rename(tmp, out)
     } catch (err) {
@@ -347,7 +651,7 @@ async function requestDecoded(
   })
   decodedChain = job.catch(() => { /* keep the queue alive */ })
   await job
-  win?.webContents.send('proxy:progress', { path: srcPath, progress: 1 })
+  sendTo(sender, 'proxy:progress', { path: srcPath, progress: 1 })
   return out
 }
 
@@ -387,6 +691,7 @@ const reverseDir = () => join(app.getPath('userData'), 'reversed')
 let reverseChain: Promise<unknown> = Promise.resolve()
 
 async function requestReversed(
+  sender: WebContents,
   srcPath: string,
   start: number,
   duration: number,
@@ -411,7 +716,7 @@ async function requestReversed(
     const tmp = join(reverseDir(), `${key}.part.${info.kind === 'video' ? 'mp4' : 'wav'}`)
     try {
       await makeReversed(srcPath, start, duration, tmp, info, join(reverseDir(), `${key}.tmp`), (p) => {
-        win?.webContents.send('reverse:progress', { path: srcPath, start, duration, progress: p })
+        sendTo(sender, 'reverse:progress', { path: srcPath, start, duration, progress: p })
       })
       await fs.rename(tmp, out)
     } catch (err) {
@@ -421,7 +726,7 @@ async function requestReversed(
   })
   reverseChain = job.catch(() => { /* keep the queue alive */ })
   await job
-  win?.webContents.send('reverse:progress', { path: srcPath, start, duration, progress: 1 })
+  sendTo(sender, 'reverse:progress', { path: srcPath, start, duration, progress: 1 })
   return out
 }
 
@@ -458,14 +763,53 @@ async function rememberDir(kind: string, filePath: string) {
 }
 
 function registerIpc() {
-  ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number,
+  ipcMain.on('window:new', (event) => {
+    senderWindow(event.sender)
+    createWindow()
+  })
+
+  ipcMain.handle('window:initial-project', (event) => {
+    const path = initialProjects.get(event.sender.id) ?? null
+    initialProjects.delete(event.sender.id)
+    return path
+  })
+
+  ipcMain.on('window:project-state', (event, state: {
+    path: string | null
+    name: string
+    dirty: boolean
+  }) => {
+    const win = senderWindow(event.sender)
+    const path = typeof state.path === 'string' && state.path ? projectKey(state.path) : null
+    const name = typeof state.name === 'string' && state.name.trim() ? state.name.trim() : 'Untitled'
+    if (path) {
+      const changed = windowProjects.get(win) !== path
+      windowProjects.set(win, path)
+      if (changed) {
+        if (process.platform === 'darwin') win.setRepresentedFilename(path)
+        app.addRecentDocument(path)
+      }
+    } else {
+      windowProjects.delete(win)
+      if (process.platform === 'darwin') win.setRepresentedFilename('')
+    }
+    if (process.platform === 'darwin') win.setDocumentEdited(Boolean(state.dirty))
+    win.setTitle(`${name} — Kadr`)
+  })
+
+  ipcMain.handle('proxy:request', (event, srcPath: string, duration: number,
     opts?: { alpha?: boolean; codec?: string }) =>
-    requestProxy(srcPath, duration, opts)
+    requestProxy(event.sender, srcPath, duration, opts)
   )
 
-  ipcMain.handle('media:decoded', (_e, srcPath: string, duration: number,
+  ipcMain.handle('proxy:rebuild', (event, srcPath: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string }) =>
+    requestProxy(event.sender, srcPath, duration, opts, true)
+  )
+
+  ipcMain.handle('media:decoded', (event, srcPath: string, duration: number,
     opts?: { alpha?: boolean; codec?: string; packed?: boolean }) =>
-    requestDecoded(srcPath, duration, opts)
+    requestDecoded(event.sender, srcPath, duration, opts)
   )
 
   ipcMain.handle('media:loudness', (_e, srcPath: string, start: number, duration: number) =>
@@ -474,9 +818,9 @@ function registerIpc() {
 
   ipcMain.handle(
     'media:reverse',
-    (_e, srcPath: string, start: number, duration: number, info: {
+    (event, srcPath: string, start: number, duration: number, info: {
       kind: string; hasAudio: boolean; width: number; height: number; fps: number
-    }) => requestReversed(srcPath, start, duration, info)
+    }) => requestReversed(event.sender, srcPath, start, duration, info)
   )
 
   ipcMain.handle('store:read', async (_e, name: string) => {
@@ -491,8 +835,8 @@ function registerIpc() {
     await fs.writeFile(userStorePath(name), JSON.stringify(data, null, 1))
   })
 
-  ipcMain.handle('media:open-dialog', async () => {
-    const r = await dialog.showOpenDialog(win!, {
+  ipcMain.handle('media:open-dialog', async (event) => {
+    const r = await dialog.showOpenDialog(senderWindow(event.sender), {
       properties: ['openFile', 'multiSelections'],
       defaultPath: await lastDir('media'),
       filters: MEDIA_FILTERS
@@ -576,18 +920,63 @@ function registerIpc() {
     return paths
   })
 
-  // Clipboard paste (Ctrl+V with an empty editor clipboard): copied FILES
+  // Clipboard paste (platform paste shortcut with an empty editor clipboard): copied FILES
   // (file managers put text/uri-list on the clipboard) win over a copied
   // IMAGE (e.g. Telegram's «Копировать изображение» — photos can't even be
   // dragged out of tdesktop, paste is the ergonomic route into the editor).
   ipcMain.handle('media:clipboard-paste', async () => {
+    const paths: string[] = []
+    const seen = new Set<string>()
+    const addPath = (path: string) => {
+      const clean = path.trim()
+      if (clean && !seen.has(clean)) {
+        seen.add(clean)
+        paths.push(clean)
+      }
+    }
+    const addFileUrl = (value: string) => {
+      const url = value.trim()
+      if (!url.toLowerCase().startsWith('file://')) return
+      try { addPath(fileURLToPath(url)) } catch { /* malformed/non-local URL */ }
+    }
+
+    // Finder exposes copied files through native pasteboard types. Electron
+    // normalizes availableFormats() to "text/uri-list" on macOS, but reading
+    // that normalized type returns an empty string; readImage() then yields
+    // Finder's generic PNG document icon instead of the file contents.
+    // NSFilenamesPboardType carries every selected file, while public.file-url
+    // is the reliable single-file fallback.
+    if (process.platform === 'darwin') {
+      try {
+        const plist = clipboard.read('NSFilenamesPboardType') || ''
+        const decodeXml = (value: string) => value.replace(
+          /&(amp|lt|gt|quot|apos|#x[0-9a-f]+|#\d+);/gi,
+          (entity, token: string) => {
+            const named: Record<string, string> = {
+              amp: '&', lt: '<', gt: '>', quot: '"', apos: "'"
+            }
+            const lower = token.toLowerCase()
+            if (named[lower]) return named[lower]
+            const radix = lower.startsWith('#x') ? 16 : 10
+            const digits = lower.slice(radix === 16 ? 2 : 1)
+            const point = parseInt(digits, radix)
+            try { return Number.isFinite(point) ? String.fromCodePoint(point) : entity }
+            catch { return entity }
+          }
+        )
+        for (const match of plist.matchAll(/<string>([\s\S]*?)<\/string>/g)) {
+          addPath(decodeXml(match[1]))
+        }
+      } catch { /* pasteboard type absent */ }
+      try { addFileUrl(clipboard.read('public.file-url') || '') } catch { /* type absent */ }
+    }
+
     let uriList = ''
     try { uriList = clipboard.read('text/uri-list') || '' } catch { /* format absent */ }
-    const paths: string[] = []
     for (const line of uriList.split(/\r?\n/)) {
       const u = line.trim()
-      if (!u.startsWith('file://')) continue
-      try { paths.push(decodeURIComponent(new URL(u).pathname)) } catch { /* malformed */ }
+      if (!u || u.startsWith('#')) continue
+      addFileUrl(u)
     }
     if (paths.length) return paths
     const img = clipboard.readImage()
@@ -629,8 +1018,8 @@ function registerIpc() {
     return writeImported(out, buf)
   })
 
-  ipcMain.handle('dialog:pick-dir', async (_e, title?: string) => {
-    const r = await dialog.showOpenDialog(win!, {
+  ipcMain.handle('dialog:pick-dir', async (event, title?: string) => {
+    const r = await dialog.showOpenDialog(senderWindow(event.sender), {
       title: title || undefined,
       properties: ['openDirectory', 'createDirectory']
     })
@@ -662,8 +1051,41 @@ function registerIpc() {
     return out
   })
 
-  ipcMain.handle('project:save-dialog', async (_e, currentName: string) => {
-    const r = await dialog.showSaveDialog(win!, {
+  // Agent storyboards are disposable visual cache, not user media. Stable
+  // paths let force refresh replace stale pixels without filling the project
+  // directory (or Downloads) with numbered PNG copies.
+  ipcMain.handle('storyboard:save-image', async (
+    _e, cacheKey: string, baseName: string, png: ArrayBuffer
+  ) => {
+    if (!png?.byteLength) throw new Error('empty storyboard image')
+    const safeKey = String(cacheKey).replace(/[^a-f0-9]/gi, '').slice(0, 64)
+    if (safeKey.length < 16) throw new Error('invalid storyboard cache key')
+    const safeName = String(baseName).replace(/[^\p{L}\p{N} ._-]/gu, '_').slice(0, 120) || 'frame'
+    const target = join(storyboardDir(), safeKey)
+    const out = join(target, `${safeName}.png`)
+    const tmp = join(target, `${safeName}.${process.pid}.${Date.now()}.part.png`)
+    await fs.mkdir(target, { recursive: true })
+    try {
+      await fs.writeFile(tmp, Buffer.from(png))
+      try {
+        await fs.rename(tmp, out)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code !== 'EEXIST' && code !== 'EPERM') throw error
+        await fs.unlink(out).catch(() => { /* first generation */ })
+        await fs.rename(tmp, out)
+      }
+    } finally {
+      await fs.unlink(tmp).catch(() => { /* already published */ })
+    }
+    const now = new Date()
+    await fs.utimes(target, now, now).catch(() => { /* directory timestamp is only for eviction */ })
+    void cleanupStoryboardCache()
+    return out
+  })
+
+  ipcMain.handle('project:save-dialog', async (event, currentName: string) => {
+    const r = await dialog.showSaveDialog(senderWindow(event.sender), {
       defaultPath: join(await lastDir('project'), `${currentName}.kadr`),
       filters: PROJECT_FILTERS
     })
@@ -672,8 +1094,26 @@ function registerIpc() {
     return r.filePath
   })
 
-  ipcMain.handle('project:open-dialog', async () => {
-    const r = await dialog.showOpenDialog(win!, {
+  ipcMain.handle('project:package-dialog', async (event, _currentName: string) => {
+    const r = await dialog.showOpenDialog(senderWindow(event.sender), {
+      defaultPath: await lastDir('project'),
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (r.canceled || !r.filePaths[0]) return null
+    void rememberDir('project', join(r.filePaths[0], 'project.kadr'))
+    return r.filePaths[0]
+  })
+
+  ipcMain.handle('project:package', async (
+    _event,
+    parentDir: string,
+    sourceProjectPath: string | null,
+    project: Project,
+    options: ProjectPackageOptions
+  ) => packageProject(parentDir, sourceProjectPath, project, options))
+
+  ipcMain.handle('project:open-dialog', async (event) => {
+    const r = await dialog.showOpenDialog(senderWindow(event.sender), {
       properties: ['openFile'],
       defaultPath: await lastDir('project'),
       filters: PROJECT_FILTERS
@@ -684,30 +1124,32 @@ function registerIpc() {
   })
 
   ipcMain.handle('project:read', async (_e, path: string): Promise<Project> => {
-    return JSON.parse(await fs.readFile(path, 'utf-8'))
+    return readProjectFile(path)
   })
 
   ipcMain.handle('project:write', async (_e, path: string, project: Project) => {
-    await fs.writeFile(path, JSON.stringify(project, null, 1), 'utf-8')
+    const portable = await embedProjectVoiceClones(project, path)
+    await fs.writeFile(path, JSON.stringify(projectForDisk(portable, path), null, 1), 'utf-8')
   })
 
   // periodic safety net: <name>.autosave.kadr next to the saved project
   // (Downloads for never-saved ones); tmp+rename so a crash mid-write can
   // never leave a torn file
-  ipcMain.handle('project:autosave', async (_e, project: Project, mainPath: string | null) => {
+  ipcMain.handle('project:autosave', async (event, project: Project, mainPath: string | null) => {
     const dir = mainPath ? dirname(mainPath) : app.getPath('downloads')
     const base = mainPath
       ? basename(mainPath, '.kadr')
-      : (project.name || 'Untitled').replace(/[^\p{L}\p{N}._ -]/gu, '').trim() || 'Untitled'
+      : `${(project.name || 'Untitled').replace(/[^\p{L}\p{N}._ -]/gu, '').trim() || 'Untitled'}.${event.sender.id}`
     const out = join(dir, `${base}.autosave.kadr`)
     const tmp = `${out}.tmp`
-    await fs.writeFile(tmp, JSON.stringify(project, null, 1), 'utf-8')
+    const portable = await embedProjectVoiceClones(project, out)
+    await fs.writeFile(tmp, JSON.stringify(projectForDisk(portable, out), null, 1), 'utf-8')
     await fs.rename(tmp, out)
     return out
   })
 
-  ipcMain.handle('export:dialog', async (_e, defaultName: string, ext: string) => {
-    const r = await dialog.showSaveDialog(win!, {
+  ipcMain.handle('export:dialog', async (event, defaultName: string, ext: string) => {
+    const r = await dialog.showSaveDialog(senderWindow(event.sender), {
       defaultPath: join(await lastDir('export'), `${defaultName}.${ext}`),
       filters: [{ name: ext.toUpperCase(), extensions: [ext] }]
     })
@@ -716,29 +1158,60 @@ function registerIpc() {
     return r.filePath
   })
 
-  ipcMain.handle('export:begin', async (_e, job: ExportJob) => {
-    await cleanupExport()
-    const videoTemp = join(tmpdir(), `kadr-export-${Date.now()}.mp4`)
-    const fh = job.preset.audioOnly ? null : await fs.open(videoTemp, 'w')
-    exportState = {
-      job, videoTemp, fh, muxer: null, raw: null, rawEncoded: false,
-      rawWss: null, rawChain: Promise.resolve(), rawErr: null
+  ipcMain.handle('html-player:export', async (event, request: HtmlPlayerExportRequest) => {
+    const windowId = event.sender.id
+    htmlExportAborts.get(windowId)?.abort()
+    const controller = new AbortController()
+    htmlExportAborts.set(windowId, controller)
+    try {
+      const output = await writeHtmlPlayerExport(request, {
+        bundlePath: join(__dirname, '..', 'html-player', 'player.js'),
+        signal: controller.signal,
+        bundleFragments,
+        onProgress: (progress) => sendProgress(event.sender, {
+          phase: 'files', progress: 0.15 + progress * 0.85
+        })
+      })
+      sendProgress(event.sender, { phase: 'done', progress: 1 })
+      return output
+    } catch (error: any) {
+      const cancelled = controller.signal.aborted || error?.message === 'cancelled'
+      sendProgress(event.sender, {
+        phase: cancelled ? 'cancelled' : 'error',
+        progress: 0,
+        message: String(error?.message ?? error)
+      })
+      throw error
+    } finally {
+      if (htmlExportAborts.get(windowId) === controller) htmlExportAborts.delete(windowId)
     }
   })
 
-  ipcMain.handle('export:video-chunk', async (_e, data: ArrayBuffer, position: number) => {
-    if (!exportState?.fh) throw new Error('no export in progress')
-    await exportState.fh.write(Buffer.from(data), 0, data.byteLength, position)
+  ipcMain.handle('export:begin', async (event, job: ExportJob) => {
+    const windowId = event.sender.id
+    await cleanupExport(windowId)
+    const videoTemp = join(tmpdir(), `kadr-export-${windowId}-${Date.now()}.mp4`)
+    const fh = job.preset.audioOnly ? null : await fs.open(videoTemp, 'w')
+    exportStates.set(windowId, {
+      job, videoTemp, fh, muxer: null, raw: null, rawEncoded: false,
+      rawWss: null, rawChain: Promise.resolve(), rawErr: null
+    })
+  })
+
+  ipcMain.handle('export:video-chunk', async (event, data: ArrayBuffer, position: number) => {
+    const state = exportStates.get(event.sender.id)
+    if (!state?.fh) throw new Error('no export in progress')
+    await state.fh.write(Buffer.from(data), 0, data.byteLength, position)
   })
 
   // direct ffmpeg encode: raw RGBA frames from the renderer over stdin;
   // returns a local WebSocket port for the frame stream (0 = use IPC)
   ipcMain.handle('export:raw-begin', async (
-    _e, width: number, height: number, fps: number,
+    event, width: number, height: number, fps: number,
     outWidth?: number, outHeight?: number
   ) => {
-    if (!exportState) throw new Error('no export in progress')
-    const st = exportState
+    const st = exportStates.get(event.sender.id)
+    if (!st) throw new Error('no export in progress')
     await st.fh?.close()
     st.fh = null
     const preset = st.job.preset
@@ -777,9 +1250,9 @@ function registerIpc() {
   })
 
   // preload encoded the video itself — adopt its file for the mux stage
-  ipcMain.handle('export:use-video', async (_e, path: string) => {
-    if (!exportState) throw new Error('no export in progress')
-    const st = exportState
+  ipcMain.handle('export:use-video', async (event, path: string) => {
+    const st = exportStates.get(event.sender.id)
+    if (!st) throw new Error('no export in progress')
     await st.fh?.close()
     st.fh = null
     if (st.videoTemp !== path) {
@@ -789,14 +1262,15 @@ function registerIpc() {
     st.rawEncoded = true
   })
 
-  ipcMain.handle('export:raw-frame', async (_e, data: ArrayBuffer) => {
-    if (!exportState?.raw) throw new Error('no raw encoder')
-    await exportState.raw.write(Buffer.from(data))
+  ipcMain.handle('export:raw-frame', async (event, data: ArrayBuffer) => {
+    const st = exportStates.get(event.sender.id)
+    if (!st?.raw) throw new Error('no raw encoder')
+    await st.raw.write(Buffer.from(data))
   })
 
-  ipcMain.handle('export:raw-end', async () => {
-    if (!exportState?.raw) throw new Error('no raw encoder')
-    const st = exportState
+  ipcMain.handle('export:raw-end', async (event) => {
+    const st = exportStates.get(event.sender.id)
+    if (!st?.raw) throw new Error('no raw encoder')
     await st.rawChain
     if (st.rawErr) throw st.rawErr
     st.rawWss?.close()
@@ -805,9 +1279,10 @@ function registerIpc() {
     st.raw = null
   })
 
-  ipcMain.handle('export:video-done', async () => {
-    if (!exportState) throw new Error('no export in progress')
-    const st = exportState
+  ipcMain.handle('export:video-done', async (event) => {
+    const windowId = event.sender.id
+    const st = exportStates.get(windowId)
+    if (!st) throw new Error('no export in progress')
     await st.fh?.close()
     st.fh = null
     st.muxer = new ExportMuxer()
@@ -816,33 +1291,36 @@ function registerIpc() {
       const job = st.rawEncoded
         ? { ...st.job, preset: { ...st.job.preset, ffmpegVideo: 'copy' as const } }
         : st.job
-      await st.muxer.run(job, st.videoTemp, sendProgress)
-      sendProgress({ phase: 'done', progress: 1 })
+      await st.muxer.run(job, st.videoTemp, (progress) => sendProgress(event.sender, progress))
+      sendProgress(event.sender, { phase: 'done', progress: 1 })
     } catch (err: any) {
-      sendProgress({
+      sendProgress(event.sender, {
         phase: err?.message === 'cancelled' ? 'cancelled' : 'error',
         progress: 0,
         message: String(err?.message ?? err)
       })
     } finally {
-      await cleanupExport()
+      await cleanupExport(windowId)
     }
   })
 
-  ipcMain.handle('export:cancel', async () => {
-    exportState?.raw?.kill()
-    exportState?.muxer?.cancel()
-    if (exportState && !exportState.muxer) {
-      await cleanupExport()
-      sendProgress({ phase: 'cancelled', progress: 0 })
+  ipcMain.handle('export:cancel', async (event) => {
+    const windowId = event.sender.id
+    htmlExportAborts.get(windowId)?.abort()
+    const st = exportStates.get(windowId)
+    st?.raw?.kill()
+    st?.muxer?.cancel()
+    if (st && !st.muxer) {
+      await cleanupExport(windowId)
+      sendProgress(event.sender, { phase: 'cancelled', progress: 0 })
     }
   })
 }
 
-async function cleanupExport() {
-  if (!exportState) return
-  const st = exportState
-  exportState = null
+async function cleanupExport(windowId: number) {
+  const st = exportStates.get(windowId)
+  if (!st) return
+  exportStates.delete(windowId)
   st.raw?.kill()
   st.rawWss?.close()
   try { await st.fh?.close() } catch { /* already closed */ }

@@ -1,16 +1,24 @@
 import { useRef, useState } from 'react'
 import { useEditor } from '@/state/store'
-import { useProxyProgress } from '@/engine/proxy'
-import { importFiles, dropPayload, dragHasMedia, dropUsable, importDrop, useImportUi } from '@/engine/mediaImport'
+import { rebuildProxy, useProxyProgress } from '@/engine/proxy'
+import {
+  beginInternalMediaDrag, endInternalMediaDrag, importFiles, dropPayload,
+  dragHasMedia, dropUsable, importDrop, useImportUi
+} from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useT } from '@/i18n'
+import { hasPrimaryModifier } from '@/shortcuts'
 
 export function MediaBin() {
   const t = useT()
   const assets = useEditor((s) => s.project.assets)
   const texts = useEditor((s) => s.project.texts ?? [])
+  const projectName = useEditor((s) => s.project.name)
+  const playhead = useEditor((s) => s.playhead)
   const proxyJobs = useProxyProgress((s) => s.jobs)
+  const proxyErrors = useProxyProgress((s) => s.errors)
   const [busy, setBusy] = useState(false)
+  const [importError, setImportError] = useState('')
   const importing = useImportUi((s) => s.active > 0)
   const [sel, setSel] = useState<string[]>([])
   const [confirmIds, setConfirmIds] = useState<string[] | null>(null)
@@ -27,8 +35,34 @@ export function MediaBin() {
     const paths = await window.kadr.openMediaDialog()
     if (!paths.length) return
     setBusy(true)
+    setImportError('')
     try {
       await importFiles(paths, null)
+    } catch (error) {
+      setImportError(String(error instanceof Error ? error.message : error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function createSrt() {
+    setBusy(true)
+    setImportError('')
+    try {
+      const suggested = projectName && projectName !== 'Untitled'
+        ? `${projectName} subtitles`
+        : 'subtitles'
+      const path = await window.kadr.createSrtFile(suggested, playhead)
+      if (!path) return
+      await importFiles([path], null)
+      const created = (useEditor.getState().project.texts ?? []).find((doc) => doc.path === path)
+      if (created) {
+        setTextsOpen(true)
+        localStorage.setItem('kadr.textsOpen', '1')
+        useTextUi.getState().openDoc(created.id)
+      }
+    } catch (error) {
+      setImportError(String(error instanceof Error ? error.message : error))
     } finally {
       setBusy(false)
     }
@@ -40,12 +74,14 @@ export function MediaBin() {
     const payload = dropPayload(e)
     if (!dropUsable(payload)) return
     e.preventDefault()
-    void importDrop(payload, null)
+    setImportError('')
+    void importDrop(payload, null).catch((error) =>
+      setImportError(String(error instanceof Error ? error.message : error)))
   }
 
-  // click selects, Ctrl toggles, Shift extends from the last clicked tile
+  // Click selects, the platform modifier toggles, Shift extends a range.
   const clickTile = (e: React.MouseEvent, id: string) => {
-    if (e.ctrlKey || e.metaKey) {
+    if (hasPrimaryModifier(e)) {
       setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
     } else if (e.shiftKey && lastClick.current) {
       const order = assets.map((a) => a.id)
@@ -93,10 +129,14 @@ export function MediaBin() {
             ✕ {sel.length}
           </button>
         )}
+        <button title={t('createSrtHint')} onClick={() => void createSrt()} disabled={busy || importing}>
+          ＋ SRT
+        </button>
         <button onClick={importMedia} disabled={busy || importing}>
           {busy || importing ? '…' : t('import')}
         </button>
       </div>
+      {importError && <div className="bin-import-error">{importError}</div>}
       <div
         className="bin-grid"
         onDragOver={(e) => {
@@ -115,9 +155,11 @@ export function MediaBin() {
             title={a.path}
             draggable
             onDragStart={(e) => {
+              beginInternalMediaDrag(a.id)
               e.dataTransfer.setData('kadr/asset', a.id)
               e.dataTransfer.effectAllowed = 'copy'
             }}
+            onDragEnd={endInternalMediaDrag}
             onClick={(e) => clickTile(e, a.id)}
             onDoubleClick={() => {
               const s = useEditor.getState()
@@ -133,6 +175,17 @@ export function MediaBin() {
               <div className="proxy-badge building" title={t('proxyBuilding')}>
                 ⚙ {Math.round(proxyJobs[a.id] * 100)}%
               </div>
+            ) : proxyErrors[a.id] ? (
+              <button
+                className="proxy-badge error"
+                title={`${t('proxyError')}: ${proxyErrors[a.id]}\n${t('proxyRetry')}`}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void rebuildProxy(a.id).catch(() => { /* the badge retains the new error */ })
+                }}
+              >
+                ! ↻
+              </button>
             ) : a.proxyPath ? (
               <div className="proxy-badge" title={t('proxyReady')}>
                 P

@@ -6,9 +6,30 @@ import type { TextDoc } from '@shared/types'
 /** files/URLs currently being imported (drop or dialog) — drives the '…' hint */
 export const useImportUi = create<{ active: number }>(() => ({ active: 0 }))
 
+export interface MediaDropGhost {
+  trackId: string
+  start: number
+  duration: number
+  label: string
+  kind: 'video' | 'audio' | 'external'
+  secondary?: boolean
+  blocked?: boolean
+}
+
+export const useMediaDropUi = create<{ ghosts: MediaDropGhost[] }>(() => ({ ghosts: [] }))
+
+export function showMediaDropPreview(ghosts: MediaDropGhost[]): void {
+  useMediaDropUi.setState({ ghosts })
+}
+
+export function clearMediaDropPreview(): void {
+  if (useMediaDropUi.getState().ghosts.length) useMediaDropUi.setState({ ghosts: [] })
+}
+
 /**
  * Import files by absolute path: probe each into a bin asset (paths already
- * in the bin are reused, not duplicated), register srt/txt as text docs, and
+ * in the bin are reused, not duplicated), register SRT/TXT and converted
+ * DOC/DOCX scenarios as text docs, and
  * — when `at` is given — lay the media out back-to-back on the timeline from
  * that point (one undo entry; audio lands on an audio track).
  * Used by the Import dialog and by OS drag-and-drop onto the bin/timeline.
@@ -32,15 +53,32 @@ async function importFilesInner(
   const st = useEditor.getState
   const assetIds: string[] = []
   const textDocs: TextDoc[] = []
+  const knownTextPaths = new Set((st().project.texts ?? []).map((doc) => doc.path))
   for (const path of paths) {
     const ext = path.split('.').pop()?.toLowerCase()
     if (ext === 'srt' || ext === 'txt') {
-      textDocs.push({
-        id: uid(),
-        name: baseOf(path),
-        path,
-        format: ext as 'srt' | 'txt'
-      })
+      if (!knownTextPaths.has(path)) {
+        textDocs.push({
+          id: uid(),
+          name: baseOf(path),
+          path,
+          format: ext as 'srt' | 'txt'
+        })
+        knownTextPaths.add(path)
+      }
+      continue
+    }
+    if (ext === 'doc' || ext === 'docx') {
+      const converted = await window.kadr.prepareTextDocument(path)
+      if (!knownTextPaths.has(converted.path)) {
+        textDocs.push({
+          id: uid(),
+          name: converted.name,
+          path: converted.path,
+          format: 'txt'
+        })
+        knownTextPaths.add(converted.path)
+      }
       continue
     }
     const existing = st().project.assets.find((a) => a.path === path)
@@ -123,6 +161,21 @@ export function dragHasMedia(e: { dataTransfer: DataTransfer }): boolean {
   return t.includes('Files') || t.includes('text/uri-list') ||
     t.includes('text/x-moz-url') || t.includes('DownloadURL') ||
     t.includes('application/vnd.portal.filetransfer')
+}
+
+let internalDragAssetId: string | null = null
+
+export function beginInternalMediaDrag(assetId: string): void {
+  internalDragAssetId = assetId
+}
+
+export function endInternalMediaDrag(): void {
+  internalDragAssetId = null
+  clearMediaDropPreview()
+}
+
+export function getInternalMediaDragAssetId(): string | null {
+  return internalDragAssetId
 }
 
 /** Is there anything for importDrop to work with? */

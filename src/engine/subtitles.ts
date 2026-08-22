@@ -235,6 +235,13 @@ export interface TranscribeFlowResult {
   language: string
 }
 
+/** Remove Electron's IPC wrapper while keeping the useful backend message. */
+export function transcribeErrorMessage(error: unknown): string {
+  return String((error as Error)?.message ?? error)
+    .replace(/^Error invoking remote method 'transcribe:run':\s*/, '')
+    .replace(/^Error:\s*/, '')
+}
+
 const sanitize = (s: string) => s.replace(/[^\p{L}\p{N}._ -]/gu, '').trim() || 'transcript'
 
 /** Pick a free path: base.srt, base.1.srt, base.2.srt… (don't clobber). */

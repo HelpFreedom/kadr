@@ -103,7 +103,13 @@ await evalJs(`(async () => {
   return true
 })()`)
 
-// 1. snap to other-track video clip edge (V1 ends at 8.024)
+// 1. snap to the actual other-track video edge (container duration may vary
+// slightly with the ffmpeg build that generated the fixture)
+const expectedOtherEdge = await evalJs(`(() => {
+  const v1 = window.kadrEditor.useEditor.getState().project.tracks.find(t => t.name === 'V1')
+  const c = v1.clips[0]
+  return c.start + c.duration
+})()`)
 const v2r = await evalJs(`(() => {
   const el = [...document.querySelectorAll('.lane.video .clip')].find(c => c.getBoundingClientRect().x > 500)
   const r = el.getBoundingClientRect()
@@ -111,7 +117,9 @@ const v2r = await evalJs(`(() => {
 })()`)
 await drag(v2r.cx, v2r.cy, v2r.cx - 42, v2r.cy)
 const snapA = await evalJs(`window.kadrEditor.useEditor.getState().project.tracks.find(t=>t.name==='V2').clips[0].start`)
-check('video↔video other-track snap (start lands exactly on 8.024)', Math.abs(snapA - 8.024) < 1e-6, 'start=' + snapA)
+check('video↔video other-track snap (start lands exactly on the other edge)',
+  Math.abs(snapA - expectedOtherEdge) < 1e-6,
+  `start=${snapA}, expected=${expectedOtherEdge}`)
 
 // 2. snap to the red playhead cursor + click-vs-drag parking
 await evalJs(`(() => { window.kadrEditor.useEditor.getState().setPlayhead(12); return 1 })()`)
@@ -120,7 +128,7 @@ const v2r2 = await evalJs(`(() => {
   const r = el.getBoundingClientRect()
   return { cx: r.x + r.width / 2, cy: r.y + r.height / 2 }
 })()`)
-// drag right so the start approaches 12: from 8.024 need +3.976s = ~199px; do 195px → 11.92 (within 0.2 tol)
+// drag right so the start approaches 12 (within the 0.2s snap tolerance)
 await drag(v2r2.cx, v2r2.cy, v2r2.cx + 195, v2r2.cy)
 const snapPh = await evalJs(`(() => {
   const st = window.kadrEditor.useEditor.getState()

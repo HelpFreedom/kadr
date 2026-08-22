@@ -125,7 +125,7 @@ async function unusedDirectory(parent: string, baseName: string): Promise<string
 }
 
 function clearLocalTtsPaths(settings: VoiceoverSettings): VoiceoverSettings {
-  return { ...settings, modelPath: '', pythonPath: '', voicePrompt: '' }
+  return { ...settings, modelPath: '', pythonPath: '', vocabPath: '', voicesPath: '' }
 }
 
 function rewriteVoiceoverPaths(project: Project, assetPaths: Map<string, string>): void {

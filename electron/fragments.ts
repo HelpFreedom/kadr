@@ -15,6 +15,32 @@ import type { FragmentSpec, FragmentInfo } from '@shared/types'
 export const WORKSPACE = process.env.KADR_FRAGMENTS_DIR || join(homedir(), 'kadr-fragments')
 const FRAG_DIR = () => join(WORKSPACE, 'src', 'fragments')
 
+/** Copy the complete editable sources and local assets used by project fragments. */
+export async function copyProjectFragments(fragmentIds: string[], targetRoot: string): Promise<void> {
+  await fs.mkdir(targetRoot, { recursive: true })
+  for (const id of [...new Set(fragmentIds)]) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid fragment id: ${id}`)
+    const source = join(FRAG_DIR(), id)
+    if (!existsSync(source)) throw new Error(`Fragment dependency is missing: ${id}`)
+    await fs.cp(source, join(targetRoot, id), { recursive: true, force: true })
+  }
+}
+
+/** Restore bundled fragment sources into the shared workspace when a portable project opens. */
+export async function restoreProjectFragments(sourceRoot: string, fragmentIds: string[]): Promise<void> {
+  if (!existsSync(sourceRoot)) return
+  await fs.mkdir(FRAG_DIR(), { recursive: true })
+  let restored = false
+  for (const id of [...new Set(fragmentIds)]) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) continue
+    const source = join(sourceRoot, id)
+    if (!existsSync(source)) continue
+    await fs.cp(source, join(FRAG_DIR(), id), { recursive: true, force: true })
+    restored = true
+  }
+  if (restored) await regenRegistry()
+}
+
 // npm install and remotion's headless-chrome download may need the user's
 // network settings (proxies etc.) — shared with the Claude session config:
 // userData/claude-env.json { "env": { "HTTPS_PROXY": "...", ... } }
@@ -533,6 +559,27 @@ function fragmentHash(id: string): string {
   }
   walk(join(FRAG_DIR(), id))
   return h.digest('hex').slice(0, 16)
+}
+
+export function fragmentContentVersion(id: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid fragment id: ${id}`)
+  return fragmentHash(id)
+}
+
+/** Stable version + live-player metadata for cached preview thumbnails. */
+export async function fragmentPreviewInfo(id: string): Promise<{
+  url: string
+  version: string
+  fps: number
+}> {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid fragment id: ${id}`)
+  const { url } = await ensureServer()
+  let fps = 60
+  try {
+    const meta = JSON.parse(await fs.readFile(join(FRAG_DIR(), id, 'meta.json'), 'utf8'))
+    if (Number.isFinite(meta?.fps) && meta.fps > 0) fps = meta.fps
+  } catch { /* the player uses the same 60 fps fallback */ }
+  return { url, version: fragmentContentVersion(id), fps }
 }
 
 const renderDir = () => join(app.getPath('userData'), 'fragment-renders')

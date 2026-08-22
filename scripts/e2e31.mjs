@@ -4,17 +4,22 @@
 //     an audio track, one undo entry;
 //  2) media bin deletion: per-tile ✕ with confirm dialog when timeline clips
 //     use the asset, cascade removal (linked twin included), single undo;
-//  3) unlimited clip speed with snap during Ctrl-drag (old 0.25–4 clamp gone);
+//  3) unlimited clip speed with snap during primary-modifier drag
+//     (Ctrl on Windows/Linux, Command on macOS; old 0.25–4 clamp gone);
 //  4) playbackRate clamp — playback keeps running at speed 30;
-//  5) Claude panel: rect restored from localStorage, header drag moves it,
-//     corner resize works, both persisted.
+//  5) Claude panel: rect restored from localStorage, drag/resize persisted,
+//     button minimizes without unmounting, close requires confirmation.
 import WebSocket from 'ws'
 import { execFileSync } from 'child_process'
 import { readFileSync, writeFileSync, unlinkSync } from 'fs'
 import { createServer } from 'http'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
-const ENV_FILE = `${process.env.HOME}/.config/kadr/claude-env.json`
+const USER_DATA = process.env.KADR_USER_DATA || (process.platform === 'darwin'
+  ? `${process.env.HOME}/Library/Application Support/kadr`
+  : `${process.env.HOME}/.config/kadr`)
+const ENV_FILE = `${USER_DATA}/claude-env.json`
+const PRIMARY_EVENT_FIELD = process.platform === 'darwin' ? 'metaKey' : 'ctrlKey'
 
 // self-contained media: video+audio, video-only, image, audio-only
 execFileSync('bash', ['-c',
@@ -197,7 +202,7 @@ const batch = await evalJs(`(async () => {
   const tiles = [...document.querySelectorAll('.bin-item')]
   tiles[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
   for (const el of tiles.slice(1)) {
-    el.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }))
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, ${PRIMARY_EVENT_FIELD}: true }))
   }
   await new Promise(r => setTimeout(r, 150))
   const btn = document.querySelector('.bin-del-sel')
@@ -216,7 +221,7 @@ const batch = await evalJs(`(async () => {
 check('multi-select batch delete empties bin and timeline', batch.label === '✕ 3' &&
   batch.assets === 0 && batch.clips === 0, JSON.stringify(batch))
 
-// ---- 3. unlimited speed + snap (real Ctrl-drag on the extend handle) --------
+// ---- 3. unlimited speed + snap (real primary-modifier drag) ----------------
 await evalJs(`(async () => {
   const ed = window.kadrEditor
   const st = () => ed.useEditor.getState()
@@ -242,7 +247,8 @@ const ctrlDragTo = (dxExpr) => evalJs(`(async () => {
   const r = h.getBoundingClientRect()
   const x0 = r.left + r.width / 2, y0 = r.top + r.height / 2
   const dx = ${dxExpr}
-  const opts = { bubbles: true, pointerId: 9, isPrimary: true, button: 0, ctrlKey: true }
+  const opts = { bubbles: true, pointerId: 9, isPrimary: true, button: 0,
+    ${PRIMARY_EVENT_FIELD}: true }
   h.dispatchEvent(new PointerEvent('pointerdown', { ...opts, clientX: x0, clientY: y0 }))
   window.dispatchEvent(new PointerEvent('pointermove', { ...opts, clientX: x0 + dx, clientY: y0 }))
   await new Promise(r2 => setTimeout(r2, 120))
@@ -275,7 +281,7 @@ check('badge is not highlighted off the snap ladder', s3.badge?.snapped === fals
   JSON.stringify(s3.badge))
 await evalJs(`(window.kadrEditor.useEditor.getState().undo(), true)`)
 
-// LEFT-edge drags: Ctrl = speed with the right edge anchored; plain = trim-in
+// LEFT-edge drags: primary modifier = speed with right edge anchored; plain = trim-in
 const dragLeft = (dxExpr, ctrl) => evalJs(`(async () => {
   const st = () => window.kadrEditor.useEditor.getState()
   const clip = () => st().project.tracks.flatMap(t => t.clips)
@@ -289,7 +295,8 @@ const dragLeft = (dxExpr, ctrl) => evalJs(`(async () => {
   const dx = ${dxExpr}
   const o = clip()
   const orig = { start: o.start, end: o.start + o.duration }
-  const opts = { bubbles: true, pointerId: 13, isPrimary: true, button: 0, ctrlKey: ${ctrl} }
+  const opts = { bubbles: true, pointerId: 13, isPrimary: true, button: 0,
+    ${PRIMARY_EVENT_FIELD}: ${ctrl} }
   h.dispatchEvent(new PointerEvent('pointerdown', { ...opts, clientX: x0, clientY: y0 }))
   window.dispatchEvent(new PointerEvent('pointermove', { ...opts, clientX: x0 + dx, clientY: y0 }))
   window.dispatchEvent(new PointerEvent('pointerup', { ...opts, clientX: x0 + dx, clientY: y0 }))
@@ -298,9 +305,9 @@ const dragLeft = (dxExpr, ctrl) => evalJs(`(async () => {
   return { orig, speed: c.speed, start: c.start, end: c.start + c.duration, inPoint: c.inPoint }
 })()`)
 
-// Ctrl+left: raw nd ≈ 1.6 s → snaps to ×2 (nd = dur/2); the END must not move
+// Primary+left: raw nd ≈ 1.6 s → snaps to ×2 (nd = dur/2); END must not move
 const s4 = await dragLeft('85', true)
-check('LEFT-edge Ctrl-drag changes speed with the right edge anchored (snaps ×2)',
+check('LEFT-edge primary-modifier drag changes speed with the right edge anchored (snaps ×2)',
   Math.abs(s4.speed - 2) < 1e-6 && Math.abs(s4.end - s4.orig.end) < 1e-3 &&
   Math.abs(s4.start - (s4.orig.end - (s4.orig.end - s4.orig.start) / 2)) < 1e-3,
   JSON.stringify(s4))
@@ -354,7 +361,7 @@ try {
   envWritten = true
 
   const panel = await evalJs(`(async () => {
-    localStorage.setItem('kadr.claudeRect', JSON.stringify({ x: 80, y: 90, w: 520, h: 400 }))
+    localStorage.setItem('kadr.claudeRect', JSON.stringify({ x: 80, y: 0, w: 520, h: 400 }))
     const btn = document.querySelector('.claude-btn')
     btn.click()
     for (let i = 0; i < 20; i++) {
@@ -365,8 +372,8 @@ try {
     const r = el.getBoundingClientRect()
     return { x: r.left, y: r.top, w: r.width, h: r.height }
   })()`)
-  check('panel opens at the persisted rect', Math.abs(panel.x - 80) < 2 &&
-    Math.abs(panel.y - 90) < 2 && Math.abs(panel.w - 520) < 2 && Math.abs(panel.h - 400) < 2,
+  check('panel restores below the topbar', Math.abs(panel.x - 80) < 2 &&
+    Math.abs(panel.y - 52) < 2 && Math.abs(panel.w - 520) < 2 && Math.abs(panel.h - 400) < 2,
     JSON.stringify(panel))
 
   const moved = await evalJs(`(async () => {
@@ -382,7 +389,7 @@ try {
     return { x: b.left, y: b.top, saved: JSON.parse(localStorage.getItem('kadr.claudeRect')) }
   })()`)
   check('header drag moves the panel and persists it', Math.abs(moved.x - 140) < 2 &&
-    Math.abs(moved.y - 130) < 2 && Math.abs(moved.saved.x - 140) < 2,
+    Math.abs(moved.y - 92) < 2 && Math.abs(moved.saved.x - 140) < 2,
     JSON.stringify(moved))
 
   const resized = await evalJs(`(async () => {
@@ -394,14 +401,34 @@ try {
     window.dispatchEvent(new PointerEvent('pointermove', { ...opts, clientX: x0 + 50, clientY: y0 + 30 }))
     window.dispatchEvent(new PointerEvent('pointerup', { ...opts, clientX: x0 + 50, clientY: y0 + 30 }))
     await new Promise(r2 => setTimeout(r2, 150))
-    const b = document.querySelector('.claude-panel').getBoundingClientRect()
+    const panel = document.querySelector('.claude-panel')
+    const b = panel.getBoundingClientRect()
     const saved = JSON.parse(localStorage.getItem('kadr.claudeRect'))
+    const btn = document.querySelector('.claude-btn')
+    btn.click()
+    await new Promise(r2 => setTimeout(r2, 50))
+    const minimized = panel.classList.contains('hidden') && btn.classList.contains('active') &&
+      btn.classList.contains('minimized') && document.querySelector('.claude-panel') === panel
+    btn.click()
+    await new Promise(r2 => setTimeout(r2, 50))
+    const restored = !panel.classList.contains('hidden') && btn.classList.contains('active') &&
+      !btn.classList.contains('minimized') && document.querySelector('.claude-panel') === panel
     document.querySelector('.claude-close').click()
+    await new Promise(r2 => setTimeout(r2, 50))
+    const asked = !!document.querySelector('.claude-confirm')
+    document.querySelector('.claude-confirm button:not(.danger)').click()
+    await new Promise(r2 => setTimeout(r2, 50))
+    const declined = document.querySelector('.claude-panel') === panel && !document.querySelector('.claude-confirm')
+    document.querySelector('.claude-close').click()
+    await new Promise(r2 => setTimeout(r2, 50))
+    document.querySelector('.claude-confirm .danger').click()
     await new Promise(r2 => setTimeout(r2, 300))
-    return { w: b.width, h: b.height, saved, closed: !document.querySelector('.claude-panel') }
+    return { w: b.width, h: b.height, saved, minimized, restored, asked, declined,
+      closed: !document.querySelector('.claude-panel') }
   })()`)
-  check('corner resize grows the panel and persists it', Math.abs(resized.w - 570) < 2 &&
-    Math.abs(resized.h - 430) < 2 && Math.abs(resized.saved.w - 570) < 2 && resized.closed,
+  check('Claude panel resizes, minimizes without reset, and confirms close', Math.abs(resized.w - 570) < 2 &&
+    Math.abs(resized.h - 430) < 2 && Math.abs(resized.saved.w - 570) < 2 &&
+    resized.minimized && resized.restored && resized.asked && resized.declined && resized.closed,
     JSON.stringify(resized))
 } finally {
   if (envWritten) {
@@ -448,36 +475,61 @@ srv.close()
 check('browser image URL drop downloads the file and places a clip',
   !!urlDrop && urlDrop.kind === 'image' && urlDrop.placed, JSON.stringify(urlDrop))
 
-// ---- 7. Ctrl+V pastes an image from the OS clipboard ------------------------
-// (photos can't be dragged out of Telegram Desktop at all — paste is the
-// supported route; xclip stands in for «Копировать изображение»)
+// ---- 7. Primary+V pastes an image from the OS clipboard --------------------
+// On macOS Finder uses public.file-url/NSFilenamesPboardType. Electron reports
+// text/uri-list for that clipboard but returns an empty value when it is read;
+// this regression used to import Finder's generic PNG icon via readImage().
+// Linux exercises the raw copied-image route with xclip.
 try {
-  // xclip forks a daemon holding the selection — its inherited stdio must be
-  // redirected or execFileSync waits for pipe EOF forever
-  execFileSync('bash', ['-c',
-    'DISPLAY=${DISPLAY:-:0} xclip -selection clipboard -t image/png ' +
-    '-i /tmp/kadr-test/img.png >/dev/null 2>&1'])
+  const pastedName = process.platform === 'darwin' ? 'img.png' : 'clipboard.png'
+  if (process.platform === 'darwin') {
+    execFileSync('swift', ['-e',
+      'import AppKit; let board = NSPasteboard.general; board.clearContents(); ' +
+      '_ = board.writeObjects([NSURL(fileURLWithPath: "/tmp/kadr-test/img.png")])'
+    ])
+  } else {
+    // xclip forks a daemon holding the selection — its inherited stdio must be
+    // redirected or execFileSync waits for pipe EOF forever
+    execFileSync('bash', ['-c',
+      'DISPLAY=${DISPLAY:-:0} xclip -selection clipboard -t image/png ' +
+      '-i /tmp/kadr-test/img.png >/dev/null 2>&1'])
+  }
   const pasted = await evalJs(`(async () => {
     const st = () => window.kadrEditor.useEditor.getState()
     const before = st().project.assets.length
     st().setPlayhead(30)
-    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyV', ctrlKey: true, bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      code: 'KeyV', ${PRIMARY_EVENT_FIELD}: true, bubbles: true }))
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 400))
       const p = st().project
-      const a = p.assets.find(x => x.name.endsWith('clipboard.png'))
+      const a = p.assets.find(x => x.name.endsWith(${JSON.stringify(pastedName)}))
       if (a) {
         const clip = p.tracks.flatMap(t => t.clips).find(c => c.assetId === a.id)
-        return { kind: a.kind, at: clip?.start ?? null, added: p.assets.length - before }
+        const image = new Image()
+        image.crossOrigin = 'anonymous'
+        image.src = window.kadr.fileUrl(a.path)
+        let decoded = true
+        try { await image.decode() } catch { decoded = false }
+        return {
+          kind: a.kind,
+          at: clip?.start ?? null,
+          added: p.assets.length - before,
+          sourceName: a.name,
+          decoded,
+          width: image.naturalWidth,
+          height: image.naturalHeight
+        }
       }
     }
     return null
   })()`)
-  check('Ctrl+V pastes a clipboard image at the playhead',
-    !!pasted && pasted.kind === 'image' && Math.abs(pasted.at - 30) < 0.01,
+  check('primary-modifier+V pastes a clipboard image at the playhead',
+    !!pasted && pasted.kind === 'image' && Math.abs(pasted.at - 30) < 0.01 &&
+      pasted.decoded && pasted.width === 320 && pasted.height === 240,
     JSON.stringify(pasted))
 } catch (err) {
-  console.log('SKIP  clipboard paste check (xclip unavailable):', String(err).slice(0, 80))
+  console.log('SKIP  clipboard paste check (clipboard setup unavailable):', String(err).slice(0, 80))
 }
 
 ws.close()

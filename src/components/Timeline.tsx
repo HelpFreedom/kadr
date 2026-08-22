@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
-import type { AnnotationTask, Clip, MediaAsset, Track, VoiceoverStatus } from '@shared/types'
+import type { AnnotationTask, Chapter, Clip, MediaAsset, Track, VoiceoverStatus } from '@shared/types'
 import {
   useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM,
   TRACK_HEADER_MIN, TRACK_HEADER_MAX, TRACK_HEADER_DEFAULT
@@ -20,6 +20,7 @@ import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
 import { useVoiceoverUi } from './VoiceoverStudio'
 import { hasPrimaryModifier } from '@/shortcuts'
+import { useTimelineThumbnails } from '@/engine/timelineThumbnails'
 
 /** Transcribe the selected range (Shift-drag on the ruler) into SRT/TXT. */
 function TranscribeRangeButton() {
@@ -164,6 +165,7 @@ export function Timeline({ height }: { height: number }) {
     (end, track) => Math.max(end, ...(track.annotations ?? []).map((item) => item.start + item.duration)),
     0
   ))
+  const chapterDuration = useEditor((s) => Math.max(0, ...(s.project.chapters ?? []).map((chapter) => chapter.end)))
   const selectedId = useEditor((s) => s.selection[0])
   const annotationId = useEditor((s) => s.annotationId)
   const timelineRef = useRef<HTMLDivElement>(null)
@@ -173,7 +175,7 @@ export function Timeline({ height }: { height: number }) {
   const [viewportW, setViewportW] = useState(800)
   const [menu, setMenu] = useState<MenuState | null>(null)
 
-  const contentW = Math.max(800, viewportW, (Math.max(duration, annotationDuration) + 30) * zoom)
+  const contentW = Math.max(800, viewportW, (Math.max(duration, annotationDuration, chapterDuration) + 30) * zoom)
   const trackAreaH = tracks.length * trackH
 
   useEffect(() => {
@@ -251,10 +253,10 @@ export function Timeline({ height }: { height: number }) {
       const cx = pointerX + el.scrollLeft
       const tAtCursor = cx / s.zoom
       const delta = Math.max(-40, Math.min(40, e.deltaY * modeScale))
-      // Chromium synthesizes Ctrl+wheel for a trackpad pinch and deliberately
-      // uses a positive delta for pinch-out (zoom in). Cmd+wheel is a manual
-      // shortcut and follows the conventional wheel direction instead.
-      const exponent = e.ctrlKey && !e.metaKey ? delta * 0.01 : -delta * 0.008
+      // Chromium synthesizes Ctrl+wheel for a trackpad pinch: pinch-out has a
+      // negative delta and must increase the timeline scale; pinch-in reduces it.
+      // Cmd+wheel is a manual shortcut and follows the same wheel direction.
+      const exponent = e.ctrlKey && !e.metaKey ? -delta * 0.01 : -delta * 0.008
       const nz = Math.min(MAX_ZOOM, Math.max(4, s.zoom * Math.exp(exponent)))
       // commit the new content width NOW: scrollLeft set against the stale
       // (narrower) width gets clamped by the browser, so zooming near the
@@ -397,6 +399,7 @@ export function Timeline({ height }: { height: number }) {
             <Playhead headerW={headerW} trackAreaH={trackAreaH} />
           </div>
         </div>
+        <div className="tl-track-header-underlay" style={{ width: headerW }} aria-hidden="true" />
         <div
           className="tl-horizontal-scroll"
           ref={horizontalScrollRef}
@@ -436,7 +439,8 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
       })
     }
     return () => { current = false }
-  }, [menu.clipId, voiceSettings?.modelPath, voiceSettings?.pythonPath])
+  }, [menu.clipId, voiceSettings?.modelPath, voiceSettings?.pythonPath,
+    voiceSettings?.vocabPath, voiceSettings?.voicesPath])
   const transCur = useEditor((s) => {
     if (menu.kind !== 'transition' || !menu.clipId) return null
     const f = findClip(s.project, menu.clipId)
@@ -584,19 +588,19 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
               <>
                 <button
                   className="voice-menu-item"
-                  disabled={!ready}
-                  title={ready ? 'Создать новый дубль' : voiceStatus?.reason ?? 'Проверяю TTS…'}
+                  title={ready ? 'Создать новый дубль' : voiceStatus?.reason ??
+                    'Открыть переозвучку; первая проверка F5-TTS может занять несколько секунд'}
                   onClick={() => {
                     useVoiceoverUi.getState().open(menu.clipId!)
                     onClose()
                   }}
                 >
-                  <span className="ctx-voice-mark">●</span>{' '}
-                  {voiceStatus ? 'Переозвучить…' : 'Проверяю TTS…'}
+                  <span className="ctx-voice-mark">{voiceStatus ? '●' : '◌'}</span>{' '}
+                  {voiceStatus ? 'Переозвучить…' : 'Проверяю F5-TTS…'}
                 </button>
                 {voiceStatus && !ready && (
                   <div className="ctx-voice-disabled-note">
-                    {voiceStatus.reason}. Как включить — раздел «Локальная переозвучка» в README.md.
+                    {voiceStatus.reason}. Откройте переозвучку, чтобы установить F5-TTS.
                   </div>
                 )}
               </>
@@ -730,13 +734,122 @@ function RulerRow({ contentW, headerW }: { contentW: number; headerW: number }) 
       <div
         className="ruler"
         style={{ width: contentW, backgroundSize: `${step * zoom}px 100%` }}
-        onPointerDown={(e) => startScrubOrRange(e, e.currentTarget)}
       >
-        {ticks.map((tt) => (
-          <span key={tt} style={{ left: tt * zoom }}>{tickLabel(tt)}</span>
-        ))}
+        <div
+          className="ruler-scrub-area"
+          onPointerDown={(e) => startScrubOrRange(e, e.currentTarget.parentElement!)}
+        >
+          {ticks.map((tt) => (
+            <span key={tt} style={{ left: tt * zoom }}>{tickLabel(tt)}</span>
+          ))}
+        </div>
+        <ChapterBand />
         <RulerCursors />
       </div>
+    </div>
+  )
+}
+
+function ChapterBand() {
+  const t = useT()
+  const chapters = useEditor((s) => s.project.chapters ?? [])
+  const zoom = useEditor((s) => s.zoom)
+
+  const timeAt = (lane: HTMLElement, clientX: number) => {
+    const rect = lane.getBoundingClientRect()
+    return Math.max(0, (clientX - rect.left) / useEditor.getState().zoom)
+  }
+
+  const startCreate = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || e.target !== e.currentTarget) return
+    e.preventDefault()
+    e.stopPropagation()
+    const lane = e.currentTarget
+    const st = useEditor.getState()
+    const points = [
+      ...snapPoints(st.project, '', st.playhead),
+      ...(st.project.chapters ?? []).flatMap((chapter) => [chapter.start, chapter.end])
+    ]
+    const anchor = snapTime(timeAt(lane, e.clientX), points, st.zoom)
+    let current = anchor
+    windowDrag(e, (_dx, ev) => {
+      const s = useEditor.getState()
+      current = snapTime(timeAt(lane, ev.clientX), points, s.zoom)
+      s.setRange({ start: Math.min(anchor, current), end: Math.max(anchor, current) })
+    }, () => {
+      const s = useEditor.getState()
+      s.setRange(null)
+      if (Math.abs(current - anchor) < 0.05) return
+      const fallback = `${t('chapterDefault')} ${(s.project.chapters?.length ?? 0) + 1}`
+      const title = window.prompt(t('chapterNamePrompt'), fallback)
+      if (title === null) return
+      s.addChapter(title || fallback, Math.min(anchor, current), Math.max(anchor, current))
+    })
+  }
+
+  const startEdgeDrag = (chapter: Chapter, edge: 'start' | 'end') =>
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const lane = e.currentTarget.closest('.chapter-band') as HTMLElement
+      const st = useEditor.getState()
+      const points = [
+        ...snapPoints(st.project, '', st.playhead),
+        ...(st.project.chapters ?? [])
+          .filter((item) => item.id !== chapter.id)
+          .flatMap((item) => [item.start, item.end])
+      ]
+      let started = false
+      windowDrag(e, (_dx, ev) => {
+        const s = useEditor.getState()
+        const current = s.project.chapters?.find((item) => item.id === chapter.id)
+        if (!current) return
+        if (!started) {
+          s.pushHistory('hChapter')
+          started = true
+        }
+        const raw = snapTime(timeAt(lane, ev.clientX), points, s.zoom)
+        const value = edge === 'start'
+          ? Math.min(raw, current.end - 0.05)
+          : Math.max(raw, current.start + 0.05)
+        s.updateChapter(chapter.id, { [edge]: Math.max(0, value) })
+      })
+    }
+
+  const rename = (chapter: Chapter) => {
+    const title = window.prompt(t('chapterNamePrompt'), chapter.title)
+    if (title === null || !title.trim() || title.trim() === chapter.title) return
+    const s = useEditor.getState()
+    s.pushHistory('hChapter')
+    s.updateChapter(chapter.id, { title })
+  }
+
+  return (
+    <div className="chapter-band" title={t('chapterBandHint')} onPointerDown={startCreate}>
+      {chapters.map((chapter) => (
+        <div
+          key={chapter.id}
+          className="timeline-chapter"
+          style={{ left: chapter.start * zoom, width: Math.max(2, (chapter.end - chapter.start) * zoom) }}
+          title={`${chapter.title} · ${tickLabel(chapter.start)}–${tickLabel(chapter.end)}`}
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={() => rename(chapter)}
+        >
+          <div className="chapter-marker start" onPointerDown={startEdgeDrag(chapter, 'start')} />
+          <span>{chapter.title}</span>
+          <button
+            className="chapter-delete"
+            title={t('chapterDelete')}
+            aria-label={t('chapterDelete')}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation()
+              useEditor.getState().deleteChapter(chapter.id)
+            }}
+          >×</button>
+          <div className="chapter-marker end" onPointerDown={startEdgeDrag(chapter, 'end')} />
+        </div>
+      ))}
     </div>
   )
 }
@@ -880,8 +993,17 @@ function TrackRow({
   const t = useT()
   const reorder = useRef<{ pushed: boolean } | null>(null)
   const gainRef = useRef<HTMLInputElement>(null)
+  const renameCancelled = useRef(false)
+  const [renaming, setRenaming] = useState(false)
+  const [nameDraft, setNameDraft] = useState(track.name)
   const activeAnnotationTrackId = useEditor((s) => s.activeAnnotationTrackId)
   const dropGhost = useMediaDropUi((s) => s.ghosts.find((ghost) => ghost.trackId === track.id))
+  // Paint longer clips first so a short clip remains both visible and clickable
+  // wherever it overlaps a long recording on the same lane.
+  const orderedClips = useMemo(
+    () => [...track.clips].sort((a, b) => b.duration - a.duration),
+    [track.clips]
+  )
 
   // Option+wheel over the volume/opacity slider: precise ±1%. A plain
   // two-finger gesture must keep scrolling the timeline on macOS.
@@ -975,6 +1097,28 @@ function TrackRow({
     reorder.current = null
   }
 
+  const beginRename = () => {
+    renameCancelled.current = false
+    setNameDraft(track.name)
+    setRenaming(true)
+  }
+  const finishRename = () => {
+    setRenaming(false)
+    if (renameCancelled.current) {
+      renameCancelled.current = false
+      setNameDraft(track.name)
+      return
+    }
+    const name = nameDraft.trim()
+    if (!name || name === track.name) {
+      setNameDraft(track.name)
+      return
+    }
+    const state = useEditor.getState()
+    state.pushHistory('hTrack')
+    state.updateTrack(track.id, { name })
+  }
+
   return (
     <div className={dropGhost ? 'tl-row media-drop-target' : 'tl-row'} style={{ height: trackH }}>
       <div
@@ -997,7 +1141,49 @@ function TrackRow({
         }}
       >
         <div className="track-head-row">
-          <span className="track-name" title={track.name}>{track.name}</span>
+          {renaming ? (
+            <input
+              className="track-name-input"
+              value={nameDraft}
+              autoFocus
+              aria-label={t('renameTrack')}
+              onFocus={(e) => e.currentTarget.select()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={finishRename}
+              onKeyDown={(e) => {
+                e.stopPropagation()
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  e.currentTarget.blur()
+                } else if (e.key === 'Escape') {
+                  e.preventDefault()
+                  renameCancelled.current = true
+                  e.currentTarget.blur()
+                }
+              }}
+            />
+          ) : (
+            <span
+              className="track-name"
+              title={`${track.name} · ${t('renameTrackHint')}`}
+              role="button"
+              tabIndex={0}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                beginRename()
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return
+                e.preventDefault()
+                e.stopPropagation()
+                beginRename()
+              }}
+            >
+              {track.name}
+            </span>
+          )}
           {track.kind === 'video' && (
             <button
               className={track.motion ? 'toggled-on' : ''}
@@ -1142,7 +1328,7 @@ function TrackRow({
           ? (track.annotations ?? []).map((annotation) => (
               <AnnotationView key={annotation.id} annotation={annotation} track={track} />
             ))
-          : track.clips.map((c) => (
+          : orderedClips.map((c) => (
               <ClipView key={c.id} clip={c} track={track} laneHeight={trackH} view={view} onMenu={onMenu} />
             ))}
         {track.kind !== 'annotation' && <TransitionZones track={track} onMenu={onMenu} />}
@@ -1340,6 +1526,15 @@ function ClipView({
       ? Math.max(0.05, asset.duration - clip.inPoint) / speed
       : Infinity
   const loops = isFinite(natural) && clip.duration > natural + 0.01
+
+  const filmstrip = useTimelineThumbnails({
+    clip,
+    asset,
+    zoom,
+    viewStart: view.start,
+    viewEnd: view.end,
+    enabled: track.kind === 'video' && !clip.text
+  })
 
   // visible slice in clip-local px — waveform drawn 1:1 with device pixels
   const margin = 64
@@ -1702,6 +1897,24 @@ function ClipView({
           alt=""
           draggable={false}
         />
+      )}
+      {track.kind === 'video' && !isText && filmstrip.length > 0 && (
+        <div className="clip-filmstrip" aria-hidden="true">
+          {filmstrip.map((frame) => (
+            <img
+              key={frame.key}
+              className="clip-filmstrip-frame"
+              src={frame.url}
+              alt=""
+              draggable={false}
+              decoding="async"
+              style={{
+                left: frame.localTime * zoom,
+                width: Math.max(1, frame.duration * zoom)
+              }}
+            />
+          ))}
+        </div>
       )}
       {track.kind === 'audio' && visW > 0 && (
         <canvas ref={waveRef} className="clip-wave" style={{ left: vis0, width: visW }} />

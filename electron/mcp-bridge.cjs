@@ -71,14 +71,175 @@ const asText = (v) => {
 }
 const asError = (e) => ({ content: [{ type: 'text', text: `Error: ${e.message || e}` }], isError: true })
 
-const server = new McpServer({ name: 'kadr', version: '1.0.0' })
+const server = new McpServer({ name: 'kadr', version: '2.1.0' })
+
+const CAPABILITY_SECTIONS = [
+  'all', 'model', 'projectFiles', 'timeline', 'animation', 'transforms', 'masks', 'effects',
+  'transitions', 'audioSpeech', 'captions', 'fragments', 'voice', 'export', 'store'
+]
+
+server.registerTool('kadr_capabilities', {
+  description:
+    'Read the exact CURRENT machine-readable editing contract of the running Kadr editor. ' +
+    'Call this before using an unfamiliar feature or writing raw project fields. It reports ' +
+    'the live project/file model, chapter/group ranges, Anim/keyframe rules and time bases, 2D/3D transforms, masks, ' +
+    'effect types with parameters/ranges/defaults, every valid overlap and edge transition id, ' +
+    'timeline/store action signatures, captions, speech, Remotion, microphone/TTS and export ' +
+    'presets/options. Runtime registries supply transition ids, effect/caption defaults and ' +
+    'export presets, so this tool is authoritative when prose docs disagree. Request one ' +
+    'section to save tokens, or all for a full capability audit.',
+  inputSchema: {
+    section: z.enum(CAPABILITY_SECTIONS).optional().describe(
+      'default all; narrow to model|projectFiles|timeline|animation|transforms|masks|effects|transitions|' +
+      'audioSpeech|captions|fragments|voice|export|store'
+    )
+  }
+}, async ({ section }) => {
+  try {
+    return asText(await editorEval(`
+      return window.kadrEditor.getCapabilities(${JSON.stringify(section ?? 'all')})`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_voices', {
+  description:
+    'List every F5-TTS voice currently available to Kadr regeneration. Returns stable voiceId ' +
+    'values, original reference numbers, Russian/English names and descriptions, plus global and ' +
+    'project-embedded custom clones. For a custom voice copy the returned settings object into ' +
+    'voiceoverGenerate; bundled voices only need settings.voiceId. The voice may change per take.',
+  inputSchema: {}
+}, async () => {
+  try {
+    return asText(await editorEval(`
+      const section = window.kadrEditor.getCapabilities('voice')
+      const tts = section.capabilities.localTts
+      const global = await window.kadr.voiceCloneList()
+      const project = window.kadrEditor.useEditor.getState().project.voiceClones || []
+      const custom = [...global, ...project].filter((voice, index, all) =>
+        all.findIndex((item) => item.id === voice.id) === index)
+      return {
+        engine: tts.engine,
+        defaultVoiceId: tts.defaults.voiceId,
+        voices: [
+          ...tts.voices,
+          ...custom.map(voice => ({
+            id: voice.id,
+            name: voice.name,
+            description: voice.description || 'Пользовательский голосовой клон',
+            custom: true,
+            source: voice.source,
+            createdAt: voice.createdAt,
+            settings: { voiceId: voice.id, customVoice: voice }
+          }))
+        ]
+      }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_voice_clone', {
+  description:
+    'Create a NEW persistent F5-TTS voice clone from an existing local audio file. The sourcePath ' +
+    'must be an absolute path readable by Kadr; microphone capture itself must be done in the UI, ' +
+    'but its saved recording can be passed here. The tool converts the source to a mono reference, ' +
+    'optionally applies noise reduction, compression and LUFS normalization, saves it in Kadr’s ' +
+    'global voice library, and by default adds it to the open project so the reference WAV is ' +
+    'embedded on the next save/package. Each call creates a new clone. For best results use 3–15 ' +
+    'seconds of clean single-speaker speech and provide the exact referenceText when known. Example: ' +
+    '{sourcePath:"/Users/me/voice.wav",name:"Alex",referenceText:"Exact words spoken",' +
+    'processing:{noiseReduction:true,normalization:true,targetLufs:-18},addToProject:true}.',
+  inputSchema: {
+    sourcePath: z.string().min(1).describe(
+      'Absolute path to an existing audio/video file containing the reference speech.'),
+    name: z.string().min(1).max(80).describe('Human-readable name shown in the Kadr voice selector.'),
+    description: z.string().max(240).optional().describe('Optional voice character, e.g. “calm warm baritone”.'),
+    referenceText: z.string().max(4000).optional().describe(
+      'Exact words spoken in the reference. When omitted, Kadr transcribes and stores it before the voice becomes available.'),
+    processing: z.object({
+      normalization: z.boolean().optional().describe('Normalize integrated loudness; default true.'),
+      targetLufs: z.number().min(-30).max(-10).optional().describe('Normalization target; default -18 LUFS.'),
+      noiseReduction: z.boolean().optional().describe('Reduce steady background noise; default false.'),
+      noiseStrength: z.number().min(0).max(1).optional().describe('Noise reduction strength 0..1; default 0.5.'),
+      compressor: z.boolean().optional().describe('Control level peaks with a compressor; default false.'),
+      compressorThresholdDb: z.number().min(-40).max(-3).optional().describe('Compressor threshold; default -18 dB.'),
+      compressorRatio: z.number().min(1).max(12).optional().describe('Compressor ratio; default 3.'),
+    }).optional().describe('Optional non-destructive preparation applied to the saved clone.'),
+    addToProject: z.boolean().optional().describe(
+      'Add clone metadata to the currently open project for portable saving; default true.')
+  }
+}, async ({ sourcePath, name, description, referenceText, processing, addToProject }) => {
+  try {
+    const absolute = /^(?:\/|[a-zA-Z]:[\\/]|\\\\)/.test(sourcePath)
+    if (!absolute) throw new Error('sourcePath must be an absolute filesystem path')
+    const options = {
+      normalization: {
+        enabled: processing?.normalization ?? true,
+        targetLufs: processing?.targetLufs ?? -18
+      },
+      noiseReduction: {
+        enabled: processing?.noiseReduction ?? false,
+        strength: processing?.noiseStrength ?? 0.5
+      },
+      compressor: {
+        enabled: processing?.compressor ?? false,
+        thresholdDb: processing?.compressorThresholdDb ?? -18,
+        ratio: processing?.compressorRatio ?? 3
+      }
+    }
+    const result = await editorEval(`
+      const sourcePath = ${JSON.stringify(sourcePath)}
+      const prepared = await window.kadr.voiceClonePrepare(sourcePath)
+      const processed = await window.kadr.voiceCloneProcess(prepared.path, ${JSON.stringify(options)})
+      try {
+        const suppliedText = ${JSON.stringify(referenceText ?? '')}.trim()
+        const confirmedReferenceText = suppliedText || await window.kadr.voiceCloneTranscribe(processed.path)
+        const voice = await window.kadr.voiceCloneSave({
+          processedPath: processed.path,
+          name: ${JSON.stringify(name)},
+          description: ${JSON.stringify(description ?? '')},
+          referenceText: confirmedReferenceText,
+          source: 'file',
+          sourceLabel: sourcePath.replace(/\\\\/g, '/').split('/').pop() || 'audio'
+        })
+        const addToProject = ${JSON.stringify(addToProject ?? true)}
+        if (addToProject) {
+          const store = window.kadrEditor.useEditor
+          const state = store.getState()
+          state.pushHistory('hVoiceClone')
+          store.setState(current => ({
+            project: {
+              ...current.project,
+              voiceClones: [
+                ...(current.project.voiceClones || []).filter(item => item.id !== voice.id),
+                voice
+              ]
+            }
+          }))
+        }
+        const state = window.kadrEditor.useEditor.getState()
+        return {
+          voice,
+          sourceDuration: prepared.duration,
+          processedDuration: processed.duration,
+          addedToProject: addToProject,
+          projectPath: state.projectPath,
+          portableOnNextSave: addToProject,
+          referenceTextSource: suppliedText ? 'provided' : 'transcribed',
+          generationSettings: { voiceId: voice.id, customVoice: voice }
+        }
+      } finally {
+        await window.kadr.voiceCloneDiscard([prepared.path, processed.path])
+      }
+      `)
+    return asText(result)
+  } catch (e) { return asError(e) }
+})
 
 server.registerTool('kadr_state', {
   description:
     'Read the LIVE state of the Kadr project currently open in the editor: full project ' +
-    '(tracks→clips and annotation tasks, assets with absolute media file paths, fps, size), projectPath, selection, ' +
+    '(tracks→clips and annotation tasks, named chapters, assets with absolute media file paths, fps, size), projectPath, selection, ' +
     'playhead, and available export presets. All times are in seconds. tracks[0] is the topmost ' +
-    'video track (drawn last). Clip: {id, kind: media|text, assetId, start, duration, inPoint, ' +
+    'video track (drawn last). Clip: {id, kind: media|text|remotion, assetId, start, duration, inPoint, ' +
     'speed, gain, muted, transform, mask?, maskShapes?, effects[], transitionIn/Out?, fadeIn/Out?}. ' +
     'project.texts lists transcript/subtitle documents (TextDoc {id, name, path, format: srt|txt, ' +
     'assetId?, offset?}) — path is a real file you can Read/Edit; see kadr_transcribe to create them. ' +
@@ -103,6 +264,47 @@ server.registerTool('kadr_state', {
           id: p.id, name: p.name, container: p.container, audioOnly: !!p.audioOnly
         }))
       }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_chapters', {
+  description:
+    'Read or replace the LIVE amber chapter/group map shown below the timeline seconds. ' +
+    'Call with no chapters to list it. Pass the complete desired chapters array to replace it ' +
+    'as ONE undoable edit; preserve returned ids when revising existing entries and omit id only ' +
+    'for new chapters. Use this after organizing a timeline with distinct narrative or functional ' +
+    'sections so the user can navigate the edit by meaningful groups. Prefer concise human titles, ' +
+    'cover the intended structural ranges, keep ordinary chapters non-overlapping and ordered, and ' +
+    'do not invent a meaningless one-chapter map for a short undivided edit. Chapters are metadata ' +
+    'only and never change the rendered video. All times are project seconds and ranges are [start,end).',
+  inputSchema: {
+    chapters: z.array(z.object({
+      id: z.string().min(1).optional().describe('Existing stable id; omit only for a new chapter.'),
+      title: z.string().min(1).max(160),
+      start: z.number().min(0),
+      end: z.number().positive()
+    })).optional().describe('Omit to list; pass the COMPLETE desired chapter map to replace.')
+  }
+}, async ({ chapters }) => {
+  try {
+    return asText(await editorEval(`
+      const ed = window.kadrEditor
+      const st = () => ed.useEditor.getState()
+      const input = ${JSON.stringify(chapters ?? null)}
+      if (input === null) return { chapters: st().project.chapters || [] }
+      for (const chapter of input) {
+        if (!(chapter.end > chapter.start)) {
+          throw new Error('each chapter must have end > start')
+        }
+      }
+      st().replaceChapters(input.map(chapter => ({
+        id: chapter.id || ed.uid(),
+        title: chapter.title,
+        start: chapter.start,
+        end: chapter.end
+      })))
+      return { chapters: st().project.chapters || [], undoable: true }
+    `))
   } catch (e) { return asError(e) }
 })
 
@@ -188,7 +390,8 @@ server.registerTool('kadr_eval', {
     '(back-to-back, audio → audio track), removeAssets([assetIds]) (drops the bin entries AND every ' +
     'clip using them, one undo), setClipDuration(clipId, sec), setClipSpeed(clipId, speed, duration) ' +
     '(speed 0.02–100), addAsset(asset), ' +
-    'addTrack(kind), select([ids]), setPlayhead(sec), setProject(project), splitAtPlayhead(), ' +
+    'addTrack(kind), replaceChapters([{id,title,start,end}]) (one undo), select([ids]), ' +
+    'setPlayhead(sec), setProject(project), splitAtPlayhead(), ' +
     'deleteSelection(), setTransition(clipId, type|null), setEdgeTransitions(...).\n' +
     '- window.kadrEditor.uid() → new id; .PRESETS → export presets; .projectDuration(project); ' +
     '.evalAnim(anim, t); await .reverseClip(clipId) — reverse a video/audio clip in place ' +
@@ -197,13 +400,15 @@ server.registerTool('kadr_eval', {
     'and set its gain for −14 LUFS with a −1 dBTP ceiling (defaults); works on either half of a ' +
     'linked A/V pair, one undo entry, returns {gain, gainDb, measuredLufs, peakLimited}; ' +
     'await .snapshotFrame({t?, importToBin?}) — see kadr_snapshot; ' +
+    'await .storyboardFrames({start,end,step?,maxFrames?,refresh?}) — see kadr_storyboard; ' +
     'await .importFiles([paths], {trackId, at}|null) — probe files into the bin (deduped by path) ' +
     'and, with a placement, lay them out back-to-back on the timeline from `at`.\n' +
     '- await window.kadr.probeMedia(path) → { asset } (probe a media file to import: then ' +
     'addAsset({ id: uid(), ...asset })); window.kadr.writeProject(path, project); ' +
     'window.kadr.readProject(path).\n' +
-    'Times are seconds. Animatable scalars (clip gain, transform.x/y/scale/rotation/opacity) are ' +
-    'Anim objects — write { value: 0.5 }, NEVER a bare number. ' +
+    'Times are seconds. Animatable scalars (gain, transforms, masks and track motion) are Anim ' +
+    'objects. Call kadr_capabilities for their exact schema, time bases and safe keyframe updates; ' +
+    'NEVER overwrite a keyed Anim with {value} unless removing its animation is intentional. ' +
     'Mutations: always pushHistory first; the store is zustand — re-read ' +
     'getState() after each action. NEVER return whole project/asset objects — asset ' +
     'waveform/thumbnail blobs are megabytes of base64 (results are truncated at 4 MB); ' +
@@ -236,6 +441,38 @@ server.registerTool('kadr_snapshot', {
     return asText(await editorEval(`
       const r = await window.kadrEditor.snapshotFrame(${JSON.stringify({ t, importToBin })})
       return r`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_storyboard', {
+  description:
+    'YOUR EYES across a timeline range: render a source-quality WYSIWYG contact sheet with ' +
+    'timestamp labels plus the individual full-resolution PNG frames. Read contactSheetPath ' +
+    'first; inspect an individual frame path only when more detail is needed. Originals, not ' +
+    'preview proxies, are decoded and Remotion fragments are included. The editor pauses only ' +
+    'for capture and restores its playhead/playback afterward. Nothing is imported into the ' +
+    'media bin. With refresh="auto" (default), a session cache is reused only when the exact ' +
+    'request AND current visual fingerprint match; media file changes, fragment source edits, ' +
+    'and visual timeline edits invalidate it. refresh="force" always regenerates. Generated ' +
+    'PNGs live in the app-managed visual cache (bounded to 24 recent storyboard sets / 30 days). ' +
+    'maxFrames is capped at 24.',
+  inputSchema: {
+    start: z.number().nonnegative().describe('range start in project seconds'),
+    end: z.number().positive().describe('range end in project seconds; must be greater than start'),
+    step: z.number().positive().optional().describe(
+      'preferred spacing in seconds; when it would exceed maxFrames, samples are spread across the range'),
+    maxFrames: z.number().int().min(1).max(24).optional().describe(
+      'maximum captured frames; default 9'),
+    refresh: z.enum(['auto', 'force']).optional().describe(
+      'auto (default) reuses an exact current fingerprint; force always captures new PNGs')
+  }
+}, async ({ start, end, step, maxFrames, refresh }) => {
+  try {
+    if (!(end > start)) throw new Error('end must be greater than start')
+    return asText(await editorEval(`
+      return window.kadrEditor.storyboardFrames(${JSON.stringify({
+        start, end, step, maxFrames, refresh: refresh ?? 'auto'
+      })})`))
   } catch (e) { return asError(e) }
 })
 

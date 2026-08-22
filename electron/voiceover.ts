@@ -1,6 +1,7 @@
 import { app, ipcMain } from 'electron'
 import type { WebContents } from 'electron'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
+import { randomUUID } from 'crypto'
 import { promises as fs, existsSync } from 'fs'
 import { basename, dirname, join } from 'path'
 import { homedir } from 'os'
@@ -12,12 +13,22 @@ import type {
   VoiceoverSettings,
   VoiceoverStatus
 } from '@shared/types'
+import {
+  getVoiceoverVoice,
+  VOICEOVER_REFERENCE_TEXT,
+  VOICEOVER_VOICES
+} from '@shared/voiceover'
+import { cancelVoiceoverInstall, installVoiceoverBackend } from './voiceover-installer'
+import { registerVoiceCloneIpc } from './voice-clones'
 
 const execFileAsync = promisify(execFile)
 
 interface VoiceoverRuntime {
   pythonPath: string
   modelPath: string
+  vocabPath: string
+  voicesPath: string
+  cachePath: string
   ffmpegPath: string
   configPath: string
 }
@@ -25,6 +36,9 @@ interface VoiceoverRuntime {
 interface VoiceoverConfig {
   pythonPath?: string
   modelPath?: string
+  vocabPath?: string
+  voicesPath?: string
+  cachePath?: string
   ffmpegPath?: string
 }
 
@@ -41,6 +55,8 @@ let resolveReady: (() => void) | null = null
 let rejectReady: ((err: Error) => void) | null = null
 let stdoutBuffer = ''
 let stderrTail = ''
+let readyStatusCache: { key: string; status: VoiceoverStatus } | null = null
+let statusCheck: { key: string; promise: Promise<VoiceoverStatus> } | null = null
 let current: {
   id: string
   clipId: string
@@ -60,6 +76,9 @@ async function resolveRuntime(settings: VoiceoverSettings): Promise<VoiceoverRun
   return {
     pythonPath: process.env.KADR_TTS_PYTHON || config.pythonPath || settings.pythonPath || '',
     modelPath: process.env.KADR_TTS_MODEL || config.modelPath || settings.modelPath || '',
+    vocabPath: process.env.KADR_TTS_VOCAB || config.vocabPath || settings.vocabPath || '',
+    voicesPath: process.env.KADR_TTS_VOICES || config.voicesPath || settings.voicesPath || '',
+    cachePath: config.cachePath || '',
     ffmpegPath: process.env.KADR_FFMPEG || config.ffmpegPath || 'ffmpeg',
     configPath
   }
@@ -70,33 +89,60 @@ async function voiceoverStatus(settings: VoiceoverSettings): Promise<VoiceoverSt
   const unavailable = (reason: string): VoiceoverStatus => ({
     ready: false,
     reason,
+    engine: 'F5-TTS',
     pythonPath: runtime.pythonPath,
     modelPath: runtime.modelPath,
+    vocabPath: runtime.vocabPath,
+    voicesPath: runtime.voicesPath,
     configPath: runtime.configPath
   })
   if (!existsSync(runtime.pythonPath)) return unavailable('Не найден Python для TTS')
-  if (!existsSync(runtime.modelPath)) return unavailable('Не найдена локальная модель TTS')
-  if (!existsSync(join(runtime.modelPath, 'config.json'))) return unavailable('Папка модели TTS заполнена не полностью')
+  if (!existsSync(runtime.modelPath)) return unavailable('Не найден checkpoint F5-TTS')
+  if (!existsSync(runtime.vocabPath)) return unavailable('Не найден словарь F5-TTS')
+  if (!existsSync(runtime.voicesPath)) return unavailable('Не найдена папка референсов голосов')
+  const missingVoice = VOICEOVER_VOICES.find((voice) =>
+    !existsSync(join(runtime.voicesPath, voice.referenceFile)))
+  if (missingVoice) return unavailable(`Не найден референс голоса №${missingVoice.number}`)
   const script = join(app.getAppPath(), 'scripts', 'voiceover_worker.py')
   if (!existsSync(script)) return unavailable('Не найден TTS-воркер Kadr')
+  const key = JSON.stringify([
+    runtime.pythonPath, runtime.modelPath, runtime.vocabPath, runtime.voicesPath,
+    runtime.cachePath, runtime.ffmpegPath, script
+  ])
+  if (readyStatusCache?.key === key) return readyStatusCache.status
+  if (statusCheck?.key === key) return statusCheck.promise
+
+  const promise = (async (): Promise<VoiceoverStatus> => {
+    try {
+      await execFileAsync(runtime.pythonPath, [
+        '-c',
+        'import f5_tts, numpy, soundfile, torch; from f5_tts.api import F5TTS'
+      ], { timeout: 30_000 })
+    } catch {
+      return unavailable('В Python не установлены зависимости TTS')
+    }
+    try {
+      await execFileAsync(runtime.ffmpegPath, ['-version'], { timeout: 10_000 })
+    } catch {
+      return unavailable('Не найден ffmpeg для финализации озвучки')
+    }
+    const status: VoiceoverStatus = {
+      ready: true,
+      engine: 'F5-TTS',
+      pythonPath: runtime.pythonPath,
+      modelPath: runtime.modelPath,
+      vocabPath: runtime.vocabPath,
+      voicesPath: runtime.voicesPath,
+      configPath: runtime.configPath
+    }
+    readyStatusCache = { key, status }
+    return status
+  })()
+  statusCheck = { key, promise }
   try {
-    await execFileAsync(runtime.pythonPath, [
-      '-c',
-      'import mlx.core, numpy; from mlx_audio.tts.utils import load_model'
-    ], { timeout: 20_000 })
-  } catch {
-    return unavailable('В Python не установлены зависимости TTS')
-  }
-  try {
-    await execFileAsync(runtime.ffmpegPath, ['-version'], { timeout: 10_000 })
-  } catch {
-    return unavailable('Не найден ffmpeg для финализации озвучки')
-  }
-  return {
-    ready: true,
-    pythonPath: runtime.pythonPath,
-    modelPath: runtime.modelPath,
-    configPath: runtime.configPath
+    return await promise
+  } finally {
+    if (statusCheck?.promise === promise) statusCheck = null
   }
 }
 
@@ -156,6 +202,9 @@ function ensureWorker(runtime: VoiceoverRuntime): Promise<void> {
   const runtimeKey = JSON.stringify([
     runtime.pythonPath,
     runtime.modelPath,
+    runtime.vocabPath,
+    runtime.voicesPath,
+    runtime.cachePath,
     runtime.ffmpegPath
   ])
   if (worker && workerReady && workerRuntimeKey === runtimeKey) return workerReady
@@ -169,9 +218,21 @@ function ensureWorker(runtime: VoiceoverRuntime): Promise<void> {
     rejectReady = reject
   })
   workerRuntimeKey = runtimeKey
-  worker = spawn(runtime.pythonPath, [script, '--model', runtime.modelPath], {
+  worker = spawn(runtime.pythonPath, [
+    script,
+    '--model', runtime.modelPath,
+    '--vocab', runtime.vocabPath
+  ], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUNBUFFERED: '1', KADR_FFMPEG: runtime.ffmpegPath }
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: '1',
+      KADR_FFMPEG: runtime.ffmpegPath,
+      ...(runtime.cachePath ? {
+        HF_HOME: runtime.cachePath,
+        TORCH_HOME: join(runtime.cachePath, 'torch')
+      } : {})
+    }
   })
   worker.stdout.on('data', (chunk) => {
     stdoutBuffer += String(chunk)
@@ -200,7 +261,10 @@ async function outputPath(req: VoiceoverGenerateRequest): Promise<string> {
     : join(app.getPath('userData'), 'voiceover')
   const dir = join(root, safePart(req.clipId))
   await fs.mkdir(dir, { recursive: true })
-  return join(dir, `v${Math.max(1, Math.floor(req.version))}.wav`)
+  // A failed/retried take may reuse the same visible version number. Give
+  // every render an immutable URL so Chromium never reuses a cached WAV from
+  // the previous attempt.
+  return join(dir, `v${Math.max(1, Math.floor(req.version))}-${Date.now()}-${randomUUID().slice(0, 8)}.wav`)
 }
 
 async function generate(
@@ -214,6 +278,17 @@ async function generate(
   const status = await voiceoverStatus(req.settings)
   if (!status.ready) throw new Error(`${status.reason}. Настройте TTS по инструкции в README.md`)
   const runtime = await resolveRuntime(req.settings)
+  const customVoice = req.settings.customVoice?.id === req.settings.voiceId
+    ? req.settings.customVoice
+    : undefined
+  const bundledVoice = getVoiceoverVoice(req.settings.voiceId)
+  const referencePath = customVoice?.referencePath ?? join(runtime.voicesPath, bundledVoice.referenceFile)
+  const referenceText = customVoice?.referenceText ?? VOICEOVER_REFERENCE_TEXT
+  const voiceName = customVoice?.name ?? bundledVoice.name
+  if (!existsSync(referencePath)) throw new Error(`Не найден референс голоса «${voiceName}»`)
+  if (customVoice && !referenceText.trim()) {
+    throw new Error(`У голоса «${voiceName}» не подтверждён текст референса. Откройте «Управление голосами» и сохраните распознанный текст`)
+  }
   sendProgress(target, { clipId: req.clipId, stage: 'loading', progress: 0.04 })
   await ensureWorker(runtime)
   const out = await outputPath(req)
@@ -225,15 +300,28 @@ async function generate(
       id,
       text,
       outputPath: out,
-      settings: req.settings
+      settings: req.settings,
+      voice: {
+        id: customVoice?.id ?? bundledVoice.id,
+        referencePath,
+        referenceText
+      }
     }) + '\n')
   })
 }
 
 export function registerVoiceoverIpc() {
+  registerVoiceCloneIpc()
   ipcMain.handle('voiceover:status', (_e, settings: VoiceoverSettings) =>
     voiceoverStatus(settings)
   )
+  ipcMain.handle('voiceover:install', async (event, settings: VoiceoverSettings) => {
+    const currentStatus = await voiceoverStatus(settings)
+    if (currentStatus.ready) return currentStatus
+    await installVoiceoverBackend(event.sender)
+    return voiceoverStatus(settings)
+  })
+  ipcMain.handle('voiceover:install-cancel', () => cancelVoiceoverInstall())
   ipcMain.handle('voiceover:generate', (event, req: VoiceoverGenerateRequest) =>
     generate(event.sender, req)
   )
@@ -248,5 +336,8 @@ export function registerVoiceoverIpc() {
       message: 'Генерация отменена'
     })
   })
-  app.on('before-quit', () => stopWorker('Kadr закрывается'))
+  app.on('before-quit', () => {
+    cancelVoiceoverInstall()
+    stopWorker('Kadr закрывается')
+  })
 }

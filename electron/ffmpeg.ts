@@ -117,8 +117,10 @@ async function readWaveform(path: string, duration: number): Promise<WaveformDat
 }
 
 /**
- * Preview proxy: light 540p H.264 + AAC copy of a heavy source. The preview
- * decodes this instead of the original; export always reads the original.
+ * Preview proxy: a portrait-safe 720p-ish H.264 + AAC copy of a heavy source.
+ * Landscape sources fit inside 1280x720 and portrait sources inside 720x1280.
+ * The preview decodes this instead of the original; export always reads the
+ * original.
  */
 export function makeProxy(
   src: string,
@@ -129,8 +131,9 @@ export function makeProxy(
   const args = [
     '-y', '-v', 'error', '-progress', 'pipe:1',
     '-i', src,
-    '-vf', "scale=-2:'min(540,ih)'",
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+    '-map', '0:v:0', '-map', '0:a?',
+    '-vf', "scale='if(gte(iw,ih),min(1280,iw),min(720,iw))':'if(gte(iw,ih),min(720,ih),min(1280,ih))':force_original_aspect_ratio=decrease:force_divisible_by=2",
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '96k',
     '-movflags', '+faststart',
     out
@@ -157,6 +160,72 @@ export function makeProxy(
       else reject(new Error(`proxy ffmpeg exited ${code}: ${err.slice(0, 500)}`))
     })
   })
+}
+
+/**
+ * Reject incomplete/corrupt proxies before they are exposed to the renderer.
+ * ffprobe verifies the container and duration; sparse one-frame seeks across
+ * the whole file catch damaged regions without paying for a full second decode.
+ */
+export async function validateProxy(path: string, expectedDuration: number): Promise<void> {
+  let info: { streams?: Array<{ codec_type?: string; disposition?: { attached_pic?: number } }>; format?: { duration?: string } }
+  try {
+    const { stdout } = await execFileP(FFPROBE, [
+      '-v', 'error',
+      '-print_format', 'json',
+      '-show_entries', 'stream=codec_type:stream_disposition=attached_pic:format=duration',
+      path
+    ], { maxBuffer: 2 * 1024 * 1024 })
+    info = JSON.parse(stdout)
+  } catch (error) {
+    throw new Error(`proxy probe failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  const video = info.streams?.find((stream) =>
+    stream.codec_type === 'video' && !stream.disposition?.attached_pic)
+  if (!video) throw new Error('proxy has no playable video stream')
+
+  const actualDuration = Number(info.format?.duration)
+  if (!Number.isFinite(actualDuration) || actualDuration <= 0) {
+    throw new Error('proxy has no valid duration')
+  }
+  if (expectedDuration > 0) {
+    const tolerance = Math.max(1.5, expectedDuration * 0.03)
+    if (Math.abs(actualDuration - expectedDuration) > tolerance) {
+      throw new Error(
+        `proxy duration mismatch: expected ${expectedDuration.toFixed(2)}s, got ${actualDuration.toFixed(2)}s`
+      )
+    }
+  }
+
+  const endSample = Math.max(0, actualDuration - Math.min(0.5, actualDuration / 4))
+  const regularSamples: number[] = []
+  for (let at = 5 * 60; at < endSample; at += 5 * 60) regularSamples.push(at)
+  let sampleTimes = [...new Set([0, actualDuration / 2, endSample, ...regularSamples])]
+    .sort((a, b) => a - b)
+  // Very long recordings stay cheap to validate while retaining full-range
+  // coverage. Typical videos keep exact five-minute checkpoints (incl. 15m).
+  if (sampleTimes.length > 24) {
+    sampleTimes = Array.from({ length: 24 }, (_, index) => endSample * index / 23)
+  }
+  const samples = sampleTimes.map((at) => at.toFixed(3))
+  for (const at of samples) {
+    try {
+      const { stdout } = await execFileP(FFMPEG, [
+        '-v', 'error', '-xerror', '-ss', at, '-i', path,
+        '-map', '0:v:0', '-frames:v', '1', '-an', '-f', 'framehash', '-'
+      ], { maxBuffer: 2 * 1024 * 1024 })
+      // FFmpeg may exit 0 at EOF while producing no frame. framehash gives us
+      // an explicit output record, so a truncated tail cannot pass silently.
+      if (!/^\s*\d+,\s+\d+,/m.test(stdout)) {
+        throw new Error('decoder returned no frame')
+      }
+    } catch (error) {
+      throw new Error(
+        `proxy video cannot be decoded at ${at}s: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  }
 }
 
 /**
@@ -437,7 +506,9 @@ export class ExportMuxer {
         const speed = s.speed || 1
         const outDur = s.duration / speed // timeline-domain length after atempo
         const chain = [
-          'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+          // Let the downstream filters negotiate the sample format. Pinning it
+          // to fltp breaks otherwise valid audio mixes with FFmpeg 9.0.1.
+          'aformat=sample_rates=48000:channel_layouts=stereo',
           `volume=${s.gain.toFixed(4)}`,
           ...(Math.abs(speed - 1) > 1e-4 ? atempoChain(speed) : []),
           ...(s.fadeIn > 0.001 ? [`afade=t=in:st=0:d=${Math.min(s.fadeIn, outDur).toFixed(3)}`] : []),

@@ -63,14 +63,16 @@ captions to this part», watch it happen live in the preview.
   terminal panel, wired to the live project over MCP: it reads the
   timeline, edits clips, transcribes, creates and iterates Remotion
   fragments while you watch the preview update. The panel is draggable,
-  resizable and remembers its place across launches.
+  resizable and remembers its place across launches; pressing Claude again
+  minimizes it without losing the session context.
 - 📤 **Uncompromised export** — video is encoded by ffmpeg x264 at the
   preset's true bitrate (Chromium's built-in encoder ignored the bitrate
   and softened the picture — measured and replaced; frames reach ffmpeg
   with zero copies), mp4box-based fast decode (~8× over element seeks,
   with graceful fallback), 8-sample motion blur, automatic frame blending
   for fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3.
-- 🛟 **Quality-of-life** — background 540p preview proxies, autosave every
+- 🛟 **Quality-of-life** — background adaptive 720p preview proxies with
+  validation and automatic repair of corrupt caches, autosave every
   5 minutes (atomic, skipped during exports/AI sessions), an
   unsaved-changes indicator with “✓ Saved” feedback, self-healing after
   hard closes (no lingering processes), effect & pose presets shared
@@ -115,14 +117,17 @@ proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
 ## How the AI integration works
 
 Kadr starts a local HTTP bridge into the renderer and hands Claude an MCP
-server with five tools:
+server with a focused tool set:
 
 | Tool | What it does |
 |---|---|
+| `kadr_capabilities` | current editor contract: project files, models, ranges, effects, transitions, animation, and available actions |
 | `kadr_state` | full live project: tracks, clips, asset paths, transcripts, presets |
+| `kadr_snapshot` | save a source-quality WYSIWYG PNG frame for visual verification |
 | `kadr_eval` | run JS against the editor API (every edit lands in undo history) |
 | `kadr_export` | render the project or a range and wait for the file |
 | `kadr_transcribe` | local Whisper over a file or a timeline range |
+| `kadr_voices` | available F5-TTS voices with stable ids, numbers, and descriptions |
 | `kadr_fragment_create` | scaffold a Remotion composition as a timeline clip |
 
 The killer loop: Claude creates a fragment, edits its TSX with normal file

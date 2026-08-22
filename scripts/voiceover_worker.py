@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Warm local Qwen3-TTS worker for Kadr's private voice-over studio."""
+"""Warm local F5-TTS worker for Kadr's private voice-over studio."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import wave
 from pathlib import Path
 
-import mlx.core as mx
 import numpy as np
-from mlx_audio.audio_io import write as audio_write
-from mlx_audio.tts.utils import load_model
+import soundfile as sf
+import torch
+from f5_tts.api import F5TTS
 
 
 def emit(payload: dict) -> None:
@@ -51,56 +52,80 @@ def wav_duration(path: Path) -> float:
         return source.getnframes() / source.getframerate()
 
 
-def generate(model, request: dict) -> None:
+def f5_stress_marks(text: str) -> str:
+    """Convert UI-friendly combining accents (молоко́) to F5 Russian + notation."""
+    normalized = unicodedata.normalize("NFD", text)
+    vowels = "АЕЁИОУЫЭЮЯаеёиоуыэюя"
+    for vowel in vowels:
+        normalized = normalized.replace(f"{vowel}\N{COMBINING ACUTE ACCENT}", f"+{vowel}")
+    return unicodedata.normalize("NFC", normalized)
+
+
+def f5_spoken_text(text: str) -> str:
+    """Expand symbols the Russian F5 vocabulary cannot pronounce reliably.
+
+    In particular, an ampersand at the start of generated speech can make F5
+    continue the final words of the reference and skip the first requested
+    phrase. Keep the editor text untouched and normalize only the model input.
+    """
+    expanded = re.sub(r"[ \t]*&[ \t]*", " и ", text)
+    expanded = re.sub(r"[ \t]+", " ", expanded)
+    return f5_stress_marks(expanded.strip())
+
+
+def worker_log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def generate(model: F5TTS, request: dict) -> None:
     job_id = str(request["id"])
     text = str(request["text"]).strip()
     output = Path(request["outputPath"])
     settings = request["settings"]
+    voice = request["voice"]
+    reference = Path(str(voice["referencePath"]))
     if not text:
         raise ValueError("Пустой текст")
+    if not reference.is_file():
+        raise ValueError(f"Не найден голосовой референс: {reference}")
     output.parent.mkdir(parents=True, exist_ok=True)
     emit({"type": "progress", "id": job_id, "stage": "generating", "progress": 0.22})
 
-    accepted = None
-    failures: list[str] = []
-    base_seed = int(settings.get("seed", 20260816))
-    for attempt in range(3):
-        seed = base_seed + attempt
-        mx.random.seed(seed)
-        try:
-            result = next(model.generate(
-                text=text,
-                instruct=str(settings["voicePrompt"]),
-                lang_code=str(settings.get("language", "Russian")),
-                temperature=float(settings.get("temperature", 0.45)),
-                top_k=int(settings.get("topK", 30)),
-                top_p=float(settings.get("topP", 0.82)),
-                repetition_penalty=float(settings.get("repetitionPenalty", 1.08)),
-                max_tokens=int(settings.get("maxTokens", 700)),
-                verbose=False,
-            ))
-            segment = trim_to_speech(np.array(result.audio), int(model.sample_rate))
-            duration = len(segment) / int(model.sample_rate)
-            minimum = max(0.45, len(text) / 34.0)
-            maximum = max(7.0, len(text) / 6.0)
-            if not minimum <= duration <= maximum:
-                raise ValueError(f"Неправдоподобная длительность {duration:.2f} с")
-            accepted = (segment, seed)
-            break
-        except Exception as exc:  # retry protects against rare truncated takes
-            failures.append(str(exc))
-    if accepted is None:
-        raise RuntimeError("; ".join(failures))
-
-    segment, used_seed = accepted
-    emit({"type": "progress", "id": job_id, "stage": "mastering", "progress": 0.82})
+    used_seed = int(settings.get("seed", 20260816))
     with tempfile.TemporaryDirectory(prefix="kadr-voice-") as temp_dir:
         raw = Path(temp_dir) / "raw.wav"
+        trimmed = Path(temp_dir) / "trimmed.wav"
         mastered = Path(temp_dir) / "master.wav"
-        audio_write(str(raw), segment, int(model.sample_rate), format="wav")
+        model.infer(
+            ref_file=str(reference),
+            ref_text=str(voice["referenceText"]),
+            gen_text=f5_spoken_text(text),
+            show_info=worker_log,
+            progress=None,
+            target_rms=0.1,
+            cross_fade_duration=float(settings.get("crossFadeDuration", 0.12)),
+            sway_sampling_coef=float(settings.get("swaySamplingCoef", -1)),
+            cfg_strength=float(settings.get("cfgStrength", 2)),
+            nfe_step=int(settings.get("nfeStep", 24)),
+            speed=float(settings.get("speed", 1)),
+            remove_silence=False,
+            file_wave=str(raw),
+            seed=used_seed,
+        )
+        audio, sample_rate = sf.read(raw, dtype="float32", always_2d=False)
+        if np.asarray(audio).ndim > 1:
+            audio = np.mean(audio, axis=1)
+        segment = trim_to_speech(np.asarray(audio), int(sample_rate))
+        duration = len(segment) / int(sample_rate)
+        minimum = max(0.35, len(text) / 42.0)
+        maximum = max(8.0, len(text) / 4.0)
+        if not minimum <= duration <= maximum:
+            raise ValueError(f"Неправдоподобная длительность {duration:.2f} с")
+        sf.write(trimmed, segment, int(sample_rate), subtype="PCM_16")
+        emit({"type": "progress", "id": job_id, "stage": "mastering", "progress": 0.82})
         subprocess.run([
             os.environ.get("KADR_FFMPEG", "ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(raw),
+            "-i", str(trimmed),
             "-af", (
                 "highpass=f=70,"
                 f"loudnorm=I={float(settings.get('loudnessLufs', -16))}:"
@@ -124,8 +149,20 @@ def generate(model, request: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
+    parser.add_argument("--vocab", required=True)
     args = parser.parse_args()
-    model = load_model(model_path=args.model)
+    if torch.backends.mps.is_available():
+        device = "mps"
+    elif torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+    model = F5TTS(
+        model="F5TTS_v1_Base",
+        ckpt_file=args.model,
+        vocab_file=args.vocab,
+        device=device,
+    )
     emit({"type": "ready"})
     for line in sys.stdin:
         if not line.strip():

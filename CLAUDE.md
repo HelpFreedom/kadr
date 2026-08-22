@@ -43,7 +43,7 @@ mixes audio and muxes/transcodes per preset.
   black. Startup sweeps leftover helper processes; shutdown force-exits
   (window-all-closed → app.exit failsafe, render-process-gone → exit).
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
-  bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
+  bins), `makeProxy` (validated adaptive 720p preview proxies), `makeReversed` (backwards
   render of a clip's source range, RAM-bounded chunks), `ExportMuxer`
   (per-segment `volume,atempo*,afade,adelay,apad,atrim` → `amix` with
   exact level compensation), `RawVideoEncoder` (fallback raw-frame
@@ -56,8 +56,9 @@ mixes audio and muxes/transcodes per preset.
   `userData/claude-mcp.json`; `sweepStaleSessions()` clears leftovers of
   hard-killed runs at startup.
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
-  via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
-  kadr_export / kadr_transcribe / kadr_fragment_create.
+  via a generated `--mcp-config`; tools: kadr_capabilities / kadr_state /
+  kadr_snapshot / kadr_eval / kadr_export / kadr_transcribe / kadr_voices /
+  kadr_fragment_create.
 - `electron/transcribe.ts` + `scripts/transcribe.py` — faster-whisper
   runner (VAD, anti-hallucination thresholds and post-filters, NDJSON
   segments with word timestamps); audio comes from an ExportMuxer mixdown

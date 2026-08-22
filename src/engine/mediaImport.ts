@@ -28,7 +28,8 @@ export function clearMediaDropPreview(): void {
 
 /**
  * Import files by absolute path: probe each into a bin asset (paths already
- * in the bin are reused, not duplicated), register srt/txt as text docs, and
+ * in the bin are reused, not duplicated), register SRT/TXT and converted
+ * DOC/DOCX scenarios as text docs, and
  * — when `at` is given — lay the media out back-to-back on the timeline from
  * that point (one undo entry; audio lands on an audio track).
  * Used by the Import dialog and by OS drag-and-drop onto the bin/timeline.
@@ -52,15 +53,32 @@ async function importFilesInner(
   const st = useEditor.getState
   const assetIds: string[] = []
   const textDocs: TextDoc[] = []
+  const knownTextPaths = new Set((st().project.texts ?? []).map((doc) => doc.path))
   for (const path of paths) {
     const ext = path.split('.').pop()?.toLowerCase()
     if (ext === 'srt' || ext === 'txt') {
-      textDocs.push({
-        id: uid(),
-        name: baseOf(path),
-        path,
-        format: ext as 'srt' | 'txt'
-      })
+      if (!knownTextPaths.has(path)) {
+        textDocs.push({
+          id: uid(),
+          name: baseOf(path),
+          path,
+          format: ext as 'srt' | 'txt'
+        })
+        knownTextPaths.add(path)
+      }
+      continue
+    }
+    if (ext === 'doc' || ext === 'docx') {
+      const converted = await window.kadr.prepareTextDocument(path)
+      if (!knownTextPaths.has(converted.path)) {
+        textDocs.push({
+          id: uid(),
+          name: converted.name,
+          path: converted.path,
+          format: 'txt'
+        })
+        knownTextPaths.add(converted.path)
+      }
       continue
     }
     const existing = st().project.assets.find((a) => a.path === path)

@@ -30,6 +30,7 @@ export function TransportBar({
   const duration = useEditor((s) => projectDuration(s.project))
   const undoLabel = useEditor((s) => s.past[s.past.length - 1]?.label)
   const redoLabel = useEditor((s) => s.future[0]?.label)
+  const canCut = useEditor((s) => s.selection.length > 0 || s.range !== null)
   const st = useEditor.getState
 
   return (
@@ -62,6 +63,17 @@ export function TransportBar({
       </button>
       <span className="sep" />
       <button title={t('split')} onClick={() => st().splitAtPlayhead()}>✂</button>
+      <button
+        title={t('cut')}
+        disabled={!canCut}
+        onClick={() => {
+          const s = st()
+          if (s.selection.length) s.cutSelection()
+          else if (s.range) s.cutRange()
+        }}
+      >
+        ✂ X
+      </button>
       <button title={t('delete')} onClick={() => st().deleteSelection()}>🗑</button>
       <button title={t('addText')} onClick={() => st().insertTextClip(playhead)}>T+</button>
       <button title={t('addAnnotation')} onClick={() => st().insertAnnotation(playhead)}>A+</button>

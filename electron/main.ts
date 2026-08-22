@@ -6,13 +6,26 @@ import { promises as fs, createReadStream, statSync, existsSync, appendFileSync 
 import { tmpdir, homedir } from 'os'
 import { createHash } from 'crypto'
 import { execFile, execFileSync } from 'child_process'
-import { probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, ExportMuxer, RawVideoEncoder } from './ffmpeg'
+import { fileURLToPath } from 'url'
+import {
+  probeMedia, makeProxy, validateProxy, makeDecoded, makeReversed,
+  measureLoudness, ExportMuxer, RawVideoEncoder
+} from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { bundleFragments, registerFragmentIpc } from './fragments'
 import { registerVoiceoverIpc } from './voiceover'
+import { registerThumbnailIpc } from './thumbnails'
 import { writeHtmlPlayerExport } from './html-player'
-import type { ExportJob, HtmlPlayerExportRequest, Project } from '@shared/types'
+import {
+  embedProjectVoiceClones,
+  packageProject,
+  projectForDisk,
+  readProjectFile
+} from './project-package'
+import type {
+  ExportJob, HtmlPlayerExportRequest, Project, ProjectPackageOptions, ProxyBuildUpdate
+} from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
 // file content regardless of its own origin (http in dev, file in prod).
@@ -353,6 +366,7 @@ app.whenReady().then(() => {
   registerClaudeIpc()
   registerTranscribeIpc()
   registerFragmentIpc()
+  registerThumbnailIpc()
   registerVoiceoverIpc()
   if (pendingProjectPaths.length) {
     for (const path of [...new Set(pendingProjectPaths)]) openProjectWindow(path)
@@ -386,7 +400,7 @@ app.on('before-quit', () => {
 // ---------------------------------------------------------------------------
 
 const MEDIA_FILTERS = [
-  { name: 'Media', extensions: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v', 'mts', 'mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'opus', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'srt', 'txt'] },
+  { name: 'Media and scripts', extensions: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v', 'mts', 'mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'opus', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'srt', 'txt', 'doc', 'docx'] },
   { name: 'All files', extensions: ['*'] }
 ]
 const PROJECT_FILTERS = [{ name: 'Kadr project', extensions: ['kadr'] }]
@@ -417,42 +431,153 @@ function sendProgress(sender: WebContents, p: import('@shared/types').ExportProg
 const userStorePath = (name: string) =>
   join(app.getPath('userData'), `${name.replace(/[^a-z0-9-]/gi, '')}.json`)
 
-// preview proxies: keyed by source identity, built one at a time (weak CPU)
+// Preview proxies: keyed by source identity + encode profile, built one at a
+// time (weak CPU). Changing the profile version automatically retires old
+// low-quality caches without having to scan or delete the cache directory.
 const proxyDir = () => join(app.getPath('userData'), 'proxies')
-let proxyChain: Promise<unknown> = Promise.resolve()
+const storyboardDir = () => join(app.getPath('userData'), 'storyboards')
+let lastStoryboardCleanup = 0
 
-async function requestProxy(sender: WebContents, srcPath: string, duration: number): Promise<string> {
+async function cleanupStoryboardCache(): Promise<void> {
+  if (Date.now() - lastStoryboardCleanup < 60 * 60 * 1000) return
+  lastStoryboardCleanup = Date.now()
+  let names: string[]
+  try { names = await fs.readdir(storyboardDir()) } catch { return }
+  const entries = (await Promise.all(names.map(async (name) => {
+    const path = join(storyboardDir(), name)
+    try {
+      const stat = await fs.stat(path)
+      return stat.isDirectory() ? { path, mtimeMs: stat.mtimeMs } : null
+    } catch { return null }
+  }))).filter((entry): entry is NonNullable<typeof entry> => !!entry)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
+  for (const [index, entry] of entries.entries()) {
+    if (index >= 24 || entry.mtimeMs < cutoff) {
+      await fs.rm(entry.path, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+}
+
+const PROXY_PROFILE_VERSION = 'v2-portrait-720-crf22'
+const PROXY_MAX_ATTEMPTS = 3
+let proxyChain: Promise<unknown> = Promise.resolve()
+const validatedProxies = new Map<string, string>()
+
+function proxyError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 1000)
+}
+
+function proxyUpdate(
+  sender: WebContents,
+  srcPath: string,
+  update: Omit<ProxyBuildUpdate, 'path'>
+) {
+  sendTo(sender, 'proxy:progress', { path: srcPath, ...update } satisfies ProxyBuildUpdate)
+}
+
+async function proxyIsValid(path: string, duration: number): Promise<boolean> {
+  try {
+    const stat = await fs.stat(path)
+    const identity = `${stat.size}:${Math.round(stat.mtimeMs)}`
+    if (validatedProxies.get(path) === identity) return true
+    await validateProxy(path, duration)
+    validatedProxies.set(path, identity)
+    return true
+  } catch {
+    validatedProxies.delete(path)
+    await fs.unlink(path).catch(() => { /* already absent or in use */ })
+    return false
+  }
+}
+
+async function publishProxy(temp: string, out: string): Promise<void> {
+  try {
+    // Same-directory rename is atomic on the common desktop filesystems and
+    // replaces the old proxy only after the new one has passed validation.
+    await fs.rename(temp, out)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'EEXIST' && code !== 'EPERM') throw error
+    // Windows can refuse rename-over-existing. Preserve the valid old proxy
+    // as a rollback target until the new file is in its final location.
+    const backup = `${out}.${process.pid}.old`
+    await fs.unlink(backup).catch(() => { /* stale backup absent */ })
+    await fs.rename(out, backup)
+    try {
+      await fs.rename(temp, out)
+      await fs.unlink(backup).catch(() => { /* cleanup is best effort */ })
+    } catch (publishError) {
+      await fs.rename(backup, out).catch(() => { /* retain original error */ })
+      throw publishError
+    }
+  }
+}
+
+const proxyBackoff = (attempt: number) => new Promise<void>((resolveDelay) => {
+  setTimeout(resolveDelay, 750 * (2 ** (attempt - 1)))
+})
+
+async function requestProxy(
+  sender: WebContents,
+  srcPath: string,
+  duration: number,
+  force = false
+): Promise<string> {
   const stat = statSync(srcPath)
   const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
+    .update(`${PROXY_PROFILE_VERSION}:${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
     .digest('hex')
     .slice(0, 20)
   const out = join(proxyDir(), `${key}.mp4`)
-  try {
-    await fs.access(out)
-    return out
-  } catch { /* not built yet */ }
   await fs.mkdir(proxyDir(), { recursive: true })
+  if (!force && await proxyIsValid(out, duration)) {
+    proxyUpdate(sender, srcPath, { state: 'ready', progress: 1, cached: true })
+    return out
+  }
+  proxyUpdate(sender, srcPath, { state: 'queued', progress: 0, attempt: 1 })
+
   const job = proxyChain.then(async () => {
-    try {
-      await fs.access(out)
-      return // built while we waited in the queue
-    } catch { /* still missing */ }
-    const tmp = join(proxyDir(), `${key}.part.mp4`)
-    try {
-      await makeProxy(srcPath, tmp, duration, (p) => {
-        sendTo(sender, 'proxy:progress', { path: srcPath, progress: p })
-      })
-      await fs.rename(tmp, out)
-    } catch (err) {
-      fs.unlink(tmp).catch(() => { /* nothing to clean */ })
-      throw err
+    if (!force && await proxyIsValid(out, duration)) {
+      proxyUpdate(sender, srcPath, { state: 'ready', progress: 1, cached: true })
+      return out
     }
+
+    let lastError: unknown = new Error('proxy generation did not start')
+    for (let attempt = 1; attempt <= PROXY_MAX_ATTEMPTS; attempt++) {
+      const tmp = join(proxyDir(), `${key}.${process.pid}.${Date.now()}.${attempt}.part.mp4`)
+      try {
+        proxyUpdate(sender, srcPath, { state: 'building', progress: 0, attempt })
+        await makeProxy(srcPath, tmp, duration, (progress) => {
+          proxyUpdate(sender, srcPath, { state: 'building', progress, attempt })
+        })
+        proxyUpdate(sender, srcPath, { state: 'validating', progress: 1, attempt })
+        await validateProxy(tmp, duration)
+        await publishProxy(tmp, out)
+        const outStat = await fs.stat(out)
+        validatedProxies.set(out, `${outStat.size}:${Math.round(outStat.mtimeMs)}`)
+        proxyUpdate(sender, srcPath, { state: 'ready', progress: 1, attempt, cached: false })
+        return out
+      } catch (error) {
+        lastError = error
+        await fs.unlink(tmp).catch(() => { /* partial output absent */ })
+        if (attempt < PROXY_MAX_ATTEMPTS) {
+          const retryInMs = 750 * (2 ** (attempt - 1))
+          proxyUpdate(sender, srcPath, {
+            state: 'retrying', progress: 0, attempt, retryInMs, error: proxyError(error)
+          })
+          await proxyBackoff(attempt)
+        }
+      }
+    }
+    const message = proxyError(lastError)
+    proxyUpdate(sender, srcPath, {
+      state: 'error', progress: 0, attempt: PROXY_MAX_ATTEMPTS, error: message
+    })
+    throw new Error(`proxy generation failed after ${PROXY_MAX_ATTEMPTS} attempts: ${message}`)
   })
   proxyChain = job.catch(() => { /* keep the queue alive */ })
-  await job
-  sendTo(sender, 'proxy:progress', { path: srcPath, progress: 1 })
-  return out
+  return job
 }
 
 // full-res H.264 intermediates for sources Chromium cannot decode (export
@@ -610,6 +735,10 @@ function registerIpc() {
     requestProxy(event.sender, srcPath, duration)
   )
 
+  ipcMain.handle('proxy:rebuild', (event, srcPath: string, duration: number) =>
+    requestProxy(event.sender, srcPath, duration, true)
+  )
+
   ipcMain.handle('media:decoded', (event, srcPath: string, duration: number) =>
     requestDecoded(event.sender, srcPath, duration)
   )
@@ -727,13 +856,58 @@ function registerIpc() {
   // IMAGE (e.g. Telegram's «Копировать изображение» — photos can't even be
   // dragged out of tdesktop, paste is the ergonomic route into the editor).
   ipcMain.handle('media:clipboard-paste', async () => {
+    const paths: string[] = []
+    const seen = new Set<string>()
+    const addPath = (path: string) => {
+      const clean = path.trim()
+      if (clean && !seen.has(clean)) {
+        seen.add(clean)
+        paths.push(clean)
+      }
+    }
+    const addFileUrl = (value: string) => {
+      const url = value.trim()
+      if (!url.toLowerCase().startsWith('file://')) return
+      try { addPath(fileURLToPath(url)) } catch { /* malformed/non-local URL */ }
+    }
+
+    // Finder exposes copied files through native pasteboard types. Electron
+    // normalizes availableFormats() to "text/uri-list" on macOS, but reading
+    // that normalized type returns an empty string; readImage() then yields
+    // Finder's generic PNG document icon instead of the file contents.
+    // NSFilenamesPboardType carries every selected file, while public.file-url
+    // is the reliable single-file fallback.
+    if (process.platform === 'darwin') {
+      try {
+        const plist = clipboard.read('NSFilenamesPboardType') || ''
+        const decodeXml = (value: string) => value.replace(
+          /&(amp|lt|gt|quot|apos|#x[0-9a-f]+|#\d+);/gi,
+          (entity, token: string) => {
+            const named: Record<string, string> = {
+              amp: '&', lt: '<', gt: '>', quot: '"', apos: "'"
+            }
+            const lower = token.toLowerCase()
+            if (named[lower]) return named[lower]
+            const radix = lower.startsWith('#x') ? 16 : 10
+            const digits = lower.slice(radix === 16 ? 2 : 1)
+            const point = parseInt(digits, radix)
+            try { return Number.isFinite(point) ? String.fromCodePoint(point) : entity }
+            catch { return entity }
+          }
+        )
+        for (const match of plist.matchAll(/<string>([\s\S]*?)<\/string>/g)) {
+          addPath(decodeXml(match[1]))
+        }
+      } catch { /* pasteboard type absent */ }
+      try { addFileUrl(clipboard.read('public.file-url') || '') } catch { /* type absent */ }
+    }
+
     let uriList = ''
     try { uriList = clipboard.read('text/uri-list') || '' } catch { /* format absent */ }
-    const paths: string[] = []
     for (const line of uriList.split(/\r?\n/)) {
       const u = line.trim()
-      if (!u.startsWith('file://')) continue
-      try { paths.push(decodeURIComponent(new URL(u).pathname)) } catch { /* malformed */ }
+      if (!u || u.startsWith('#')) continue
+      addFileUrl(u)
     }
     if (paths.length) return paths
     const img = clipboard.readImage()
@@ -808,6 +982,39 @@ function registerIpc() {
     return out
   })
 
+  // Agent storyboards are disposable visual cache, not user media. Stable
+  // paths let force refresh replace stale pixels without filling the project
+  // directory (or Downloads) with numbered PNG copies.
+  ipcMain.handle('storyboard:save-image', async (
+    _e, cacheKey: string, baseName: string, png: ArrayBuffer
+  ) => {
+    if (!png?.byteLength) throw new Error('empty storyboard image')
+    const safeKey = String(cacheKey).replace(/[^a-f0-9]/gi, '').slice(0, 64)
+    if (safeKey.length < 16) throw new Error('invalid storyboard cache key')
+    const safeName = String(baseName).replace(/[^\p{L}\p{N} ._-]/gu, '_').slice(0, 120) || 'frame'
+    const target = join(storyboardDir(), safeKey)
+    const out = join(target, `${safeName}.png`)
+    const tmp = join(target, `${safeName}.${process.pid}.${Date.now()}.part.png`)
+    await fs.mkdir(target, { recursive: true })
+    try {
+      await fs.writeFile(tmp, Buffer.from(png))
+      try {
+        await fs.rename(tmp, out)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code !== 'EEXIST' && code !== 'EPERM') throw error
+        await fs.unlink(out).catch(() => { /* first generation */ })
+        await fs.rename(tmp, out)
+      }
+    } finally {
+      await fs.unlink(tmp).catch(() => { /* already published */ })
+    }
+    const now = new Date()
+    await fs.utimes(target, now, now).catch(() => { /* directory timestamp is only for eviction */ })
+    void cleanupStoryboardCache()
+    return out
+  })
+
   ipcMain.handle('project:save-dialog', async (event, currentName: string) => {
     const r = await dialog.showSaveDialog(senderWindow(event.sender), {
       defaultPath: join(await lastDir('project'), `${currentName}.kadr`),
@@ -817,6 +1024,24 @@ function registerIpc() {
     void rememberDir('project', r.filePath)
     return r.filePath
   })
+
+  ipcMain.handle('project:package-dialog', async (event, _currentName: string) => {
+    const r = await dialog.showOpenDialog(senderWindow(event.sender), {
+      defaultPath: await lastDir('project'),
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (r.canceled || !r.filePaths[0]) return null
+    void rememberDir('project', join(r.filePaths[0], 'project.kadr'))
+    return r.filePaths[0]
+  })
+
+  ipcMain.handle('project:package', async (
+    _event,
+    parentDir: string,
+    sourceProjectPath: string | null,
+    project: Project,
+    options: ProjectPackageOptions
+  ) => packageProject(parentDir, sourceProjectPath, project, options))
 
   ipcMain.handle('project:open-dialog', async (event) => {
     const r = await dialog.showOpenDialog(senderWindow(event.sender), {
@@ -830,11 +1055,12 @@ function registerIpc() {
   })
 
   ipcMain.handle('project:read', async (_e, path: string): Promise<Project> => {
-    return JSON.parse(await fs.readFile(path, 'utf-8'))
+    return readProjectFile(path)
   })
 
   ipcMain.handle('project:write', async (_e, path: string, project: Project) => {
-    await fs.writeFile(path, JSON.stringify(project, null, 1), 'utf-8')
+    const portable = await embedProjectVoiceClones(project, path)
+    await fs.writeFile(path, JSON.stringify(projectForDisk(portable, path), null, 1), 'utf-8')
   })
 
   // periodic safety net: <name>.autosave.kadr next to the saved project
@@ -847,7 +1073,8 @@ function registerIpc() {
       : `${(project.name || 'Untitled').replace(/[^\p{L}\p{N}._ -]/gu, '').trim() || 'Untitled'}.${event.sender.id}`
     const out = join(dir, `${base}.autosave.kadr`)
     const tmp = `${out}.tmp`
-    await fs.writeFile(tmp, JSON.stringify(project, null, 1), 'utf-8')
+    const portable = await embedProjectVoiceClones(project, out)
+    await fs.writeFile(tmp, JSON.stringify(projectForDisk(portable, out), null, 1), 'utf-8')
     await fs.rename(tmp, out)
     return out
   })

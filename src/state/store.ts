@@ -1,11 +1,21 @@
 import { create } from 'zustand'
 import type {
   Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec,
-  AnnotationTask, AnnotationStatus
+  AnnotationTask, AnnotationStatus, Chapter, VoiceoverHistory
 } from '@shared/types'
 
 export const uid = () => Math.random().toString(36).slice(2, 10)
 const annotationUid = () => globalThis.crypto?.randomUUID?.() ?? uid()
+const chapterUid = () => globalThis.crypto?.randomUUID?.() ?? uid()
+
+export interface TimedVoiceoverInsert {
+  asset: MediaAsset
+  start: number
+  duration: number
+  speed: number
+  label: string
+  voiceover: VoiceoverHistory
+}
 
 export const defaultTextStyle = (): TextStyle => ({
   fontFamily: 'sans-serif',
@@ -58,7 +68,8 @@ export function newProject(): Project {
       { id: uid(), kind: 'video', name: 'V1', muted: false, locked: false, gain: 1, clips: [] },
       { id: uid(), kind: 'audio', name: 'A1', muted: false, locked: false, gain: 1, clips: [] }
     ],
-    assets: []
+    assets: [],
+    chapters: []
   }
 }
 
@@ -111,6 +122,21 @@ export function sanitizeProject(p: Project): Project {
   if (!Number.isFinite(p.fps) || p.fps <= 0) p.fps = 30
   p.assets ??= []
   p.tracks ??= []
+  p.chapters = (p.chapters ?? [])
+    .filter((chapter): chapter is Chapter => !!chapter && typeof chapter === 'object')
+    .map((chapter) => {
+      const start = Number.isFinite(chapter.start) ? Math.max(0, chapter.start) : 0
+      const end = Number.isFinite(chapter.end) ? Math.max(start + 0.05, chapter.end) : start + 1
+      return {
+        id: typeof chapter.id === 'string' && chapter.id ? chapter.id : chapterUid(),
+        title: typeof chapter.title === 'string' && chapter.title.trim()
+          ? chapter.title.trim().slice(0, 160)
+          : 'Chapter',
+        start,
+        end
+      }
+    })
+    .sort((a, b) => a.start - b.start || a.end - b.end)
   for (const track of p.tracks) {
     if (!Number.isFinite(track.gain)) track.gain = 1
     track.clips ??= []
@@ -474,6 +500,14 @@ interface EditorState {
   moveTrack(trackId: string, toIndex: number): void
   updateTrack(trackId: string, patch: Partial<Track>): void
 
+  /** Add a named timeline section as one undoable edit. */
+  addChapter(title: string, start: number, end: number): string
+  /** Low-level chapter patch; callers doing a drag must push history once first. */
+  updateChapter(id: string, patch: Partial<Pick<Chapter, 'title' | 'start' | 'end'>>): boolean
+  deleteChapter(id: string): boolean
+  /** Replace the full chapter map as one undoable edit (used by MCP). */
+  replaceChapters(chapters: Chapter[]): void
+
   /** Create a four-second task at/after the playhead and open its card. */
   insertAnnotation(at: number): string
   updateAnnotation(id: string, patch: Partial<Pick<AnnotationTask, 'text' | 'status' | 'result'>>): boolean
@@ -487,8 +521,12 @@ interface EditorState {
   /** Place several assets back-to-back starting at `at` (one undo entry);
       audio assets go to an audio track regardless of the drop lane. */
   insertClipsFromAssets(assetIds: string[], trackId: string | null, at: number): void
+  /** Insert a generated SRT voiceover as one exact-timing audio track and one undo step. */
+  insertTimedVoiceovers(items: TimedVoiceoverInsert[], trackName: string): string[]
   insertTextClip(at: number): void
   updateClip(clipId: string, patch: Partial<Clip>): void
+  /** Replace one clip with timeline-relative kept ranges, preserving gaps. */
+  splitClipIntoRanges(clipId: string, ranges: { start: number; end: number }[]): string[]
   /** Change speed/duration, rescaling keyframes and fades to stay on content.
       Optional `start` moves the clip too (a speed drag from the LEFT edge
       keeps the right edge anchored). */
@@ -508,12 +546,14 @@ interface EditorState {
   setClipStarts(entries: { id: string; start: number; trackId?: string }[]): void
   trimClip(clipId: string, edge: 'in' | 'out', time: number): void
   splitAtPlayhead(): void
-  deleteSelection(): void
+  deleteSelection(historyLabel?: string): void
   /** Close the gap around `time` (primary-modifier click). */
   closeGapAt(trackId: string, time: number): void
   copySelection(): void
   copyRange(): void
-  deleteRange(): void
+  cutSelection(): void
+  cutRange(): void
+  deleteRange(historyLabel?: string): void
   pasteAtPlayhead(): void
 
   select(ids: string[]): void
@@ -745,6 +785,62 @@ export const useEditor = create<EditorState>((set, get) => ({
       return { project: p }
     }),
 
+  addChapter: (title, start, end) => {
+    const id = chapterUid()
+    get().pushHistory('hChapter')
+    set((s) => {
+      const p = clone(s.project)
+      const lo = Math.max(0, Math.min(start, end))
+      const hi = Math.max(lo + 0.05, Math.max(start, end))
+      p.chapters = [
+        ...(p.chapters ?? []),
+        { id, title: title.trim().slice(0, 160) || 'Chapter', start: lo, end: hi }
+      ].sort((a, b) => a.start - b.start || a.end - b.end)
+      return { project: p }
+    })
+    return id
+  },
+
+  updateChapter: (id, patch) => {
+    let changed = false
+    set((s) => {
+      const p = clone(s.project)
+      const chapter = p.chapters?.find((item) => item.id === id)
+      if (!chapter) return s
+      if (patch.title !== undefined) chapter.title = patch.title.trim().slice(0, 160) || chapter.title
+      if (patch.start !== undefined && Number.isFinite(patch.start)) chapter.start = Math.max(0, patch.start)
+      if (patch.end !== undefined && Number.isFinite(patch.end)) chapter.end = Math.max(0, patch.end)
+      if (chapter.end < chapter.start) [chapter.start, chapter.end] = [chapter.end, chapter.start]
+      chapter.end = Math.max(chapter.start + 0.05, chapter.end)
+      p.chapters!.sort((a, b) => a.start - b.start || a.end - b.end)
+      changed = true
+      return { project: p }
+    })
+    return changed
+  },
+
+  deleteChapter: (id) => {
+    if (!get().project.chapters?.some((chapter) => chapter.id === id)) return false
+    get().pushHistory('hChapterDelete')
+    set((s) => ({
+      project: {
+        ...s.project,
+        chapters: (s.project.chapters ?? []).filter((chapter) => chapter.id !== id)
+      }
+    }))
+    return true
+  },
+
+  replaceChapters: (chapters) => {
+    get().pushHistory('hChapter')
+    set((s) => {
+      const p = clone(s.project)
+      p.chapters = chapters.map((chapter) => ({ ...chapter }))
+      sanitizeProject(p)
+      return { project: p }
+    })
+  },
+
   insertAnnotation: (at) => {
     const s = get()
     s.pushHistory('hAnnotation')
@@ -927,6 +1023,38 @@ export const useEditor = create<EditorState>((set, get) => ({
     })
   },
 
+  insertTimedVoiceovers: (items, trackName) => {
+    if (!items.length) return []
+    const s = get()
+    const clipIds = items.map(() => uid())
+    s.pushHistory('hVoiceGeneration')
+    set((st) => {
+      const p = clone(st.project)
+      const track = makeTrack(p, 'audio')
+      track.name = trackName
+      p.tracks.push(track)
+      items.forEach((item, index) => {
+        const asset = clone(item.asset)
+        if (!p.assets.some((existing) => existing.id === asset.id)) p.assets.push(asset)
+        track.clips.push({
+          id: clipIds[index],
+          assetId: asset.id,
+          kind: 'media',
+          start: Math.max(0, item.start),
+          duration: Math.max(0.05, item.duration),
+          inPoint: 0,
+          label: item.label,
+          voiceover: clone(item.voiceover),
+          ...newClipDefaults(),
+          // newClipDefaults supplies speed=1; exact SRT fitting wins.
+          speed: Math.max(0.01, item.speed)
+        })
+      })
+      return { project: p, selection: clipIds }
+    })
+    return clipIds
+  },
+
   setClipSpeed: (clipId, speed, duration, start) =>
     set((s) => {
       const p = clone(s.project)
@@ -1042,6 +1170,42 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (f) Object.assign(f.clip, patch)
       return { project: p }
     }),
+
+  splitClipIntoRanges: (clipId, ranges) => {
+    const s = get()
+    const original = findClip(s.project, clipId)
+    if (!original || original.track.locked) return []
+    const clean = ranges
+      .map((r) => ({
+        start: Math.max(0, Math.min(original.clip.duration, r.start)),
+        end: Math.max(0, Math.min(original.clip.duration, r.end))
+      }))
+      .filter((r) => r.end - r.start >= 0.05)
+      .sort((a, b) => a.start - b.start)
+    if (!clean.length) return []
+    s.pushHistory('hAutoCut')
+    const ids = clean.map(() => uid())
+    set((st) => {
+      const p = clone(st.project)
+      const found = findClip(p, clipId)
+      if (!found) return st
+      const index = found.track.clips.findIndex((c) => c.id === clipId)
+      const pieces = clean.map((r, i): Clip => ({
+        ...clone(found.clip),
+        id: ids[i],
+        start: found.clip.start + r.start,
+        duration: r.end - r.start,
+        inPoint: found.clip.inPoint + r.start * (found.clip.speed || 1),
+        label: `${found.clip.label || 'Voice'} · ${i + 1}`,
+        linkId: undefined,
+        fadeIn: Math.min(found.clip.fadeIn || 0, (r.end - r.start) / 2),
+        fadeOut: Math.min(found.clip.fadeOut || 0, (r.end - r.start) / 2)
+      }))
+      found.track.clips.splice(index, 1, ...pieces)
+      return { project: p, selection: ids }
+    })
+    return ids
+  },
 
   setClipStarts: (entries) =>
     set((s) => {
@@ -1159,10 +1323,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     })
   },
 
-  deleteSelection: () => {
+  deleteSelection: (historyLabel = 'hDelete') => {
     const s = get()
     if (!s.selection.length) return
-    s.pushHistory('hDelete')
+    s.pushHistory(historyLabel)
     set((st) => {
       const p = clone(st.project)
       for (const tr of p.tracks) {
@@ -1208,7 +1372,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         }
       }
     }
-    set({ clipboard: items })
+    if (items.length) set({ clipboard: items })
   },
 
   copyRange: () => {
@@ -1221,14 +1385,39 @@ export const useEditor = create<EditorState>((set, get) => ({
         if (piece) items.push({ kind: track.kind, trackId: track.id, clip: piece })
       }
     }
-    if (items.length) set({ clipboard: items })
+    set({ clipboard: items })
   },
 
-  deleteRange: () => {
+  cutSelection: () => {
+    const s = get()
+    if (!s.selection.length) return
+    s.copySelection()
+    get().deleteSelection('hCut')
+  },
+
+  cutRange: () => {
+    const s = get()
+    const range = s.range
+    if (!range) return
+    const items: ClipboardItem[] = []
+    for (const track of s.project.tracks) {
+      if (track.locked) continue
+      for (const clip of track.clips) {
+        const piece = clipIntersection(clip, range.start, range.end)
+        if (piece) items.push({ kind: track.kind, trackId: track.id, clip: piece })
+      }
+    }
+    if (!items.length) return
+    set({ clipboard: items })
+    get().deleteRange('hCut')
+    get().setRange(null)
+  },
+
+  deleteRange: (historyLabel = 'hDeleteRange') => {
     const s = get()
     const r = s.range
     if (!r) return
-    s.pushHistory('hDeleteRange')
+    s.pushHistory(historyLabel)
     set((st) => {
       const p = clone(st.project)
       for (const tr of p.tracks) {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -11,8 +11,13 @@ import { useT } from '@/i18n'
 // placement (docked to the right edge)
 const RECT_KEY = 'kadr.claudeRect'
 type PanelRect = { x: number; y: number; w: number; h: number }
+interface ClaudePanelProps {
+  visible: boolean
+  onClose: () => void
+}
 const MIN_W = 340
 const MIN_H = 220
+const PANEL_TOP_INSET = 52
 
 function clampRect(r: PanelRect): PanelRect {
   const vw = window.innerWidth
@@ -21,7 +26,7 @@ function clampRect(r: PanelRect): PanelRect {
   const h = Math.max(MIN_H, Math.min(r.h, vh - 16))
   // keep the header reachable: at least 120px of it inside the viewport
   const x = Math.max(120 - w, Math.min(r.x, vw - 120))
-  const y = Math.max(0, Math.min(r.y, vh - 60))
+  const y = Math.max(PANEL_TOP_INSET, Math.min(r.y, vh - 60))
   return { x, y, w, h }
 }
 
@@ -36,13 +41,22 @@ function loadRect(): PanelRect | null {
 /**
  * Embedded Claude Code session: an xterm terminal driven by a PTY in the
  * main process running the user's `claude` CLI, with the kadr MCP server
- * wired to this very editor instance. Closing the panel kills the session.
+ * wired to this very editor instance. Hiding keeps the terminal mounted and
+ * the session alive; closing the panel kills it.
  */
-export function ClaudePanel({ onClose }: { onClose: () => void }) {
+export function ClaudePanel({ visible, onClose }: ClaudePanelProps) {
   const t = useT()
   const holder = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+  const terminalRef = useRef<Terminal | null>(null)
+  const fitRef = useRef<FitAddon | null>(null)
   const [rect, setRect] = useState<PanelRect | null>(loadRect)
+  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
+
+  const dismissCloseConfirm = useCallback(() => {
+    setCloseConfirmOpen(false)
+    window.requestAnimationFrame(() => terminalRef.current?.focus())
+  }, [])
 
   // shared drag plumbing for the header (move) and the edge handles (resize)
   const trackDrag = (
@@ -110,6 +124,8 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
     term.loadAddon(fit)
     term.open(holder.current)
     fit.fit()
+    terminalRef.current = term
+    fitRef.current = fit
 
     const offData = window.kadr.onClaudeData((data) => term.write(data))
     const offExit = window.kadr.onClaudeExit(() => {
@@ -144,15 +160,30 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       offData()
       offExit()
       window.kadr.claudeClose()
+      terminalRef.current = null
+      fitRef.current = null
       term.dispose()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  useEffect(() => {
+    if (!visible) return
+    const frame = window.requestAnimationFrame(() => {
+      const term = terminalRef.current
+      if (!term) return
+      fitRef.current?.fit()
+      window.kadr.claudeResize(term.cols, term.rows)
+      term.focus()
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [visible])
+
   return (
     <div
-      className="claude-panel"
+      className={visible ? 'claude-panel' : 'claude-panel hidden'}
       ref={panelRef}
+      aria-hidden={!visible}
       style={rect
         ? { left: rect.x, top: rect.y, width: rect.w, height: rect.h, right: 'auto', bottom: 'auto' }
         : undefined}
@@ -160,7 +191,13 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       <div className="claude-head" onPointerDown={startMove}>
         <span>🤖 Claude Code</span>
         <span className="dim claude-hint">{t('claudeHint')}</span>
-        <button className="claude-close" title={t('claudeClose')} onClick={onClose}>✕</button>
+        <button
+          className="claude-close"
+          title={t('claudeClose')}
+          onClick={() => setCloseConfirmOpen(true)}
+        >
+          ✕
+        </button>
       </div>
       <div className="claude-term" ref={holder} />
       <div className="claude-rs l" onPointerDown={startResize({ l: true })} />
@@ -168,6 +205,22 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       <div className="claude-rs b" onPointerDown={startResize({ b: true })} />
       <div className="claude-rs bl" onPointerDown={startResize({ l: true, b: true })} />
       <div className="claude-rs br" onPointerDown={startResize({ r: true, b: true })} />
+      {closeConfirmOpen && (
+        <div className="modal-back claude-confirm-back" role="presentation">
+          <div
+            className="modal claude-confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="claude-close-confirm-title"
+          >
+            <h2 id="claude-close-confirm-title">{t('claudeCloseConfirm')}</h2>
+            <div className="modal-actions">
+              <button autoFocus onClick={dismissCloseConfirm}>{t('no')}</button>
+              <button className="danger" onClick={onClose}>{t('yes')}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

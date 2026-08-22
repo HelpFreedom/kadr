@@ -79,6 +79,9 @@ const api: KadrApi = {
   dropLog: (entry) => ipcRenderer.send('debug:drop-log', entry),
 
   saveProjectDialog: (name) => ipcRenderer.invoke('project:save-dialog', name),
+  saveProjectPackageDialog: (name) => ipcRenderer.invoke('project:package-dialog', name),
+  packageProject: (parentDir, sourceProjectPath, project, options) =>
+    ipcRenderer.invoke('project:package', parentDir, sourceProjectPath, project, options),
   openProjectDialog: () => ipcRenderer.invoke('project:open-dialog'),
   newEditorWindow: () => ipcRenderer.send('window:new'),
   takeInitialProjectPath: () => ipcRenderer.invoke('window:initial-project'),
@@ -98,12 +101,18 @@ const api: KadrApi = {
     return () => ipcRenderer.removeListener('reverse:progress', handler)
   },
   requestProxy: (path, duration) => ipcRenderer.invoke('proxy:request', path, duration),
+  rebuildProxy: (path, duration) => ipcRenderer.invoke('proxy:rebuild', path, duration),
+  timelineThumbnails: (request) => ipcRenderer.invoke('thumbnail:timeline', request),
+  visualFingerprint: (paths, fragmentIds) =>
+    ipcRenderer.invoke('visual:fingerprint', paths, fragmentIds),
   requestDecoded: (path, duration) => ipcRenderer.invoke('media:decoded', path, duration),
   pickDirectory: (title) => ipcRenderer.invoke('dialog:pick-dir', title),
   saveSnapshot: (dir, baseName, png) => ipcRenderer.invoke('snapshot:save', dir, baseName, png),
+  saveStoryboardImage: (cacheKey, baseName, png) =>
+    ipcRenderer.invoke('storyboard:save-image', cacheKey, baseName, png),
   measureLoudness: (path, start, duration) => ipcRenderer.invoke('media:loudness', path, start, duration),
   onProxyProgress: (cb) => {
-    const handler = (_e: unknown, p: { path: string; progress: number }) => cb(p)
+    const handler = (_e: unknown, p: Parameters<typeof cb>[0]) => cb(p)
     ipcRenderer.on('proxy:progress', handler)
     return () => ipcRenderer.removeListener('proxy:progress', handler)
   },
@@ -155,8 +164,25 @@ const api: KadrApi = {
   readTextFile: (path) => ipcRenderer.invoke('file:read-text', path),
   writeTextFile: (path, content) => ipcRenderer.invoke('file:write-text', path, content),
   statFile: (path) => ipcRenderer.invoke('file:stat', path),
+  createSrtFile: (suggestedName, start) => ipcRenderer.invoke('text:create-srt', suggestedName, start),
+  prepareTextDocument: (path) => ipcRenderer.invoke('text:prepare-document', path),
 
   voiceoverStatus: (settings) => ipcRenderer.invoke('voiceover:status', settings),
+  voiceoverInstall: (settings) => ipcRenderer.invoke('voiceover:install', settings),
+  voiceoverInstallCancel: () => ipcRenderer.invoke('voiceover:install-cancel'),
+  onVoiceoverInstallProgress: (cb) => {
+    const handler = (_e: unknown, p: Parameters<typeof cb>[0]) => cb(p)
+    ipcRenderer.on('voiceover:install-progress', handler)
+    return () => ipcRenderer.removeListener('voiceover:install-progress', handler)
+  },
+  voiceCloneList: () => ipcRenderer.invoke('voice-clone:list'),
+  voiceClonePickFile: () => ipcRenderer.invoke('voice-clone:pick-file'),
+  voiceClonePrepare: (sourcePath) => ipcRenderer.invoke('voice-clone:prepare', sourcePath),
+  voiceCloneProcess: (sourcePath, options) => ipcRenderer.invoke('voice-clone:process', sourcePath, options),
+  voiceCloneTranscribe: (sourcePath) => ipcRenderer.invoke('voice-clone:transcribe', sourcePath),
+  voiceCloneSave: (request) => ipcRenderer.invoke('voice-clone:save', request),
+  voiceCloneDelete: (voiceId) => ipcRenderer.invoke('voice-clone:delete', voiceId),
+  voiceCloneDiscard: (paths) => ipcRenderer.invoke('voice-clone:discard', paths),
   voiceoverGenerate: (req) => ipcRenderer.invoke('voiceover:generate', req),
   voiceoverCancel: () => ipcRenderer.invoke('voiceover:cancel'),
   onVoiceoverProgress: (cb) => {

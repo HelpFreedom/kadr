@@ -1,14 +1,17 @@
 // Test: Remotion fragments — create over a range (clip on a fresh top
 // track, ≥60 fps meta), live preview overlay iframe, hot file edits keep it
 // alive, one-shot final render (vp9 alpha webm), export materialization
-// composites the fragment over a video, MCP exposes kadr_fragment_create.
+// composites the fragment over a video, MCP creates a second fragment.
 // Requires the workspace to be installed (first fragmentEnsure run).
 import WebSocket from 'ws'
 import { spawn, execFileSync } from 'child_process'
 import { writeFileSync, unlinkSync, readFileSync } from 'fs'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
-const ENV_FILE = `${process.env.HOME}/.config/kadr/claude-env.json`
+const USER_DATA = process.env.KADR_USER_DATA || (process.platform === 'darwin'
+  ? `${process.env.HOME}/Library/Application Support/kadr`
+  : `${process.env.HOME}/.config/kadr`)
+const ENV_FILE = `${USER_DATA}/claude-env.json`
 
 // self-contained media: the export check counts smpte-bar pixels below the fragment
 execFileSync('bash', ['-c',
@@ -215,8 +218,10 @@ print(bars, text)
   let mcpId = 0
   const mcpCall = (method, params) => new Promise((resolve, reject) => {
     const i = ++mcpId
-    pending.set(i, resolve)
-    setTimeout(() => { if (pending.has(i)) { pending.delete(i); reject(new Error(method + ' timeout')) } }, 30000)
+    const timer = setTimeout(() => {
+      if (pending.has(i)) { pending.delete(i); reject(new Error(method + ' timeout')) }
+    }, 120000)
+    pending.set(i, (message) => { clearTimeout(timer); resolve(message) })
     mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: i, method, params }) + '\n')
   })
   await mcpCall('initialize', {
@@ -226,6 +231,18 @@ print(bars, text)
   const tools = await mcpCall('tools/list', {})
   const names = (tools.result?.tools ?? []).map((t) => t.name)
   check('MCP exposes kadr_fragment_create', names.includes('kadr_fragment_create'), names.join(','))
+  const made = await mcpCall('tools/call', {
+    name: 'kadr_fragment_create',
+    arguments: { name: 'mcp-fragment', start: 2.1, end: 2.6, transparent: true }
+  })
+  const madeObj = JSON.parse(made.result?.content?.[0]?.text ?? 'null')
+  check('MCP creates a live editable fragment clip',
+    !!madeObj.fragmentId && !!madeObj.clipId && madeObj.entryFile?.endsWith('index.tsx') &&
+    madeObj.meta?.fps >= 60 && madeObj.playerUrl?.includes(madeObj.fragmentId),
+    JSON.stringify({ id: madeObj.fragmentId, fps: madeObj.meta?.fps }))
+  if (madeObj.fragmentId) {
+    await evalJs(`(async () => window.kadrEditor.deleteFragment(${JSON.stringify(madeObj.fragmentId)}))()`)
+  }
   mcp.kill()
   await evalJs(`(async () => window.kadr.claudeClose())()`)
 } finally {

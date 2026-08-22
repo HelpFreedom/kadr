@@ -23,6 +23,7 @@ files:
   - electron/kadr-skill.md
   - scripts/transcribe.py
   - scripts/voiceover_worker.py
+  - resources/voiceover-voices/**/*
   - package.json
 
 fileAssociations:
@@ -36,6 +37,8 @@ fileAssociations:
 mac:
   category: public.app-category.video
   icon: build/icon.icns
+  extendInfo:
+    NSMicrophoneUsageDescription: Kadr uses the microphone to record voice-over tracks.
   # Local distribution without a Developer ID: explicitly ad-hoc sign the
   # bundle. identity:null would skip signing entirely.
   identity: "-"

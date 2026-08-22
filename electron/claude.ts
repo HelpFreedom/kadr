@@ -23,8 +23,16 @@ import type { IPty } from 'node-pty'
 const SYSTEM_HINT =
   'You are embedded inside Kadr, a video editor, and were opened from its UI. ' +
   'The MCP server "kadr" is connected to the LIVE project the user is editing right now: ' +
-  'kadr_state reads it, kadr_eval changes it, kadr_export renders it, kadr_transcribe does ' +
-  'speech-to-text, kadr_fragment_create makes Remotion compositions (animations, dynamic ' +
+  'kadr_capabilities is the authoritative current editing contract; consult its relevant section ' +
+  'before using unfamiliar fields, effects, transitions, masks or animation. kadr_state reads the ' +
+  'project, kadr_snapshot lets you see source-quality WYSIWYG frames, kadr_eval changes it, ' +
+  'and kadr_chapters reads or writes the amber chapter/group map under the timeline ruler. ' +
+  'After building or reorganizing an edit with distinct sections, use kadr_chapters to give those ' +
+  'ranges concise meaningful names; preserve existing chapter ids and do not add a pointless map ' +
+  'to a short undivided timeline. ' +
+  'kadr_export renders it, kadr_transcribe does speech-to-text, kadr_voices lists every ' +
+  'available F5-TTS regeneration voice, and kadr_fragment_create makes ' +
+  'Remotion compositions (animations, dynamic ' +
   'captions, motion graphics) that live as clips on the timeline — after creating one, edit ' +
   'its TSX entry file directly: the user sees your changes live in the preview, no rendering. ' +
   'Treat user requests as being about this project unless told otherwise. ' +
@@ -211,8 +219,13 @@ async function openSession(
       mcpServers: {
         ...extraServers,
         kadr: {
-          command: 'node',
-          args: [join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'), String(bridge.port)]
+          // Use Electron's bundled Node runtime instead of a PATH-resolved
+          // `node`. Finder-launched apps often cannot see nvm/asdf, which
+          // made Claude report `failed to reconnect: ENOENT` even though the
+          // bridge script itself was present in the app bundle.
+          command: process.execPath,
+          args: [join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'), String(bridge.port)],
+          env: { ELECTRON_RUN_AS_NODE: '1' }
         }
       }
     }, null, 1)
@@ -246,7 +259,7 @@ async function openSession(
     p.onData((data) => win.webContents.send('claude:data', data))
     p.onExit(({ exitCode }) => {
       // only announce deaths of the CURRENT session: deliberate closes
-      // (panel toggle, StrictMode remount) null `session` before killing
+      // (confirmed panel close, StrictMode remount) null `session` before killing
       if (session?.pty === p) {
         win.webContents.send('claude:exit', exitCode)
         session.server.close()

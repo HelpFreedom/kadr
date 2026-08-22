@@ -8,13 +8,13 @@ const LABELS = {
   en: {
     file: 'File', newWindow: 'New Window', newProject: 'New Project', openProject: 'Open Project…',
     save: 'Save', saveAs: 'Save As…', export: 'Export…', edit: 'Edit',
-    undo: 'Undo', redo: 'Redo', view: 'View', window: 'Window',
+    undo: 'Undo', redo: 'Redo', cut: 'Cut', view: 'View', window: 'Window',
     help: 'Help', github: 'Kadr on GitHub'
   },
   ru: {
     file: 'Файл', newWindow: 'Новое окно', newProject: 'Новый проект', openProject: 'Открыть проект…',
     save: 'Сохранить', saveAs: 'Сохранить как…', export: 'Экспорт…', edit: 'Правка',
-    undo: 'Отменить', redo: 'Повторить', view: 'Вид', window: 'Окно',
+    undo: 'Отменить', redo: 'Повторить', cut: 'Вырезать', view: 'Вид', window: 'Окно',
     help: 'Справка', github: 'Kadr на GitHub'
   }
 } as const
@@ -25,10 +25,10 @@ const LABELS = {
  * toolbar buttons call — the menu is purely a native entry point with
  * proper Cmd/Ctrl accelerators (macOS users finally get ⌘S/⌘Z/…).
  *
- * Clipboard/selection keep their standard roles so text inputs and the
- * embedded Claude terminal behave natively; project-level undo/redo are
- * custom items (the app's real history lives in the zustand store, not the
- * DOM) and the renderer falls back to text undo when an input is focused.
+ * Copy/paste/selection keep their standard roles. Cut is forwarded so it can
+ * target timeline clips, with a renderer-side fallback to native text cutting
+ * for inputs and the embedded terminal. Project-level undo/redo are custom too
+ * because the app's real history lives in the zustand store, not the DOM.
  */
 function localizedLabels() {
   return app.getLocale().toLowerCase().startsWith('ru') ? LABELS.ru : LABELS.en
@@ -79,7 +79,7 @@ export function buildMenu(
         { label: labels.undo, accelerator: 'CmdOrCtrl+Z', click: send('undo') },
         { label: labels.redo, accelerator: 'CmdOrCtrl+Shift+Z', click: send('redo') },
         { type: 'separator' },
-        { role: 'cut' },
+        { label: labels.cut, accelerator: 'CmdOrCtrl+X', click: send('cut') },
         { role: 'copy' },
         { role: 'paste' },
         { role: 'selectAll' }

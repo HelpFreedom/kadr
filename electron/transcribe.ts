@@ -2,13 +2,17 @@
 // segment graph as exports — what you hear is what gets transcribed), then
 // run faster-whisper via scripts/transcribe.py, streaming progress and live
 // text to the renderer. One job at a time.
-import { app, ipcMain, BrowserWindow } from 'electron'
-import { spawn, ChildProcess } from 'child_process'
+import { app, ipcMain, BrowserWindow, dialog } from 'electron'
+import { execFile, spawn, ChildProcess } from 'child_process'
 import { promises as fs } from 'fs'
-import { join } from 'path'
+import { basename, extname, join } from 'path'
 import { homedir, tmpdir } from 'os'
+import { createHash } from 'crypto'
+import { promisify } from 'util'
 import { ExportMuxer } from './ffmpeg'
 import type { TranscribeRequest, TranscribeResult, TranscribeSegment } from '@shared/types'
+
+const execFileAsync = promisify(execFile)
 
 let current: {
   ownerId: number
@@ -152,5 +156,64 @@ export function registerTranscribeIpc() {
     } catch {
       return null
     }
+  })
+
+  ipcMain.handle('text:create-srt', async (event, suggestedName: string, start: number) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) throw new Error('no window')
+    const safeName = (suggestedName || 'subtitles')
+      .replace(/\.srt$/i, '')
+      .replace(/[^\p{L}\p{N} _.-]+/gu, '_')
+      .trim()
+      .slice(0, 80) || 'subtitles'
+    const result = await dialog.showSaveDialog(win, {
+      title: 'Создать файл субтитров',
+      defaultPath: join(app.getPath('documents'), `${safeName}.srt`),
+      filters: [{ name: 'SubRip subtitles', extensions: ['srt'] }]
+    })
+    if (result.canceled || !result.filePath) return null
+    const path = result.filePath.toLowerCase().endsWith('.srt')
+      ? result.filePath
+      : `${result.filePath}.srt`
+    const from = Math.max(0, Number.isFinite(start) ? start : 0)
+    const toSrtTime = (seconds: number) => {
+      const ms = Math.round(seconds * 1000)
+      const hh = Math.floor(ms / 3_600_000)
+      const mm = Math.floor((ms % 3_600_000) / 60_000)
+      const ss = Math.floor((ms % 60_000) / 1000)
+      const mmm = ms % 1000
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:` +
+        `${String(ss).padStart(2, '0')},${String(mmm).padStart(3, '0')}`
+    }
+    await fs.writeFile(path, `1\n${toSrtTime(from)} --> ${toSrtTime(from + 3)}\n\n`, 'utf8')
+    return path
+  })
+
+  ipcMain.handle('text:prepare-document', async (_event, path: string) => {
+    const ext = extname(path).toLowerCase()
+    if (ext !== '.doc' && ext !== '.docx') throw new Error('Поддерживаются только DOC и DOCX')
+    if (process.platform !== 'darwin') {
+      throw new Error('Импорт DOC/DOCX сейчас поддерживается только в версии Kadr для macOS')
+    }
+    const stat = await fs.stat(path)
+    if (!stat.isFile()) throw new Error('Файл сценария не найден')
+    if (stat.size > 100 * 1024 * 1024) throw new Error('Файл сценария больше 100 МБ')
+    const converted = await execFileAsync('/usr/bin/textutil', [
+      '-convert', 'txt', '-stdout', path
+    ], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: 60_000 })
+    const text = String(converted.stdout).replace(/^\uFEFF/, '')
+    if (!text.trim()) throw new Error(`В ${basename(path)} не найден текст`)
+    const dir = join(app.getPath('userData'), 'text-documents')
+    await fs.mkdir(dir, { recursive: true })
+    const tag = createHash('sha1')
+      .update(`${path}\0${stat.size}\0${stat.mtimeMs}`)
+      .digest('hex')
+      .slice(0, 12)
+    const stem = basename(path, ext).replace(/[^\p{L}\p{N}_.-]+/gu, '_').slice(0, 70) || 'document'
+    const outputPath = join(dir, `${stem}-${tag}.txt`)
+    const pending = `${outputPath}.part`
+    await fs.writeFile(pending, text, 'utf8')
+    await fs.rename(pending, outputPath)
+    return { path: outputPath, name: basename(path) }
   })
 }

@@ -19,6 +19,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "archiver": "^8.0.0",
     "mp4-muxer": "^5.1.5",
     "mp4box": "^2.3.0",
     "node-pty": "^1.1.0",
@@ -30,6 +31,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.4",
+    "@types/archiver": "^8.0.0",
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",

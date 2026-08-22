@@ -241,6 +241,8 @@ server.registerTool('kadr_state', {
     'playhead, and available export presets. All times are in seconds. tracks[0] is the topmost ' +
     'video track (drawn last). Clip: {id, kind: media|text|remotion, assetId, start, duration, inPoint, ' +
     'speed, gain, muted, transform, mask?, maskShapes?, effects[], transitionIn/Out?, fadeIn/Out?}. ' +
+    'project.markers are the user\'s free-floating timeline markers ({id, time, label}) — use ' +
+    'them as anchors the user set for you (\u00abfrom marker 2 to marker 3\u00bb). ' +
     'project.texts lists transcript/subtitle documents (TextDoc {id, name, path, format: srt|txt, ' +
     'assetId?, offset?}) — path is a real file you can Read/Edit; see kadr_transcribe to create them. ' +
     'Asset waveform/thumbnail blobs are omitted (hasWaveform/hasThumbnail flags remain).',
@@ -392,6 +394,7 @@ server.registerTool('kadr_eval', {
     '(speed 0.02–100), addAsset(asset), ' +
     'addTrack(kind), replaceChapters([{id,title,start,end}]) (one undo), select([ids]), ' +
     'setPlayhead(sec), setProject(project), splitAtPlayhead(), ' +
+    'addMarker(sec) (auto-numbered, returns id), moveMarker(id, sec), removeMarker(id), ' +
     'deleteSelection(), setTransition(clipId, type|null), setEdgeTransitions(...).\n' +
     '- window.kadrEditor.uid() → new id; .PRESETS → export presets; .projectDuration(project); ' +
     '.evalAnim(anim, t); await .reverseClip(clipId) — reverse a video/audio clip in place ' +
@@ -549,7 +552,9 @@ server.registerTool('kadr_fragment_create', {
     'Kadr timeline at [start, end) project seconds. Use it for animations, dynamic subtitles, ' +
     'motion graphics, self-contained scenes. Returns the fragment id and the entry TSX file — ' +
     'EDIT THAT FILE with your normal file tools; the editor preview hot-reloads your changes ' +
-    'live (no rendering during iteration; the real render happens once at export). Rules:\n' +
+    'live (no rendering during iteration; the real render happens once at export). For a saved ' +
+    'project the fragment folder lives next to the .kadr file (<projectDir>/kadr-fragments/<id>); ' +
+    'unsaved projects keep it in the shared workspace until the first save moves it over. Rules:\n' +
     '- the composition is sized to the project and runs at >=60 fps; meta.json in the fragment ' +
     'folder holds width/height/fps/durationInFrames — keep durationInFrames in sync if you ' +
     'change timing\n' +
@@ -557,6 +562,8 @@ server.registerTool('kadr_fragment_create', {
     'self-contained scene\n' +
     '- to use media/images, copy or write files INTO the fragment folder and import them ' +
     '(import bg from "./bg.jpg") — absolute paths will not survive the final render bundling\n' +
+    '- embed video with <Video>, NOT <OffthreadVideo>: the latter needs Remotion\'s native ' +
+    'compositor (glibc >= 2.32) and dies on older systems with "GLIBC_2.3x not found"\n' +
     '- the module must keep exporting `fragment = { component, meta }`\n' +
     '- subtitle data: read SRT files from kadr_state project.texts and bake the cues into the ' +
     'composition (e.g. as a const array) for word-precise animated captions',

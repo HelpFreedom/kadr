@@ -1,7 +1,8 @@
 // Remotion fragments, renderer side: dev-server handle and the create flow
 // shared by the UI and the kadr MCP tool (window.kadrEditor.createFragment).
 import { create } from 'zustand'
-import type { FragmentInfo } from '@shared/types'
+import type { FragmentInfo, Project } from '@shared/types'
+import { dirOf } from '@shared/paths'
 import { useEditor } from '@/state/store'
 
 interface FragServerState {
@@ -53,6 +54,8 @@ export async function createFragment(
   const p = useEditor.getState().project
   await window.kadr.fragmentEnsure()
   const fps = Math.max(60, p.fps)
+  // saved projects own their fragment sources: <projectDir>/kadr-fragments/
+  const projectPath = useEditor.getState().projectPath
   const info = await window.kadr.fragmentCreate({
     name: opts.name,
     width: p.width,
@@ -60,12 +63,35 @@ export async function createFragment(
     fps,
     durationInFrames: Math.max(1, Math.round((opts.end - opts.start) * fps)),
     transparent: opts.transparent ?? true
-  })
+  }, projectPath ? dirOf(projectPath) : null)
   const clipId = useEditor
     .getState()
     .insertFragmentClip(info.id, info.meta, opts.start, opts.end - opts.start)
   void ensureFragmentServer().catch(() => { /* surfaces in the overlay */ })
   return { ...info, clipId }
+}
+
+/**
+ * Keep the project's fragments living next to its .kadr file: loose
+ * workspace fragments move into <projectDir>/kadr-fragments (symlink stays
+ * behind for vite/remotion), and fragments that exist only in the project
+ * folder get their workspace symlink restored — so a project opened on a
+ * fresh machine finds its compositions. Called after save and open.
+ */
+export async function syncProjectFragments(project: Project, projectPath: string | null): Promise<void> {
+  if (!projectPath) return
+  const ids = [...new Set(
+    project.tracks.flatMap((t) => t.clips)
+      .filter((c) => c.kind === 'remotion' && c.fragmentId)
+      .map((c) => c.fragmentId!)
+  )]
+  if (!ids.length) return
+  try {
+    const changed = await window.kadr.fragmentRelocate(dirOf(projectPath), ids)
+    if (changed.length) console.info(`[kadr] fragments relocated to the project folder: ${changed.join(', ')}`)
+  } catch (err) {
+    console.warn('[kadr] fragment relocate failed', err)
+  }
 }
 
 /**

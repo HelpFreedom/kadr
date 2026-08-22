@@ -9,7 +9,7 @@ import { wireProxies } from './engine/proxy'
 import {
   transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues
 } from './engine/subtitles'
-import { createFragment, ensureFragmentServer, deleteFragment } from './engine/fragments'
+import { createFragment, ensureFragmentServer, deleteFragment, syncProjectFragments } from './engine/fragments'
 import { wireFragmentCapture } from './engine/fragmentCapture'
 import './styles.css'
 
@@ -18,6 +18,7 @@ import { autoCaptions, captionsTsx } from './engine/captions'
 import { reverseClip } from './engine/reverse'
 import { importFiles, wireDropDiagnostics } from './engine/mediaImport'
 import { snapshotFrame, storyboardFrames } from './engine/snapshot'
+import { wireExportChime } from './engine/chime'
 import { normalizeClip } from './engine/normalize'
 import { getEditorCapabilities } from './engine/capabilities'
 import {
@@ -26,6 +27,7 @@ import {
 
 wireProxies()
 wireFragmentCapture()
+wireExportChime()
 wireAutosave()
 wireDropDiagnostics()
 
@@ -40,7 +42,8 @@ wireDropDiagnostics()
   getCapabilities: (section = 'all') => getEditorCapabilities(
     section,
     Object.entries(useEditor.getState()).filter(([, value]) => typeof value === 'function').map(([name]) => name).sort()
-  )
+  ),
+  syncProjectFragments
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

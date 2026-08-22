@@ -9,7 +9,7 @@ import type {
 import { uid } from '@/state/store'
 import { Compositor } from '@/gl/compositor'
 import {
-  MediaPool, drawFrame, videoLayersAt, clipSourceTime, overlapFades,
+  MediaPool, drawFrame, frameSignature, videoLayersAt, clipSourceTime, overlapFades,
   type BlendFrame
 } from './player'
 import { Mp4FrameSource } from './demux'
@@ -171,6 +171,8 @@ export function startExport(
     // fast path: sequential WebCodecs decode per clip; null = element seeks
     const sources = new Map<string, Mp4FrameSource | null>()
     const frames = new Map<string, VideoFrame>()
+    // clips whose decoded frames carry colour over an alpha matte (2× tall)
+    const packedClips = new Set<string>()
     const blends = opts?.frameBlending === false ? undefined : new Map<string, BlendFrame>()
 
     // default: stream raw frames to ffmpeg/libx264 in main — Chromium's
@@ -272,6 +274,15 @@ export function startExport(
               dx: Math.floor((width - dw) / 2), dy: Math.floor((height - dh) / 2), dw, dh }
     }
 
+    // stage timing accumulators — one summary line at export end shows where
+    // the milliseconds go (decode / draw / readback / encode backpressure)
+    const stat = { prepare: 0, draw: 0, read: 0, encode: 0, gc: 0 }
+    let mark = 0
+    const lap = (key: keyof typeof stat) => {
+      const now = performance.now()
+      stat[key] += now - mark
+      mark = now
+    }
     try {
       const totalFrames = Math.max(1, Math.round(duration * fps))
       for (let k = 0; k < totalFrames; k++) {
@@ -279,26 +290,67 @@ export function startExport(
         if (encodeError) throw encodeError
         // sample mid-frame to avoid cut-boundary ambiguity
         const t = span.start + (k + 0.5) / fps
-        await prepareFrame(project, t, pool, fps, sources, frames, blends)
+        mark = performance.now()
+        await prepareFrame(project, t, pool, fps, sources, frames, blends, packedClips)
+        lap('prepare')
         if (blurSamples > 1) {
+          const sub = (s: number) => t + ((s + 0.5) / blurSamples - 0.5) * (0.5 / fps)
+          // A 180° shutter only shows up when something MOVES within it. If
+          // the composition is identical at every sub-sample time (no
+          // keyframes, fades, transitions or glow clocks running — most of a
+          // finished edit), the 8 sub-composites are pixel-identical and
+          // their mean is the single composite: draw it once. Exact, not an
+          // approximation — and the accumulator path is kept so the result
+          // goes through the very same blit as before.
+          const noCollapse = (globalThis as { KADR_FORCE_FULL_SHUTTER?: boolean }).KADR_FORCE_FULL_SHUTTER
+          let same = noCollapse ? null : frameSignature(project, t, pool, frames, blends, packedClips)
+          for (let s = 0; s < blurSamples && same !== null; s++) {
+            if (frameSignature(project, sub(s), pool, frames, blends, packedClips) !== same) same = null
+          }
           comp.setRenderTarget(true)
-          for (let s = 0; s < blurSamples; s++) {
-            // transforms/masks/track motion move between sub-samples;
-            // the decoded video frames stay those of the frame center
-            const ts = t + ((s + 0.5) / blurSamples - 0.5) * (0.5 / fps)
-            drawFrame(comp, project, ts, pool, frames, blends)
-            comp.accumBlit(1 / (s + 1))
+          if (same !== null) {
+            drawFrame(comp, project, t, pool, frames, blends, packedClips)
+            comp.accumBlit(1)
+          } else {
+            comp.holdSources(true) // the decoded frames don't change per sub-sample
+            for (let s = 0; s < blurSamples; s++) {
+              // transforms/masks/track motion move between sub-samples;
+              // the decoded video frames stay those of the frame center
+              drawFrame(comp, project, sub(s), pool, frames, blends, packedClips)
+              comp.accumBlit(1 / (s + 1))
+            }
+            comp.holdSources(false)
           }
           comp.setRenderTarget(false)
         } else {
-          drawFrame(comp, project, t, pool, frames, blends)
+          drawFrame(comp, project, t, pool, frames, blends, packedClips)
         }
+        lap('draw')
         if (useRaw) {
           if (rawDirect) {
-            const s = k & 1
-            if (slotPending[s]) await slotPending[s] // ffmpeg still owns this one
-            comp.readPixels(slots[s])
-            slotPending[s] = window.kadr.rawEncodeFrame(slots[s])
+            // pipelined readback: queue frame k into its PBO (no GPU sync),
+            // then retrieve frame k−1 — the GPU had a whole frame to finish
+            // it, so getBufferSubData barely blocks. Frames still reach
+            // ffmpeg strictly in order, one frame later.
+            comp.startRead(k & 1)
+            if (k > 0) {
+              const s = (k - 1) & 1
+              if (slotPending[s]) await slotPending[s] // ffmpeg still owns this one
+              lap('encode')
+              comp.finishRead(s, slots[s])
+              // Debug hook: `globalThis.KADR_FRAME_HASH = []` before an
+              // export collects a hash per rendered frame, so a change can be
+              // proven to leave the picture bit-identical (see e2e32).
+              const hashes = (globalThis as { KADR_FRAME_HASH?: number[] }).KADR_FRAME_HASH
+              if (hashes) {
+                const b = slots[s]
+                let h = 2166136261
+                for (let i = 0; i < b.length; i += 997) h = Math.imul(h ^ b[i], 16777619)
+                hashes.push(h >>> 0)
+              }
+              lap('read')
+              slotPending[s] = window.kadr.rawEncodeFrame(slots[s])
+            }
           } else if (rawWs) {
             comp.readPixels(rawBuf!)
             rawWs.send(rawBuf!) // copies synchronously — the buffer is reusable
@@ -326,6 +378,7 @@ export function startExport(
         if (k % 5 === 0 || k === totalFrames - 1) {
           onProgress({ phase: 'video', progress: (k + 1) / totalFrames })
         }
+        mark = performance.now()
         if (k % 30 === 29) {
           // release decoders and media elements of clips the export has fully
           // passed: every source held its decoded frames until the very end,
@@ -340,6 +393,7 @@ export function startExport(
             if (end !== undefined && end < horizon) {
               src?.close()
               sources.delete(clipId)
+              packedClips.delete(clipId) // a re-open decides its own layout
               released = true
             }
           }
@@ -351,10 +405,19 @@ export function startExport(
             pool.prune(keep)
           }
           comp.collect() // drop GPU textures idle for 300+ frames
+          lap('gc')
         }
       }
+      console.info('[kadr] export stage ms/frame:', JSON.stringify(Object.fromEntries(
+        Object.entries(stat).map(([k2, v]) => [k2, Math.round((v / totalFrames) * 100) / 100])
+      )))
       if (useRaw) {
         if (rawDirect) {
+          // flush the last frame still sitting in its PBO
+          const s = (totalFrames - 1) & 1
+          if (slotPending[s]) await slotPending[s]
+          comp.finishRead(s, slots[s])
+          slotPending[s] = window.kadr.rawEncodeFrame(slots[s])
           for (const p of slotPending) if (p) await p
           await window.kadr.rawEncodeEnd()
           await window.kadr.exportUseVideo(rawDirect)
@@ -404,7 +467,8 @@ export function startExport(
     fps: number,
     sources: Map<string, Mp4FrameSource | null>,
     frames: Map<string, VideoFrame>,
-    blends?: Map<string, BlendFrame>
+    blends?: Map<string, BlendFrame>,
+    packed?: Set<string>
   ): Promise<void> {
     frames.clear()
     blends?.clear()
@@ -431,23 +495,50 @@ export function startExport(
       if (src === undefined) {
         const fastOff = (globalThis as { KADR_DISABLE_FAST_DECODE?: boolean }).KADR_DISABLE_FAST_DECODE
         src = fastOff ? null : await Mp4FrameSource.open(asset)
+        const noPack = (globalThis as { KADR_DISABLE_ALPHA_PACK?: boolean }).KADR_DISABLE_ALPHA_PACK
+        if (!src && !fastOff && !noPack && asset.hasAlpha) {
+          // Alpha video (VP9-alpha WebM — every transparent Remotion
+          // fragment — ProRes 4444, HEVC-alpha) has no WebCodecs decode
+          // path: the element fallback seeks per frame at ~0.2 s each, so
+          // exports crawled at ~4 fps. A cached lossless H.264 mp4 holding
+          // the colour over its alpha matte decodes at full speed and the
+          // shader splits it back apart, pixel for pixel.
+          const alt = await alphaPackedFallback(asset)
+          if (alt) {
+            src = await Mp4FrameSource.open(alt, { alphaPacked: true })
+            if (src) packed?.add(clip.id)
+          }
+        }
         if (!src && !fastOff) {
           // Chromium can't decode some codecs at all (HEVC without VAAPI,
-          // mpeg4, …): WebCodecs rejects them and a <video> element renders
-          // 0×0 — the element path would export black. Re-encode once to a
-          // cached full-res H.264 intermediate and fast-decode that instead.
+          // ProRes, mpeg4, …): WebCodecs rejects them and a <video> element
+          // renders 0×0 — the element path would export black. Re-encode
+          // once to a cached full-res intermediate (H.264, or VP9+alpha
+          // WebM for alpha sources) and decode that instead: mp4 through
+          // the fast path, webm through the element via a pool override.
           const alt = await undecodableFallback(asset)
-          if (alt) src = await Mp4FrameSource.open(alt)
+          if (alt) {
+            src = await Mp4FrameSource.open(alt)
+            if (!src) pool.setSourceOverride(clip.id, alt.path)
+          }
         }
         sources.set(clip.id, src)
-        console.info(`[kadr] export decode for ${asset.name}: ${src ? 'webcodecs' : 'element'}`)
+        console.info(`[kadr] export decode for ${asset.name}: ` +
+          `${src ? (packed?.has(clip.id) ? 'webcodecs (packed alpha)' : 'webcodecs') : 'element'}`)
       }
       if (src) {
         const s = src
         // blend only when the source can't fill every project frame (25 fps
         // footage in a 60 fps project, slow motion); matched or faster
         // sources stay untouched — no blanket softening
-        const srcRate = ((clip.speed || 1) * (asset.fps || fps)) / fps
+        // Frame blending composites the successor frame OVER the main one,
+        // which only reproduces lerp(A, B, w) while the layer is opaque: with
+        // per-pixel alpha the two passes stack (0.5 → 0.56 effective alpha,
+        // measured), so alpha sources stay unblended — exactly as they were
+        // before they had a fast decode path at all.
+        const srcRate = asset.hasAlpha
+          ? 1
+          : ((clip.speed || 1) * (asset.fps || fps)) / fps
         waits.push(
           s.frameAt(srcT).then(
             (f) => {
@@ -469,6 +560,7 @@ export function startExport(
               // only ever be slower, not frozen
               console.warn(`[kadr] fast decode yielded no frame for ${asset.name} — falling back`)
               sources.set(clip.id, null)
+              packed?.delete(clip.id) // element frames are plain RGBA
               s.close()
               return seekElement(clip.id, asset, srcT)
             },
@@ -476,6 +568,7 @@ export function startExport(
               // fast path died (codec quirk?) — element seeks from here on
               console.warn(`[kadr] fast decode failed for ${asset.name} — falling back`)
               sources.set(clip.id, null)
+              packed?.delete(clip.id) // element frames are plain RGBA
               s.close()
               return seekElement(clip.id, asset, srcT)
             }
@@ -495,17 +588,50 @@ export function startExport(
  * (the regular element fallback stays in charge) or the transcode failed.
  * Old projects saved before the codec field existed are re-probed once.
  */
+/**
+ * Alpha sources decode through a cached, LOSSLESS H.264 mp4 that stacks the
+ * colour frame over its alpha matte (2× height, matte carried as luma in
+ * limited range so the decoder restores it bit-exactly). WebCodecs cannot
+ * decode an alpha channel in any container, and the element-seek fallback
+ * costs ~0.2 s per frame; this keeps the fast path AND the exact pixels.
+ * null = packing failed (no ffmpeg, no disk space) — the caller then keeps
+ * the slow element path, which is correct, just slow.
+ */
+const alphaPacks = new Map<string, Promise<MediaAsset | null>>()
+
+function alphaPackedFallback(asset: MediaAsset): Promise<MediaAsset | null> {
+  let p = alphaPacks.get(asset.path)
+  if (!p) {
+    p = (async () => {
+      console.info(`[kadr] ${asset.name}: alpha source — building a packed (colour+matte) intermediate for fast decode`)
+      const path = await window.kadr.requestDecoded(asset.path, asset.duration,
+        { packed: true, alpha: true, codec: asset.codec })
+      return { ...asset, path }
+    })().catch((err) => {
+      console.warn(`[kadr] alpha packing failed for ${asset.name} — keeping element seeks`, err)
+      return null
+    })
+    alphaPacks.set(asset.path, p)
+  }
+  return p.then((alt) => (alt ? { ...asset, path: alt.path } : null))
+}
+
 const undecodable = new Map<string, Promise<MediaAsset | null>>()
 
 function undecodableFallback(asset: MediaAsset): Promise<MediaAsset | null> {
   let p = undecodable.get(asset.path)
   if (!p) {
     p = (async () => {
-      let codec = asset.codec
-      if (!codec) codec = (await window.kadr.probeMedia(asset.path)).asset.codec
+      let { codec, hasAlpha } = asset
+      if (!codec) {
+        const fresh = (await window.kadr.probeMedia(asset.path)).asset
+        codec = fresh.codec
+        hasAlpha = fresh.hasAlpha
+      }
       if (chromiumCanDecode(codec)) return null
-      console.info(`[kadr] ${asset.name}: '${codec}' is not decodable by Chromium — building an H.264 intermediate`)
-      const path = await window.kadr.requestDecoded(asset.path, asset.duration)
+      console.info(`[kadr] ${asset.name}: '${codec}' is not decodable by Chromium — building a ${hasAlpha ? 'VP9+alpha' : 'H.264'} intermediate`)
+      const path = await window.kadr.requestDecoded(asset.path, asset.duration,
+        { alpha: !!hasAlpha, codec })
       return { ...asset, path }
     })().catch((err) => {
       console.warn(`[kadr] decode fallback failed for ${asset.name}`, err)
@@ -554,6 +680,26 @@ export async function materializeFragments(
     }
   } finally {
     off()
+  }
+  // Transparent fragments render to VP9+alpha WebM, which only the slow
+  // element path can decode — build their packed intermediates here so the
+  // cost shows up in the fragments phase instead of stalling the frame loop.
+  const alphaAssets = [...new Set(rendered.values())]
+    .map((id) => p.assets.find((a) => a.id === id))
+    .filter((a): a is MediaAsset => !!a?.hasAlpha)
+  if (alphaAssets.length) {
+    let n = 0
+    const offP = window.kadr.onProxyProgress(({ progress }) => {
+      onProgress({ phase: 'fragments', progress: (n + progress) / alphaAssets.length })
+    })
+    try {
+      for (const a of alphaAssets) {
+        await alphaPackedFallback(a)
+        n++
+      }
+    } finally {
+      offP()
+    }
   }
   return p
 }

@@ -18,6 +18,12 @@ export interface CaptureFrame {
 
 const frames = new Map<string, CaptureFrame>()
 const active = new Map<string, { clipId: string }>()
+// GLOBALLY monotonic paint counter. A per-fragment counter reset on every
+// capture restart: a restarted capture's first frame carried version 1 —
+// the SAME number the GL texture cache remembered from the previous session
+// for that clip — so the compositor skipped the upload and kept compositing
+// the stale texture (the reported «snapshot shows the previous frame» bug).
+let paintSeq = 0
 
 export function getCaptureFrame(fragmentId: string): CaptureFrame | null {
   return frames.get(fragmentId) ?? null
@@ -41,6 +47,36 @@ export function captureReady(project: Project, t: number): boolean {
     if (!frames.has(id)) return false
   }
   return true
+}
+
+/** Fragments captured at t and the player frame each one must sit on
+    (same formula as syncOne) — snapshots verify against this. */
+export function captureTargets(
+  project: Project,
+  t: number
+): { fragmentId: string; expectedFrame: number }[] {
+  const out: { fragmentId: string; expectedFrame: number }[] = []
+  for (const [id, { clip }] of wanted(project, t)) {
+    const rel = t - clip.start
+    const fps = clip.fragmentMeta?.fps ?? 60
+    out.push({
+      fragmentId: id,
+      expectedFrame: Math.max(0, Math.round(
+        (Math.max(0, Math.min(clip.duration, rel)) * (clip.speed || 1) + clip.inPoint) * fps
+      ))
+    })
+  }
+  return out
+}
+
+/** Monotonic paint counter of a captured fragment (0 = nothing yet). */
+export function captureVersion(fragmentId: string): number {
+  return frames.get(fragmentId)?.version ?? 0
+}
+
+/** Push a sync to every capture right now (skips the 120 ms debounce). */
+export function pokeCaptureSync() {
+  reconcileNow?.()
 }
 
 const animActive = (a?: Anim) =>
@@ -98,7 +134,7 @@ export function wireFragmentCapture() {
       data: data instanceof Uint8Array ? data : new Uint8Array(data),
       w,
       h,
-      version: (frames.get(id)?.version ?? 0) + 1
+      version: ++paintSeq
     })
   })
 

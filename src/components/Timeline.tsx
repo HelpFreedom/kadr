@@ -396,6 +396,7 @@ export function Timeline({ height }: { height: number }) {
             ))}
             <RangeOverlay headerW={headerW} />
             <KfMarker headerW={headerW} trackAreaH={trackAreaH} />
+            <Markers headerW={headerW} />
             <Playhead headerW={headerW} trackAreaH={trackAreaH} />
           </div>
         </div>
@@ -823,7 +824,6 @@ function ChapterBand() {
     s.pushHistory('hChapter')
     s.updateChapter(chapter.id, { title })
   }
-
   return (
     <div className="chapter-band" title={t('chapterBandHint')} onPointerDown={startCreate}>
       {chapters.map((chapter) => (
@@ -851,6 +851,49 @@ function ChapterBand() {
         </div>
       ))}
     </div>
+  )
+}
+
+/** Track-independent user markers: M adds one at the playhead, the flag
+    drags along the timeline (snapping), right-click removes. */
+function Markers({ headerW }: { headerW: number }) {
+  const markers = useEditor((s) => s.project.markers)
+  const zoom = useEditor((s) => s.zoom)
+  const t = useT()
+  if (!markers?.length) return null
+  return (
+    <>
+      {markers.map((marker) => (
+        <div
+          key={marker.id}
+          className="tl-marker"
+          style={{ left: headerW + marker.time * zoom }}
+          onPointerDown={(e) => {
+            if (e.button !== 0) return
+            e.stopPropagation()
+            const st = useEditor.getState()
+            st.pushHistory('hMarkerMove')
+            const points = snapPoints(st.project, '', st.playhead)
+            const startX = e.clientX
+            const initialTime = marker.time
+            windowDrag(e, (_dx, ev) => {
+              const s = useEditor.getState()
+              s.moveMarker(
+                marker.id,
+                snapTime(initialTime + (ev.clientX - startX) / s.zoom, points, s.zoom)
+              )
+            })
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            useEditor.getState().removeMarker(marker.id)
+          }}
+        >
+          <span className="tl-marker-flag" title={t('markerTip')}>{marker.label}</span>
+        </div>
+      ))}
+    </>
   )
 }
 

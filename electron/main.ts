@@ -9,7 +9,8 @@ import { execFile, execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import {
   probeMedia, makeProxy, validateProxy, makeDecoded, makeReversed,
-  measureLoudness, ExportMuxer, RawVideoEncoder
+  measureLoudness, canPackAlpha, sourceMatrix,
+  ExportMuxer, RawVideoEncoder
 } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
@@ -368,6 +369,7 @@ app.whenReady().then(() => {
   registerFragmentIpc()
   registerThumbnailIpc()
   registerVoiceoverIpc()
+  void pruneDecodedCache()
   if (pendingProjectPaths.length) {
     for (const path of [...new Set(pendingProjectPaths)]) openProjectWindow(path)
     pendingProjectPaths.length = 0
@@ -522,14 +524,18 @@ async function requestProxy(
   sender: WebContents,
   srcPath: string,
   duration: number,
+  opts?: { alpha?: boolean; codec?: string },
   force = false
 ): Promise<string> {
   const stat = statSync(srcPath)
+  // alpha proxies are a different artifact (webm) — separate cache identity
   const key = createHash('sha1')
-    .update(`${PROXY_PROFILE_VERSION}:${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
+    .update(`${PROXY_PROFILE_VERSION}:${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}` +
+      `${opts?.alpha ? ':a' : ''}`)
     .digest('hex')
     .slice(0, 20)
-  const out = join(proxyDir(), `${key}.mp4`)
+  const ext = opts?.alpha ? 'webm' : 'mp4'
+  const out = join(proxyDir(), `${key}.${ext}`)
   await fs.mkdir(proxyDir(), { recursive: true })
   if (!force && await proxyIsValid(out, duration)) {
     proxyUpdate(sender, srcPath, { state: 'ready', progress: 1, cached: true })
@@ -545,12 +551,12 @@ async function requestProxy(
 
     let lastError: unknown = new Error('proxy generation did not start')
     for (let attempt = 1; attempt <= PROXY_MAX_ATTEMPTS; attempt++) {
-      const tmp = join(proxyDir(), `${key}.${process.pid}.${Date.now()}.${attempt}.part.mp4`)
+      const tmp = join(proxyDir(), `${key}.${process.pid}.${Date.now()}.${attempt}.part.${ext}`)
       try {
         proxyUpdate(sender, srcPath, { state: 'building', progress: 0, attempt })
         await makeProxy(srcPath, tmp, duration, (progress) => {
           proxyUpdate(sender, srcPath, { state: 'building', progress, attempt })
-        })
+        }, opts)
         proxyUpdate(sender, srcPath, { state: 'validating', progress: 1, attempt })
         await validateProxy(tmp, duration)
         await publishProxy(tmp, out)
@@ -586,28 +592,57 @@ async function requestProxy(
 const decodedDir = () => join(app.getPath('userData'), 'decoded')
 let decodedChain: Promise<unknown> = Promise.resolve()
 
-async function requestDecoded(sender: WebContents, srcPath: string, duration: number): Promise<string> {
+async function requestDecoded(
+  sender: WebContents,
+  srcPath: string,
+  duration: number,
+  opts?: { alpha?: boolean; codec?: string; packed?: boolean; matrix?: string }
+): Promise<string> {
   const stat = statSync(srcPath)
   const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
+    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}` +
+      `${opts?.packed ? ':p' : opts?.alpha ? ':a' : ''}`)
     .digest('hex')
     .slice(0, 20)
-  const out = join(decodedDir(), `${key}.mp4`)
+  // packed = colour over its alpha matte in one fast-decodable H.264 mp4
+  const ext = opts?.alpha && !opts?.packed ? 'webm' : 'mp4'
+  const out = join(decodedDir(), `${key}.${ext}`)
   try {
-    await fs.access(out)
-    return out
+    // a zero-byte file is the corpse of an interrupted build, not a cache hit
+    if ((await fs.stat(out)).size > 0) return out
+    await fs.unlink(out)
   } catch { /* not built yet */ }
   await fs.mkdir(decodedDir(), { recursive: true })
+  if (opts?.packed) {
+    if (!(await canPackAlpha(srcPath))) {
+      throw new Error('alpha packing skipped: full-range source')
+    }
+    opts = { ...opts, matrix: await sourceMatrix(srcPath) }
+    // lossless colour+matte intermediates are big (~400 MB per minute of
+    // 1080p60); refuse rather than fill the disk — the caller falls back to
+    // the slow element path, which is correct, just slow
+    const need = Math.max(2e9, duration * 9e6) + 3e9
+    try {
+      const st = await fs.statfs(decodedDir())
+      const free = st.bsize * st.bavail
+      if (free < need) {
+        throw new Error(`not enough free disk for a packed alpha intermediate: ` +
+          `${Math.round(free / 1e9)} GB free, ~${Math.round(need / 1e9)} GB needed`)
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('not enough')) throw err
+      // statfs unavailable — proceed, ffmpeg will fail loudly if it can't write
+    }
+  }
   const job = decodedChain.then(async () => {
     try {
-      await fs.access(out)
-      return // built while we waited in the queue
+      if ((await fs.stat(out)).size > 0) return // built while we waited in the queue
     } catch { /* still missing */ }
-    const tmp = join(decodedDir(), `${key}.part.mp4`)
+    const tmp = join(decodedDir(), `${key}.part.${ext}`)
     try {
       await makeDecoded(srcPath, tmp, duration, (p) => {
         sendTo(sender, 'proxy:progress', { path: srcPath, progress: p })
-      })
+      }, opts)
       await fs.rename(tmp, out)
     } catch (err) {
       fs.unlink(tmp).catch(() => { /* nothing to clean */ })
@@ -618,6 +653,37 @@ async function requestDecoded(sender: WebContents, srcPath: string, duration: nu
   await job
   sendTo(sender, 'proxy:progress', { path: srcPath, progress: 1 })
   return out
+}
+
+/**
+ * Keep the decode cache from eating the disk. A lossless colour+matte
+ * intermediate costs ~250 MB per minute of 1080p60 and every edit of a
+ * fragment makes a new one, so the folder would grow without bound. Runs at
+ * startup only — nothing can be reading these files yet — and drops the
+ * least recently touched entries until the folder is back under the cap.
+ */
+const DECODED_CACHE_CAP = 10e9
+
+async function pruneDecodedCache(): Promise<void> {
+  try {
+    const dir = decodedDir()
+    const names = await fs.readdir(dir)
+    const files = await Promise.all(names.map(async (name) => {
+      const p = join(dir, name)
+      const st = await fs.stat(p).catch(() => null)
+      return st?.isFile() ? { p, size: st.size, used: Math.max(st.mtimeMs, st.atimeMs) } : null
+    }))
+    const list = files.filter((f): f is { p: string; size: number; used: number } => !!f)
+    let total = list.reduce((n, f) => n + f.size, 0)
+    if (total <= DECODED_CACHE_CAP) return
+    list.sort((a, b) => a.used - b.used) // oldest first
+    for (const f of list) {
+      if (total <= DECODED_CACHE_CAP * 0.8) break
+      await fs.unlink(f.p).catch(() => { /* someone else won the race */ })
+      total -= f.size
+      console.log(`[kadr] decode cache: dropped ${f.p} (${Math.round(f.size / 1e6)} MB)`)
+    }
+  } catch { /* no cache dir yet */ }
 }
 
 // reversed renders: keyed by source identity + range, built one at a time
@@ -731,16 +797,19 @@ function registerIpc() {
     win.setTitle(`${name} — Kadr`)
   })
 
-  ipcMain.handle('proxy:request', (event, srcPath: string, duration: number) =>
-    requestProxy(event.sender, srcPath, duration)
+  ipcMain.handle('proxy:request', (event, srcPath: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string }) =>
+    requestProxy(event.sender, srcPath, duration, opts)
   )
 
-  ipcMain.handle('proxy:rebuild', (event, srcPath: string, duration: number) =>
-    requestProxy(event.sender, srcPath, duration, true)
+  ipcMain.handle('proxy:rebuild', (event, srcPath: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string }) =>
+    requestProxy(event.sender, srcPath, duration, opts, true)
   )
 
-  ipcMain.handle('media:decoded', (event, srcPath: string, duration: number) =>
-    requestDecoded(event.sender, srcPath, duration)
+  ipcMain.handle('media:decoded', (event, srcPath: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string; packed?: boolean }) =>
+    requestDecoded(event.sender, srcPath, duration, opts)
   )
 
   ipcMain.handle('media:loudness', (_e, srcPath: string, start: number, duration: number) =>

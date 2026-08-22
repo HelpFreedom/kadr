@@ -20,6 +20,8 @@ const int MAX_SHAPES = 8;
 in vec2 vUV;
 uniform sampler2D uTex;
 uniform int uRawBGRA;                  // 1 = premultiplied BGRA capture frame
+uniform int uAlphaPacked;              // 1 = colour over its alpha matte (2× tall)
+uniform float uPackHalfTexel;          // half texel of the packed texture (v units)
 uniform float uOpacity;
 uniform vec4 uCrop;                    // left, top, right, bottom cut fractions
 uniform int uShapeCount;
@@ -39,7 +41,18 @@ void main() {
     outColor = vec4(0.0);
     return;
   }
-  vec4 c = texture(uTex, vUV);
+  vec4 c;
+  if (uAlphaPacked == 1) {
+    // colour lives in the top half, the alpha matte (as luma) in the bottom
+    // one; clamp both to their half so LINEAR filtering can't bleed across
+    // the seam. Alpha sources are decoded this way because WebCodecs cannot
+    // carry an alpha channel — see makeDecoded's packed branch.
+    float vc = clamp(vUV.y * 0.5, uPackHalfTexel, 0.5 - uPackHalfTexel);
+    float va = clamp(vUV.y * 0.5 + 0.5, 0.5 + uPackHalfTexel, 1.0 - uPackHalfTexel);
+    c = vec4(texture(uTex, vec2(vUV.x, vc)).rgb, texture(uTex, vec2(vUV.x, va)).r);
+  } else {
+    c = texture(uTex, vUV);
+  }
   if (uRawBGRA == 1) {
     c = vec4(c.b, c.g, c.r, c.a);          // offscreen captures arrive BGRA…
     if (c.a > 0.0001) c.rgb /= c.a;        // …premultiplied; pipeline wants straight
@@ -179,6 +192,9 @@ export interface LayerDraw {
   source: TexImageSource | null
   /** raw BGRA premultiplied pixels (fragment capture) instead of `source` */
   raw?: { data: Uint8Array; w: number; h: number; version: number }
+  /** the texture is twice as tall as the layer: colour over its alpha matte
+      (how alpha video reaches the fast WebCodecs decode path) */
+  alphaPacked?: boolean
   /** id used to cache the GL texture between frames */
   cacheKey: string
   /** mark true when the source content changes every frame (video) */
@@ -227,6 +243,8 @@ interface TexEntry {
   lastUsed: number
   /** raw-frame version already uploaded (skip identical re-uploads) */
   rawVersion?: number
+  /** hold-epoch this dynamic source was last uploaded in */
+  srcEpoch?: number
 }
 
 interface TransProg {
@@ -255,6 +273,12 @@ export class Compositor {
       passes must restore this after detouring through their own FBOs */
   private curFbo: WebGLFramebuffer | null = null
   private blitProg: WebGLProgram | null = null
+  // motion-blur sub-samples redraw the SAME decoded frames with different
+  // transforms; while sources are held, each dynamic texture uploads once
+  // per output frame instead of once per sub-sample (a 1080p VideoFrame
+  // upload costs more than the draw itself on an iGPU).
+  private holdingSources = false
+  private srcEpoch = 0
   // outer-glow buffers: full-res layer + low-res blurred silhouette field
   private fx: { layer: Overlay; field: Overlay; blur: Overlay; fw: number; fh: number } | null = null
   private fxSize = 0
@@ -270,6 +294,8 @@ export class Compositor {
   } | null = null
   private uOpacity: WebGLUniformLocation
   private uRawBGRA: WebGLUniformLocation
+  private uAlphaPacked: WebGLUniformLocation
+  private uPackHalfTexel: WebGLUniformLocation
   private uCrop: WebGLUniformLocation
   private uShapeCount: WebGLUniformLocation
   private uShapeType: WebGLUniformLocation
@@ -296,6 +322,8 @@ export class Compositor {
     this.prog = prog
     this.uOpacity = gl.getUniformLocation(prog, 'uOpacity')!
     this.uRawBGRA = gl.getUniformLocation(prog, 'uRawBGRA')!
+    this.uAlphaPacked = gl.getUniformLocation(prog, 'uAlphaPacked')!
+    this.uPackHalfTexel = gl.getUniformLocation(prog, 'uPackHalfTexel')!
     this.uCrop = gl.getUniformLocation(prog, 'uCrop')!
     this.uShapeCount = gl.getUniformLocation(prog, 'uShapeCount')!
     this.uShapeType = gl.getUniformLocation(prog, 'uShapeType[0]')!
@@ -356,6 +384,41 @@ export class Compositor {
     gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, out)
   }
 
+  // Async readback: startRead() queues readPixels into a pixel-pack buffer
+  // and returns immediately (no GPU sync); finishRead() copies that PBO to
+  // the CPU one frame later, by which time the GPU has long finished — the
+  // export loop pipelines render(k) with retrieval of frame k−1. Bytes are
+  // identical to the synchronous readPixels (same RGBA/UNSIGNED_BYTE read),
+  // only the moment of transfer moves.
+  private pbos: (WebGLBuffer | null)[] = [null, null]
+  private pboBytes: number[] = [0, 0]
+
+  startRead(slot: number) {
+    const gl = this.gl
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    if (!this.pbos[slot]) this.pbos[slot] = gl.createBuffer()
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbos[slot])
+    const bytes = this.width * this.height * 4
+    if (this.pboBytes[slot] !== bytes) {
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ)
+      this.pboBytes[slot] = bytes
+    }
+    gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, 0)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
+    // Chromium queues GL in a command buffer and may not hand it to the GPU
+    // process until the next blocking call — which would serialize the whole
+    // pipeline again. flush() makes the GPU start on this frame NOW, so by
+    // the time finishRead() asks for it a frame later it's long done.
+    gl.flush()
+  }
+
+  finishRead(slot: number, out: Uint8Array) {
+    const gl = this.gl
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbos[slot])
+    gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, out)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
+  }
+
   begin(background: string) {
     const gl = this.gl
     this.frame++
@@ -378,12 +441,19 @@ export class Compositor {
           gl.RGBA, gl.UNSIGNED_BYTE, l.raw.data)
         entry.rawVersion = l.raw.version
       }
-    } else if (l.dynamic || entry.lastUsed === 0) {
+    } else if (
+      (l.dynamic && !(this.holdingSources && entry.srcEpoch === this.srcEpoch)) ||
+      entry.lastUsed === 0
+    ) {
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, l.source!)
       entry.rawVersion = undefined
+      entry.srcEpoch = this.srcEpoch
     }
     gl.uniform1i(this.uRawBGRA, l.raw ? 1 : 0)
+    gl.uniform1i(this.uAlphaPacked, l.alphaPacked ? 1 : 0)
+    // srcHeight is the LOGICAL height; the texture holds two stacked halves
+    gl.uniform1f(this.uPackHalfTexel, l.alphaPacked ? 0.25 / Math.max(1, l.srcHeight) : 0)
     entry.lastUsed = this.frame
 
     // fit the source into the project frame, then apply the clip scale
@@ -485,6 +555,12 @@ export class Compositor {
   // the canvas with 1/(n+1) weights (an exact mean in 8-bit).
 
   /** Route whole composites into the accumulator FBO (true) or canvas. */
+  /** Freeze dynamic source uploads for the duration of one output frame. */
+  holdSources(on: boolean) {
+    this.holdingSources = on
+    if (on) this.srcEpoch++
+  }
+
   setRenderTarget(accum: boolean) {
     if (accum) {
       this.ensureOverlays()

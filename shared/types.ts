@@ -29,6 +29,9 @@ export interface MediaAsset {
   /** ffprobe codec_name of the video stream (e.g. 'h264', 'hevc') — decides
       whether Chromium can decode the source or ffmpeg must step in */
   codec?: string
+  /** video carries an alpha channel (yuva pix_fmt or WebM alpha_mode tag) —
+      proxies/intermediates must preserve it (VP9+alpha WebM, not H.264) */
+  hasAlpha?: boolean
   /** light 540p copy used by the preview; export always reads `path` */
   proxyPath?: string
   /** this asset is a reversed render of a source range of another asset */
@@ -354,6 +357,14 @@ export interface Track {
   annotations?: AnnotationTask[]
 }
 
+export interface TimelineMarker {
+  id: string
+  /** project seconds; markers float above all tracks */
+  time: number
+  /** short label shown in the flag — auto-numbered 1, 2, 3… */
+  label: string
+}
+
 export interface Project {
   version: 1
   id: string
@@ -372,6 +383,8 @@ export interface Project {
   /** Custom F5-TTS references used by this project. Their paths are embedded
    * beside the .kadr file on save so the project remains portable. */
   voiceClones?: VoiceoverCustomVoice[]
+  /** free-floating timeline markers (M key / addMarker), track-independent */
+  markers?: TimelineMarker[]
 }
 
 // ---------------------------------------------------------------------------
@@ -665,18 +678,22 @@ export interface KadrApi {
     cb: (p: { path: string; start: number; duration: number; progress: number }) => void
   ): () => void
 
-  /** Build (or reuse) a preview proxy; resolves with the proxy file path. */
-  requestProxy(path: string, duration: number): Promise<string>
+  /** Build (or reuse) a preview proxy; alpha sources retain transparency. */
+  requestProxy(path: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string }): Promise<string>
   /** Build a fresh proxy even when a validated cache entry already exists. */
-  rebuildProxy(path: string, duration: number): Promise<string>
+  rebuildProxy(path: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string }): Promise<string>
   onProxyProgress(cb: (p: ProxyBuildUpdate) => void): () => void
   /** Small background frames used by the zoom-adaptive timeline filmstrip. */
   timelineThumbnails(request: TimelineThumbnailRequest): Promise<TimelineThumbnailFrame[]>
   /** External-media + Remotion content identity for stale-safe visual caches. */
   visualFingerprint(paths: string[], fragmentIds: string[]): Promise<string>
-  /** Full-resolution H.264 intermediate for sources Chromium cannot decode
-      (e.g. HEVC without VAAPI); cached like proxies, video-only. */
-  requestDecoded(path: string, duration: number): Promise<string>
+  /** Full-resolution intermediate for sources Chromium cannot decode
+      (e.g. HEVC without VAAPI, ProRes): H.264, or VP9+alpha WebM for alpha
+      sources; cached like proxies, video-only. */
+  requestDecoded(path: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string; packed?: boolean }): Promise<string>
   /** Native directory picker; null when the user cancels. */
   pickDirectory(title?: string): Promise<string | null>
   /** Write a frame snapshot PNG into dir (Downloads when null) under a
@@ -720,11 +737,18 @@ export interface KadrApi {
   /** Remotion fragments: shared workspace, dev server, create and render. */
   fragmentEnsure(): Promise<{ dir: string; installed: boolean }>
   fragmentServer(): Promise<{ url: string }>
-  fragmentCreate(spec: FragmentSpec): Promise<FragmentInfo>
+  /** projectDir set → the fragment folder is created there (kadr-fragments/)
+      and only a symlink lands in the workspace */
+  fragmentCreate(spec: FragmentSpec, projectDir?: string | null): Promise<FragmentInfo>
   fragmentDelete(id: string): Promise<void>
+  /** Move loose workspace fragments into the project folder / restore
+      missing workspace symlinks; returns ids that changed. */
+  fragmentRelocate(projectDir: string, ids: string[]): Promise<string[]>
   /** pixel capture for fragments that need GL features in the preview */
   fragmentCaptureStart(id: string, url: string, w: number, h: number, fps: number): Promise<void>
   fragmentCaptureStop(id: string): Promise<void>
+  /** Player page's current frame (−1 not ready, −2 no capture window). */
+  fragmentCaptureQuery(id: string): Promise<number>
   fragmentCaptureSync(id: string, msg: unknown): void
   onFragmentFrame(cb: (p: { id: string; w: number; h: number; data: Uint8Array }) => void): () => void
   fragmentRender(id: string, opts?: { transparent?: boolean }): Promise<{ path: string; cached: boolean }>

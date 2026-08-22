@@ -69,7 +69,8 @@ export function newProject(): Project {
       { id: uid(), kind: 'audio', name: 'A1', muted: false, locked: false, gain: 1, clips: [] }
     ],
     assets: [],
-    chapters: []
+    chapters: [],
+    markers: []
   }
 }
 
@@ -137,6 +138,13 @@ export function sanitizeProject(p: Project): Project {
       }
     })
     .sort((a, b) => a.start - b.start || a.end - b.end)
+  p.markers = (p.markers ?? []).filter(
+    (m) => m && typeof m.id === 'string' && Number.isFinite(m.time)
+  )
+  for (const m of p.markers) {
+    if (typeof m.label !== 'string' || !m.label) m.label = '•'
+    if (m.time < 0) m.time = 0
+  }
   for (const track of p.tracks) {
     if (!Number.isFinite(track.gain)) track.gain = 1
     track.clips ??= []
@@ -524,6 +532,10 @@ interface EditorState {
   /** Insert a generated SRT voiceover as one exact-timing audio track and one undo step. */
   insertTimedVoiceovers(items: TimedVoiceoverInsert[], trackName: string): string[]
   insertTextClip(at: number): void
+  /** Add a track-independent timeline marker (auto-numbered); returns id. */
+  addMarker(time: number): string
+  moveMarker(id: string, time: number): void
+  removeMarker(id: string): void
   updateClip(clipId: string, patch: Partial<Clip>): void
   /** Replace one clip with timeline-relative kept ranges, preserving gaps. */
   splitClipIntoRanges(clipId: string, ranges: { start: number; end: number }[]): string[]
@@ -726,6 +738,37 @@ export const useEditor = create<EditorState>((set, get) => ({
         project: p,
         activeAnnotationTrackId: kind === 'annotation' ? track.id : s.activeAnnotationTrackId
       }
+    })
+  },
+
+  addMarker: (time) => {
+    get().pushHistory('hMarker')
+    const id = uid()
+    set((s) => {
+      const p = clone(s.project)
+      p.markers ??= []
+      const n = p.markers.reduce((m, x) => Math.max(m, parseInt(x.label, 10) || 0), 0) + 1
+      p.markers.push({ id, time: Math.max(0, time), label: String(n) })
+      return { project: p }
+    })
+    return id
+  },
+
+  moveMarker: (id, time) =>
+    set((s) => {
+      const m0 = s.project.markers?.find((x) => x.id === id)
+      if (!m0) return {}
+      const p = clone(s.project)
+      p.markers!.find((x) => x.id === id)!.time = Math.max(0, time)
+      return { project: p }
+    }),
+
+  removeMarker: (id) => {
+    get().pushHistory('hMarkerDelete')
+    set((s) => {
+      const p = clone(s.project)
+      p.markers = (p.markers ?? []).filter((x) => x.id !== id)
+      return { project: p }
     })
   },
 

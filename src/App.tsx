@@ -14,6 +14,7 @@ import { SaveAsDialog, requestSaveAsOptions, setSaveAsBusy } from './components/
 import { AnnotationDialog } from './components/AnnotationDialog'
 import { useEditor, newProject } from './state/store'
 import { dropPayload, dropUsable, importDrop, importFiles } from './engine/mediaImport'
+import { syncProjectFragments } from './engine/fragments'
 import { useT, type TKey } from './i18n'
 import { create } from 'zustand'
 import { baseOf } from '@shared/paths'
@@ -46,6 +47,9 @@ async function writeAndConfirm(path: string) {
     s.setProjectPath(path)
     markProjectSaved(s.project)
     flashSave('saved', baseOf(path))
+    // fragments follow the project: loose workspace folders move next to
+    // the .kadr file (first save, save-as to a new place)
+    void syncProjectFragments(s.project, path)
   } catch (err) {
     flashSave('saveError', String(err), true)
   }
@@ -99,6 +103,8 @@ async function openProjectPath(path: string) {
     const p = await window.kadr.readProject(path)
     useEditor.getState().setProject(p, path)
     markProjectSaved(useEditor.getState().project)
+    // Restore workspace links for project-owned Remotion fragment sources.
+    void syncProjectFragments(useEditor.getState().project, path)
   } catch (err) {
     flashSave('openError', String(err), true)
   }
@@ -165,6 +171,8 @@ function handleEditorKey(e: KeyboardEvent) {
     else if (s.range) s.deleteRange()
   } else if (e.code === 'KeyU') {
     s.toggleLinkSelection()
+  } else if (e.code === 'KeyM') {
+    s.addMarker(s.playhead)
   } else if (e.code === 'ArrowLeft') {
     // Step the playhead by frames; preventDefault keeps the timeline from scrolling.
     e.preventDefault()

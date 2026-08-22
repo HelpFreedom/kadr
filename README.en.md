@@ -58,19 +58,29 @@ captions to this part», watch it happen live in the preview.
   timeline clips. Live preview with hot reload (no renders while
   iterating!), automatic pixel-capture mode when you put GL effects, 3D or
   transitions on a fragment, and exactly **one** real render at export
-  (content-hash cached).
+  (content-hash cached). Fragment sources live **in the project folder**,
+  so a project travels with its graphics.
+- 🪟 **Alpha video** — transparent WebM (VP8/VP9+alpha), MOV (ProRes 4444)
+  and HEVC with alpha keep their transparency in both preview and export:
+  lower tracks show through, masks and effects behave as usual.
 - 🤖 **Embedded Claude Code** — a real interactive Claude session in a
   terminal panel, wired to the live project over MCP: it reads the
   timeline, edits clips, transcribes, creates and iterates Remotion
   fragments while you watch the preview update. The panel is draggable,
   resizable and remembers its place across launches; pressing Claude again
   minimizes it without losing the session context.
+- 📍 **Timeline markers** — press **M** to drop a numbered marker at the
+  playhead: drag it, right-click to remove it, and use it from Claude too.
 - 📤 **Uncompromised export** — video is encoded by ffmpeg x264 at the
   preset's true bitrate (Chromium's built-in encoder ignored the bitrate
   and softened the picture — measured and replaced; frames reach ffmpeg
   with zero copies), mp4box-based fast decode (~8× over element seeks,
   with graceful fallback), 8-sample motion blur, automatic frame blending
-  for fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3.
+  for fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3, and a
+  short chime when the render is done.
+- 🚀 **Fast on every source** — alpha video is read through a **lossless**
+  colour-over-matte intermediate, MP4s with the index at the end are picked
+  up from their tail, and undecodable codecs use an H.264 intermediate.
 - 🛟 **Quality-of-life** — background adaptive 720p preview proxies with
   validation and automatic repair of corrupt caches, autosave every
   5 minutes (atomic, skipped during exports/AI sessions), an

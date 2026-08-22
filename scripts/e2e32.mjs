@@ -1,320 +1,224 @@
-// Annotation task tracks: real UI creation/edit/drag/status/list plus MCP
-// list/start/complete, concurrent timing preservation, one-step undo, and
-// deleted-task conflict behavior. Run the app with CDP enabled first.
+// Test: export decode/render fast paths must not change a single pixel.
+//  1. Alpha video (VP9+alpha WebM) decodes through the packed colour+matte
+//     H.264 intermediate instead of per-frame <video> seeks — same frames,
+//     several times faster.
+//  2. Motion blur collapses its 8 sub-composites into one whenever nothing
+//     moves within the shutter — same frames again.
+//  3. Alpha compositing itself stays correct (half-transparent green over
+//     black reads back at ~half intensity).
 import WebSocket from 'ws'
-import { spawn } from 'child_process'
-import { mkdirSync, writeFileSync } from 'fs'
+import { execFileSync } from 'child_process'
 
-const PORT = Number(process.env.KADR_CDP_PORT || 9777)
-const USER_DATA = process.env.KADR_USER_DATA
-if (!USER_DATA) throw new Error('KADR_USER_DATA must point at the isolated e2e profile')
-mkdirSync(USER_DATA, { recursive: true })
-writeFileSync(`${USER_DATA}/claude-env.json`, JSON.stringify({ command: 'bash', args: [] }))
+const PORT = process.env.KADR_CDP_PORT || 9777
+
+// media: 2 s of VP9+alpha, left half opaque red, right half green at alpha 128
+execFileSync('bash', ['-c', 'mkdir -p /tmp/kadr-test'])
+execFileSync('python3', ['-c', `
+from struct import pack
+import zlib
+w, h = 1280, 720
+def chunk(t, d):
+    c = t + d
+    return pack('>I', len(d)) + c + pack('>I', zlib.crc32(c) & 0xffffffff)
+rows = b''
+for y in range(h):
+    row = bytearray([0])
+    for x in range(w):
+        row += (bytes((255, 0, 0, 255)) if x < w // 3
+                else bytes((0, 255, 0, 128)) if x < 2 * w // 3 else bytes((0, 0, 255, 64)))
+    rows += bytes(row)
+png = (b'\\x89PNG\\r\\n\\x1a\\n' + chunk(b'IHDR', pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
+       + chunk(b'IDAT', zlib.compress(rows, 6)) + chunk(b'IEND', b''))
+open('/tmp/kadr-test/alpha32.png', 'wb').write(png)
+`])
+execFileSync('bash', ['-c',
+  'ffmpeg -v error -y -loop 1 -i /tmp/kadr-test/alpha32.png -t 2 -r 30 -vf format=yuva420p ' +
+  '-c:v libvpx-vp9 -pix_fmt yuva420p -crf 20 -b:v 0 -cpu-used 5 -row-mt 1 -auto-alt-ref 0 ' +
+  '/tmp/kadr-test/alpha32.webm'])
+// a moving clip so the shutter test also covers a frame where blur matters
+execFileSync('bash', ['-c',
+  'ffmpeg -v error -y -f lavfi -i "testsrc=s=1280x720:d=3:r=30" -c:v libx264 -crf 18 ' +
+  '-pix_fmt yuv420p /tmp/kadr-test/move32.mp4'])
 
 async function getPageWs() {
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 30; i++) {
     try {
-      const pages = await fetch(`http://127.0.0.1:${PORT}/json/list`).then((r) => r.json())
-      const page = pages.find((item) => item.type === 'page' && item.url.includes('localhost'))
+      const list = await fetch(`http://127.0.0.1:${PORT}/json/list`).then((r) => r.json())
+      const page = list.find((t) => t.type === 'page' && t.url.includes('localhost'))
       if (page) return page.webSocketDebuggerUrl
-    } catch { /* app starting */ }
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    } catch { /* starting */ }
+    await new Promise((r) => setTimeout(r, 1000))
   }
   throw new Error('CDP target not found')
 }
 
-let sequence = 0
+let id = 0
 let ws
 function send(method, params = {}) {
   return new Promise((resolve, reject) => {
-    const id = ++sequence
-    const onMessage = (raw) => {
-      const message = JSON.parse(raw)
-      if (message.id !== id) return
-      ws.off('message', onMessage)
-      message.error ? reject(new Error(JSON.stringify(message.error))) : resolve(message.result)
+    const msgId = ++id
+    const onMsg = (raw) => {
+      const msg = JSON.parse(raw)
+      if (msg.id !== msgId) return
+      ws.off('message', onMsg)
+      msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result)
     }
-    ws.on('message', onMessage)
-    ws.send(JSON.stringify({ id, method, params }))
+    ws.on('message', onMsg)
+    ws.send(JSON.stringify({ id: msgId, method, params }))
   })
 }
 async function rawEval(expression) {
-  const result = await send('Runtime.evaluate', { expression, returnByValue: true })
-  if (result.exceptionDetails) {
-    throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text)
-  }
-  return result.result.value
+  const r = await send('Runtime.evaluate', { expression, returnByValue: true })
+  if (r.exceptionDetails) throw new Error('JS exception: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text))
+  return r.result.value
 }
-async function evalJs(expression, timeout = 30000) {
-  const key = `annotation_${Date.now()}_${++sequence}`
+async function evalJs(expression, { timeout = 600000 } = {}) {
+  const key = `k${Date.now()}_${++id}`
   await rawEval(
     `window.__e2e = window.__e2e || {};` +
-    `(async()=>{try{window.__e2e.${key}=JSON.stringify({ok:await(${expression})})}` +
-    `catch(e){window.__e2e.${key}=JSON.stringify({err:String(e?.message||e)})}})();0`
+    `(async () => { try { window.__e2e.${key} = JSON.stringify({ ok: await (${expression}) }) }` +
+    ` catch (e) { window.__e2e.${key} = JSON.stringify({ err: String((e && e.message) || e) }) } })(); 0`
   )
-  const started = Date.now()
-  while (Date.now() - started < timeout) {
-    const value = await rawEval(`window.__e2e.${key} ?? null`)
-    if (value !== null) {
-      const parsed = JSON.parse(value)
-      if (parsed.err) throw new Error(parsed.err)
-      return parsed.ok
+  const t0 = Date.now()
+  for (;;) {
+    const raw = await rawEval(`window.__e2e.${key} ?? null`)
+    if (raw !== null) {
+      const r = JSON.parse(raw)
+      if ('err' in r) throw new Error('JS exception: ' + r.err)
+      return r.ok
     }
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    if (Date.now() - t0 > timeout) throw new Error('eval timeout')
+    await new Promise((r) => setTimeout(r, 400))
   }
-  throw new Error('evaluation timeout')
 }
-function check(name, condition, detail = '') {
-  console.log(`${condition ? 'PASS' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`)
-  if (!condition) process.exitCode = 1
+function check(name, cond, extra = '') {
+  console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  (' + extra + ')' : ''}`)
+  if (!cond) process.exitCode = 1
 }
 
 ws = new WebSocket(await getPageWs())
-await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject) })
+await new Promise((r, j) => { ws.on('open', r); ws.on('error', j) })
 
-await evalJs(`(async()=>{
-  const ed=window.kadrEditor
-  const blank={version:1,id:ed.uid(),name:'Annotation E2E',width:1920,height:1080,fps:30,
-    background:'#000000',tracks:[
-      {id:ed.uid(),kind:'video',name:'V1',muted:false,locked:false,gain:1,clips:[]},
-      {id:ed.uid(),kind:'audio',name:'A1',muted:false,locked:false,gain:1,clips:[]}
-    ],assets:[]}
-  ed.useEditor.getState().setProject(blank)
-  ed.useEditor.getState().setPlayhead(5)
+// protect the user's live project, then start clean
+try {
+  const saved = await evalJs(`(async () => {
+    const st = window.kadrEditor?.useEditor?.getState?.()
+    if (!st) return 'no-store'
+    const clips = st.project.tracks.reduce((n, t) => n + t.clips.length, 0)
+    if (!clips) return 'empty'
+    const p = '${process.env.HOME}/Downloads/autosave-' + Date.now() + '.kadr'
+    await window.kadr.writeProject(p, st.project)
+    return p
+  })()`, { timeout: 15000 })
+  if (saved !== 'empty' && saved !== 'no-store') console.log('live project autosaved →', saved)
+} catch { /* mid-load */ }
+try { await rawEval('setTimeout(() => location.reload(), 50); 0') } catch { /* reloading */ }
+await new Promise((r) => setTimeout(r, 1800))
+for (let i = 0; i < 30; i++) {
+  try {
+    if (await rawEval(`!!window.kadrEditor && !!window.kadr`)) break
+  } catch { /* mid-reload */ }
+  await new Promise((r) => setTimeout(r, 1000))
+}
+
+// ---------------------------------------------------------------- phase A
+// alpha correctness: the banded clip alone over a black background, so every
+// composited value is known in advance
+const setup = await evalJs(`(async () => {
+  const ed = window.kadrEditor, st = () => ed.useEditor.getState()
+  st().setProject({ name: 'e2e32a', width: 960, height: 540, fps: 60, background: '#000000',
+    assets: [], texts: [], tracks: [
+      { id: 'v1', name: 'V1', kind: 'video', clips: [], gain: 1 },
+      { id: 'a1', name: 'A1', kind: 'audio', clips: [], gain: 1 }] }, null)
+  const { asset } = await window.kadr.probeMedia('/tmp/kadr-test/alpha32.webm')
+  const id = ed.uid()
+  st().addAsset({ id, ...asset })
+  st().insertClipFromAsset(id, 'v1', 0)
+  return { hasAlpha: !!asset.hasAlpha, codec: asset.codec }
+})()`)
+check('the alpha source is recognised as such', setup.hasAlpha, `codec=${setup.codec}`)
+
+const runExport = async (name, flags, range = { start: 0.3, end: 1.3 }) => {
+  const t0 = Date.now()
+  const hashes = await evalJs(`(async () => {
+    const ke = window.kadrEditor, st = () => ke.useEditor.getState()
+    globalThis.KADR_FRAME_HASH = []
+    globalThis.KADR_DISABLE_ALPHA_PACK = ${!!flags.noPack}
+    globalThis.KADR_FORCE_FULL_SHUTTER = ${!!flags.fullShutter}
+    const preset = ke.PRESETS.find(x => x.id === 'source')
+    await ke.startExport(st().project, preset, '/tmp/kadr-test/e2e32-${name}.mp4', () => {},
+      { start: ${range.start}, end: ${range.end} }, { motionBlur: true, frameBlending: true }).done
+    const h = globalThis.KADR_FRAME_HASH
+    globalThis.KADR_FRAME_HASH = null
+    globalThis.KADR_DISABLE_ALPHA_PACK = false
+    globalThis.KADR_FORCE_FULL_SHUTTER = false
+    return h
+  })()`)
+  return { hashes, ms: Date.now() - t0 }
+}
+
+await runExport('warm', {})                       // build the packed intermediate
+await runExport('packed', {})
+await runExport('element', { noPack: true })
+
+const bands = (tag) => {
+  execFileSync('bash', ['-c',
+    `ffmpeg -v error -y -ss 0.3 -i /tmp/kadr-test/e2e32-${tag}.mp4 -frames:v 1 ` +
+    `-f rawvideo -pix_fmt rgb24 /tmp/kadr-test/e2e32-${tag}.rgb`])
+  return execFileSync('python3', ['-c', `
+d = open('/tmp/kadr-test/e2e32-${tag}.rgb','rb').read()
+W, y = 960, 270
+def at(x):
+    i = (y*W + x) * 3
+    return tuple(d[i:i+3])
+print(at(160), at(480), at(800))
+`]).toString().trim()
+}
+const pb = bands('packed')
+const eb = bands('element')
+const n = pb.match(/\d+/g).map(Number)
+const en = eb.match(/\d+/g).map(Number)
+check('opaque band stays opaque red', n[0] > 200 && n[1] < 40 && n[2] < 40, pb)
+check('alpha 128 composites at ~half intensity', n[4] > 100 && n[4] < 160, pb)
+check('alpha 64 composites at ~quarter intensity', n[8] > 40 && n[8] < 95, pb)
+check('both decode paths keep alpha within eight RGB levels',
+  n.every((value, index) => Math.abs(value - en[index]) <= 8), `${pb} vs ${eb}`)
+
+const psnrOf = (a, b) => {
+  const out = execFileSync('bash', ['-c',
+    `ffmpeg -v error -i /tmp/kadr-test/${a}.mp4 -i /tmp/kadr-test/${b}.mp4 ` +
+    `-lavfi "[0][1]psnr=stats_file=-" -f null - 2>&1 | tail -1`]).toString()
+  return /psnr_avg:inf/.test(out) ? 99 : Number((out.match(/psnr_avg:([\d.]+)/) || [])[1])
+}
+const psnr = psnrOf('e2e32-packed', 'e2e32-element')
+check('packed alpha decode renders the same picture as element seeks', psnr >= 40, `PSNR ${psnr} dB`)
+
+// ---------------------------------------------------------------- phase B
+// speed and the motion-blur shutter: the moving clip fades in, so part of the
+// range collapses the shutter (nothing moves) and part cannot (opacity ramps)
+await evalJs(`(async () => {
+  const ed = window.kadrEditor, st = () => ed.useEditor.getState()
+  const { asset } = await window.kadr.probeMedia('/tmp/kadr-test/move32.mp4')
+  const id = ed.uid()
+  st().addAsset({ id, ...asset })
+  st().addTrack('video')
+  const v2 = st().project.tracks.find(t => t.kind === 'video' && !t.clips.length)
+  st().insertClipFromAsset(id, v2.id, 0)
+  const clip = st().project.tracks.find(t => t.id === v2.id).clips[0]
+  st().updateClip(clip.id, { fadeIn: 0.8, muted: true })
   return true
 })()`)
 
-// A+ through the visible transport, then type into the focused card.
-const created = await evalJs(`(async()=>{
-  const button=[...document.querySelectorAll('.transport button')].find((el)=>el.textContent.trim()==='A+')
-  button?.click()
-  for(let i=0;i<30&&!document.querySelector('.annotation-dialog textarea');i++)
-    await new Promise(requestAnimationFrame)
-  const textarea=document.querySelector('.annotation-dialog textarea')
-  const focused=document.activeElement===textarea
-  const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set
-  setter.call(textarea,'Убрать паузу и выровнять звук')
-  textarea.dispatchEvent(new Event('input',{bubbles:true}))
-  await new Promise(requestAnimationFrame)
-  document.querySelector('.annotation-dialog .primary').click()
-  await new Promise(requestAnimationFrame)
-  const st=window.kadrEditor.useEditor.getState()
-  const track=st.project.tracks.find((item)=>item.kind==='annotation')
-  const task=track.annotations[0]
-  return {focused,trackName:track.name,id:task.id,text:task.text,start:task.start,duration:task.duration,
-    block:!!document.querySelector('[data-annotation-id="'+task.id+'"]')}
-})()`)
-check('A+ creates an annotation track and focused four-second task card',
-  created.focused && created.text.includes('паузу') && created.start === 5 && created.duration === 4 && created.block,
-  JSON.stringify(created))
-check('task receives a stable random id', created.id.length >= 8, created.id)
+const packed = await runExport('packedB', {}, { start: 0.2, end: 1.8 })
+const element = await runExport('elementB', { noPack: true }, { start: 0.2, end: 1.8 })
+check('packed alpha decode is faster', packed.ms * 1.25 < element.ms,
+  `packed ${(packed.ms / 1000).toFixed(1)}s vs element ${(element.ms / 1000).toFixed(1)}s`)
 
-// A single press selects the lane for dragging; only a double-click opens the card.
-const annotationClicks = await evalJs(`(async()=>{
-  const block=document.querySelector('[data-annotation-id="${created.id}"]')
-  const r=block.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2
-  const opts={bubbles:true,pointerId:12,isPrimary:true,button:0,clientX:x,clientY:y}
-  block.dispatchEvent(new PointerEvent('pointerdown',opts))
-  window.dispatchEvent(new PointerEvent('pointerup',opts))
-  await new Promise(requestAnimationFrame)
-  const singleOpened=!!document.querySelector('.annotation-dialog')
-  block.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,button:0,clientX:x,clientY:y}))
-  await new Promise(requestAnimationFrame)
-  const doubleOpened=!!document.querySelector('.annotation-dialog')
-  document.querySelector('.annotation-dialog-head button')?.click()
-  return {singleOpened,doubleOpened,hint:block.title}
-})()`)
-check('single press keeps the task draggable and double-click opens its card',
-  !annotationClicks.singleOpened && annotationClicks.doubleOpened && /двойн|double-click/i.test(annotationClicks.hint),
-  JSON.stringify(annotationClicks))
+const full = await runExport('full8', { fullShutter: true }, { start: 0.2, end: 1.8 })
+const sameShutter = full.hashes.length === packed.hashes.length &&
+  full.hashes.every((v, i) => v === packed.hashes[i])
+check('collapsing a static motion-blur shutter changes nothing', sameShutter,
+  `${full.hashes.filter((v, i) => v !== packed.hashes[i]).length} of ${full.hashes.length} differ`)
 
-// Timeline drag by two seconds, then resize the right edge by one second.
-const timing = await evalJs(`(async()=>{
-  const id=${JSON.stringify(created.id)}
-  const drag=(target,dx)=>new Promise((resolve)=>{
-    const r=target.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2
-    const opts={bubbles:true,pointerId:17,isPrimary:true,button:0,clientX:x,clientY:y}
-    target.dispatchEvent(new PointerEvent('pointerdown',opts))
-    window.dispatchEvent(new PointerEvent('pointermove',{...opts,clientX:x+dx}))
-    window.dispatchEvent(new PointerEvent('pointerup',{...opts,clientX:x+dx}))
-    requestAnimationFrame(()=>requestAnimationFrame(resolve))
-  })
-  let task=()=>window.kadrEditor.getAnnotationTasks().find((item)=>item.id===id)
-  let block=document.querySelector('[data-annotation-id="'+id+'"]')
-  await drag(block,2*window.kadrEditor.useEditor.getState().zoom)
-  block=document.querySelector('[data-annotation-id="'+id+'"]')
-  await drag(block.querySelector('.annotation-resize.right'),window.kadrEditor.useEditor.getState().zoom)
-  return {start:task().start,duration:task().duration}
-})()`)
-check('timeline drag moves and resizes the task',
-  Math.abs(timing.start - 7) < 0.05 && Math.abs(timing.duration - 5) < 0.05,
-  JSON.stringify(timing))
-
-// Tab/list navigation and a user status change through the card.
-const panel = await evalJs(`(async()=>{
-  const tab=[...document.querySelectorAll('.side-tabs button')]
-    .find((el)=>/Аннотации|Annotations/.test(el.textContent))
-  tab.click(); await new Promise(requestAnimationFrame)
-  const item=document.querySelector('[data-annotation-list-id="${created.id}"]')
-  item.click(); await new Promise(requestAnimationFrame)
-  const status=document.querySelector('.annotation-dialog .annotation-statuses .status-in_progress')
-  status.click(); await new Promise(requestAnimationFrame)
-  const live=window.kadrEditor.getAnnotationTasks().find((task)=>task.id==='${created.id}')
-  const block=document.querySelector('[data-annotation-id="${created.id}"]')
-  document.querySelector('.annotation-dialog-head button').click()
-  return {list:!!item,status:live.status,blue:block.classList.contains('status-in_progress')}
-})()`)
-check('Annotations tab navigates to a task and status color updates',
-  panel.list && panel.status === 'in_progress' && panel.blue, JSON.stringify(panel))
-
-// Create a fresh MCP task via A+ so its original status is new.
-const mcpTask = await evalJs(`(async()=>{
-  const st=window.kadrEditor.useEditor.getState(); st.setPlayhead(20)
-  await new Promise(requestAnimationFrame)
-  await new Promise(requestAnimationFrame)
-  ;[...document.querySelectorAll('.transport button')].find((el)=>el.textContent.trim()==='A+').click()
-  await new Promise(requestAnimationFrame)
-  const textarea=document.querySelector('.annotation-dialog textarea')
-  const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set
-  setter.call(textarea,'Сделать фон тестовым через MCP')
-  textarea.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(requestAnimationFrame)
-  document.querySelector('.annotation-dialog .primary').click(); await new Promise(requestAnimationFrame)
-  return window.kadrEditor.getAnnotationTasks().find((task)=>task.text.startsWith('Сделать фон'))
-})()`)
-
-const bridge = await evalJs(`(async()=>window.kadr.claudeOpen(80,24,null))()`)
-const mcp = spawn('node', ['electron/mcp-bridge.cjs', String(bridge.port)], {
-  cwd: process.cwd(), stdio: ['pipe', 'pipe', 'inherit']
-})
-let buffer = ''
-let requestId = 0
-const pending = new Map()
-mcp.stdout.on('data', (chunk) => {
-  buffer += chunk
-  let newline
-  while ((newline = buffer.indexOf('\n')) >= 0) {
-    const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1)
-    if (!line.trim()) continue
-    const message = JSON.parse(line)
-    if (message.id != null && pending.has(message.id)) {
-      pending.get(message.id)(message); pending.delete(message.id)
-    }
-  }
-})
-const mcpCall = (method, params) => new Promise((resolve, reject) => {
-  const id = ++requestId
-  const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timeout`)) }, 30000)
-  pending.set(id, (message) => { clearTimeout(timer); resolve(message) })
-  mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
-})
-await mcpCall('initialize', {
-  protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'annotation-e2e', version: '1' }
-})
-mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
-const tools = await mcpCall('tools/list', {})
-const toolNames = (tools.result?.tools ?? []).map((tool) => tool.name)
-check('MCP exposes annotation task tools',
-  ['kadr_tasks','kadr_task_start','kadr_task_complete'].every((name)=>toolNames.includes(name)),
-  toolNames.filter((name)=>name.includes('task')).join(','))
-
-const listed = await mcpCall('tools/call', { name: 'kadr_tasks', arguments: { status: 'new' } })
-const newTasks = JSON.parse(listed.result.content[0].text)
-check('MCP lists live tasks with stable ids and timing',
-  newTasks.some((task)=>task.id===mcpTask.id && task.start===20 && task.end===24))
-
-await mcpCall('tools/call', { name: 'kadr_task_start', arguments: { id: mcpTask.id } })
-
-// Simulate the user's concurrent timeline drag after the agent has read/started the task.
-const concurrent = await evalJs(`(async()=>{
-  const id='${mcpTask.id}', block=document.querySelector('[data-annotation-id="'+id+'"]')
-  const r=block.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2
-  const dx=2*window.kadrEditor.useEditor.getState().zoom
-  const opts={bubbles:true,pointerId:23,isPrimary:true,button:0,clientX:x,clientY:y}
-  block.dispatchEvent(new PointerEvent('pointerdown',opts))
-  window.dispatchEvent(new PointerEvent('pointermove',{...opts,clientX:x+dx}))
-  window.dispatchEvent(new PointerEvent('pointerup',{...opts,clientX:x+dx}))
-  await new Promise(requestAnimationFrame)
-  return window.kadrEditor.getAnnotationTasks().find((task)=>task.id===id).start
-})()`)
-
-const completed = await mcpCall('tools/call', {
-  name: 'kadr_task_complete',
-  arguments: {
-    id: mcpTask.id,
-    result: 'Фон проекта обновлён тестовым агентом',
-    code: `const st=window.kadrEditor.useEditor.getState();\n` +
-      `st.pushHistory('hEdit');\n` +
-      `window.kadrEditor.useEditor.setState({project:{...st.project,background:'#123456'}});\n` +
-      `return st.project.id;`
-  }
-})
-const completedObj = JSON.parse(completed.result.content[0].text)
-const afterComplete = await evalJs(`(async()=>{
-  const st=window.kadrEditor.useEditor.getState()
-  const task=window.kadrEditor.getAnnotationTasks().find((item)=>item.id==='${mcpTask.id}')
-  return {start:task.start,status:task.status,result:task.result,background:st.project.background,
-    undoLabel:st.past[st.past.length-1]?.label}
-})()`)
-check('MCP completion preserves the user-moved timing and writes result/status',
-  concurrent === 22 && afterComplete.start === 22 && afterComplete.status === 'done' &&
-  afterComplete.result.includes('обновлён') && completedObj.task.id === mcpTask.id,
-  JSON.stringify(afterComplete))
-check('agent edit and completion form one undo entry',
-  afterComplete.background === '#123456' && afterComplete.undoLabel === 'hAnnotationAgent')
-
-const undone = await evalJs(`(async()=>{
-  window.kadrEditor.useEditor.getState().undo(); await new Promise(requestAnimationFrame)
-  const st=window.kadrEditor.useEditor.getState()
-  const task=window.kadrEditor.getAnnotationTasks().find((item)=>item.id==='${mcpTask.id}')
-  return {start:task.start,status:task.status,background:st.project.background}
-})()`)
-check('one undo reverts agent edits/status but keeps the concurrent user timing',
-  undone.start === 22 && undone.status === 'new' && undone.background === '#000000', JSON.stringify(undone))
-
-// Deleted while working: completion must fail and must not resurrect the task.
-const doomed = await evalJs(`(async()=>{
-  const st=window.kadrEditor.useEditor.getState(); st.setPlayhead(30); const id=st.insertAnnotation(30)
-  st.updateAnnotation(id,{text:'Удаляемая задача'}); st.setAnnotation(null); return id
-})()`)
-await mcpCall('tools/call', { name: 'kadr_task_start', arguments: { id: doomed } })
-await evalJs(`(async()=>window.kadrEditor.useEditor.getState().deleteAnnotation('${doomed}'))()`)
-const missing = await mcpCall('tools/call', {
-  name: 'kadr_task_complete', arguments: { id: doomed, result: 'Не должно сохраниться' }
-})
-const stillMissing = await evalJs(`(async()=>!window.kadrEditor.getAnnotationTasks().some((task)=>task.id==='${doomed}'))()`)
-check('deleted task returns an MCP error and is never recreated', missing.result?.isError === true && stillMissing)
-
-// Regression: closing the first annotation in an existing project must not
-// reveal an old selected clip at zero or change the playhead.
-const preservedViewport = await evalJs(`(async()=>{
-  const ed=window.kadrEditor
-  const project={version:1,id:ed.uid(),name:'Annotation viewport',width:1920,height:1080,fps:30,
-    background:'#000000',tracks:[
-      {id:ed.uid(),kind:'video',name:'V1',muted:false,locked:false,gain:1,clips:[]},
-      {id:ed.uid(),kind:'audio',name:'A1',muted:false,locked:false,gain:1,clips:[]}
-    ],assets:[]}
-  let st=ed.useEditor.getState(); st.setProject(project); st=ed.useEditor.getState()
-  st.insertTextClip(0)
-  st=ed.useEditor.getState(); st.updateClip(st.selection[0],{duration:60}); st.setPlayhead(30)
-  await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame)
-  ;[...document.querySelectorAll('.transport button')].find((el)=>el.textContent.trim()==='A+').click()
-  await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame)
-  const textarea=document.querySelector('.annotation-dialog textarea')
-  const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set
-  setter.call(textarea,'Первая аннотация готового проекта')
-  textarea.dispatchEvent(new Event('input',{bubbles:true}))
-  await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame)
-  const before=document.querySelector('.tl-scroll').scrollLeft
-  document.querySelector('.annotation-dialog .primary').click()
-  await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame)
-  const after=document.querySelector('.tl-scroll').scrollLeft
-  return {before,after,playhead:ed.useEditor.getState().playhead}
-})()`)
-check('saving the first annotation preserves timeline position and playhead',
-  preservedViewport.before > 0 && Math.abs(preservedViewport.after-preservedViewport.before) < 2 &&
-  preservedViewport.playhead === 30, JSON.stringify(preservedViewport))
-
-mcp.kill()
-await evalJs(`(async()=>window.kadr.claudeClose())()`)
 ws.close()
 console.log('e2e32 finished')

@@ -47,9 +47,21 @@ function requestAssetProxy(a: MediaAsset, force: boolean): Promise<void> {
     }
   })
 
-  const request = force
-    ? window.kadr.rebuildProxy(a.path, a.duration)
-    : window.kadr.requestProxy(a.path, a.duration)
+  const request = (async () => {
+    // Projects saved before codec/hasAlpha existed need one fresh probe so
+    // transparent sources never keep an H.264 proxy with baked-in black.
+    let { codec, hasAlpha } = a
+    if (codec === undefined) {
+      const fresh = (await window.kadr.probeMedia(a.path)).asset
+      codec = fresh.codec
+      hasAlpha = fresh.hasAlpha
+      useEditor.getState().updateAsset(a.id, { codec, hasAlpha: !!hasAlpha })
+    }
+    const opts = { alpha: !!hasAlpha, codec }
+    return force
+      ? window.kadr.rebuildProxy(a.path, a.duration, opts)
+      : window.kadr.requestProxy(a.path, a.duration, opts)
+  })()
   return request
     .then((proxyPath) => {
       const cur = useEditor.getState().project.assets.find((asset) => asset.id === a.id)

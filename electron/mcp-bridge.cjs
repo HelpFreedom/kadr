@@ -76,7 +76,7 @@ const server = new McpServer({ name: 'kadr', version: '1.0.0' })
 server.registerTool('kadr_state', {
   description:
     'Read the LIVE state of the Kadr project currently open in the editor: full project ' +
-    '(tracks→clips, assets with absolute media file paths, fps, size), projectPath, selection, ' +
+    '(tracks→clips and annotation tasks, assets with absolute media file paths, fps, size), projectPath, selection, ' +
     'playhead, and available export presets. All times are in seconds. tracks[0] is the topmost ' +
     'video track (drawn last). Clip: {id, kind: media|text, assetId, start, duration, inPoint, ' +
     'speed, gain, muted, transform, mask?, maskShapes?, effects[], transitionIn/Out?, fadeIn/Out?}. ' +
@@ -103,6 +103,76 @@ server.registerTool('kadr_state', {
           id: p.id, name: p.name, container: p.container, audioOnly: !!p.audioOnly
         }))
       }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_tasks', {
+  description:
+    'List LIVE annotation tasks in timeline order. Each task has a stable random id, trackId/name, ' +
+    'fixed start/end/duration in project seconds, text, status (new|in_progress|done), timestamps, ' +
+    'and optional agent result. Always use the id for later calls. Timing is user-owned and may ' +
+    'change while you work; re-list when you need the current range.',
+  inputSchema: {
+    status: z.enum(['new', 'in_progress', 'done']).optional(),
+    trackId: z.string().optional()
+  }
+}, async ({ status, trackId }) => {
+  try {
+    return asText(await editorEval(`
+      return window.kadrEditor.getAnnotationTasks(${JSON.stringify({ status, trackId })})`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_task_start', {
+  description:
+    'Mark one annotation task in progress by stable id. This never writes start or duration. ' +
+    'If the user deleted the task, returns task-not-found and never recreates it.',
+  inputSchema: { id: z.string() }
+}, async ({ id }) => {
+  try {
+    return asText(await editorEval(`
+      return window.kadrEditor.startAnnotationTask(${JSON.stringify(id)})`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_task_update', {
+  description:
+    'Patch only status and/or agent result of a task by stable id. Timing fields are intentionally ' +
+    'not accepted, so a concurrent user drag cannot be overwritten.',
+  inputSchema: {
+    id: z.string(),
+    status: z.enum(['new', 'in_progress', 'done']).optional(),
+    result: z.string().optional()
+  }
+}, async ({ id, status, result }) => {
+  try {
+    return asText(await editorEval(`
+      return window.kadrEditor.updateAnnotationTask(
+        ${JSON.stringify(id)}, ${JSON.stringify({ status, result })})`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_task_complete', {
+  description:
+    'Complete a task by stable id, save a concise result, and optionally apply the final editor ' +
+    'mutation batch as ONE undo entry. `code` is an async-function body with the same page API as ' +
+    'kadr_eval; prefer a short synchronous batch of store actions. The tool resolves the current ' +
+    'live task immediately before applying changes and NEVER overwrites its start/duration. If the ' +
+    'user deleted the task while you worked, it fails without recreating it.',
+  inputSchema: {
+    id: z.string(),
+    result: z.string().min(1).describe('concise summary of what was changed'),
+    code: z.string().optional().describe('optional final editor mutation batch; async-function body')
+  }
+}, async ({ id, result, code }) => {
+  try {
+    return asText(await editorEval(`
+      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor
+      const mutate = ${JSON.stringify(code ?? '')}
+        ? () => new AsyncFunction(${JSON.stringify(code ?? '')}).call(window)
+        : undefined
+      return window.kadrEditor.applyAnnotationTask(
+        ${JSON.stringify(id)}, ${JSON.stringify(result)}, mutate)`))
   } catch (e) { return asError(e) }
 })
 

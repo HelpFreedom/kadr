@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
-import type { Clip, MediaAsset, Track, VoiceoverStatus } from '@shared/types'
+import type { AnnotationTask, Clip, MediaAsset, Track, VoiceoverStatus } from '@shared/types'
 import {
   useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM,
   TRACK_HEADER_MIN, TRACK_HEADER_MAX, TRACK_HEADER_DEFAULT
@@ -160,7 +160,12 @@ export function Timeline({ height }: { height: number }) {
   const trackH = useSettings((s) => s.trackH)
   const headerW = useSettings((s) => s.trackHeaderW)
   const duration = useEditor((s) => projectDuration(s.project))
+  const annotationDuration = useEditor((s) => s.project.tracks.reduce(
+    (end, track) => Math.max(end, ...(track.annotations ?? []).map((item) => item.start + item.duration)),
+    0
+  ))
   const selectedId = useEditor((s) => s.selection[0])
+  const annotationId = useEditor((s) => s.annotationId)
   const timelineRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const horizontalScrollRef = useRef<HTMLDivElement>(null)
@@ -168,7 +173,7 @@ export function Timeline({ height }: { height: number }) {
   const [viewportW, setViewportW] = useState(800)
   const [menu, setMenu] = useState<MenuState | null>(null)
 
-  const contentW = Math.max(800, viewportW, (duration + 30) * zoom)
+  const contentW = Math.max(800, viewportW, (Math.max(duration, annotationDuration) + 30) * zoom)
   const trackAreaH = tracks.length * trackH
 
   useEffect(() => {
@@ -283,10 +288,11 @@ export function Timeline({ height }: { height: number }) {
 
   useEffect(() => {
     const scroller = scrollRef.current
-    if (!scroller || !selectedId) return
+    const focusedId = annotationId ?? selectedId
+    if (!scroller || !focusedId) return
     const raf = requestAnimationFrame(() => {
       const clip = scroller.querySelector<HTMLElement>(
-        `[data-clip-id="${CSS.escape(selectedId)}"]`
+        `[data-clip-id="${CSS.escape(focusedId)}"], [data-annotation-id="${CSS.escape(focusedId)}"]`
       )
       if (!clip) return
       const viewport = scroller.getBoundingClientRect()
@@ -299,7 +305,7 @@ export function Timeline({ height }: { height: number }) {
       else if (bounds.right > viewport.right) scroller.scrollLeft += bounds.right - viewport.right + 12
     })
     return () => cancelAnimationFrame(raf)
-  }, [selectedId, headerW])
+  }, [selectedId, annotationId, headerW])
 
   useEffect(() => {
     if (!menu) return
@@ -344,6 +350,7 @@ export function Timeline({ height }: { height: number }) {
       <div className="tl-toolbar">
         <button onClick={() => useEditor.getState().addTrack('video')}>{t('addVideoTrack')}</button>
         <button onClick={() => useEditor.getState().addTrack('audio')}>{t('addAudioTrack')}</button>
+        <button onClick={() => useEditor.getState().addTrack('annotation')}>{t('addAnnotationTrack')}</button>
         <TranscribeRangeButton />
         <button
           title={t('capButtonHint')}
@@ -534,7 +541,11 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
               onClose()
             }}
           >
-            {menu.trackKind === 'video' ? t('addVideoTrack') : t('addAudioTrack')}
+            {menu.trackKind === 'video'
+              ? t('addVideoTrack')
+              : menu.trackKind === 'audio'
+                ? t('addAudioTrack')
+                : t('addAnnotationTrack')}
           </button>
           <button
             className="danger"
@@ -853,11 +864,13 @@ function TrackRow({
   const t = useT()
   const reorder = useRef<{ pushed: boolean } | null>(null)
   const gainRef = useRef<HTMLInputElement>(null)
+  const activeAnnotationTrackId = useEditor((s) => s.activeAnnotationTrackId)
   const dropGhost = useMediaDropUi((s) => s.ghosts.find((ghost) => ghost.trackId === track.id))
 
   // Option+wheel over the volume/opacity slider: precise ±1%. A plain
   // two-finger gesture must keep scrolling the timeline on macOS.
   useEffect(() => {
+    if (track.kind === 'annotation') return
     const el = gainRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
@@ -880,6 +893,7 @@ function TrackRow({
   }, [track.id, trackH < 46]) // the slider row mounts only when tall enough
 
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (track.kind === 'annotation') return
     clearMediaDropPreview()
     const rect = e.currentTarget.getBoundingClientRect()
     const time = Math.max(0, (e.clientX - rect.left) / useEditor.getState().zoom)
@@ -901,6 +915,11 @@ function TrackRow({
 
   const onLaneDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return
+    if (track.kind === 'annotation') {
+      useEditor.getState().setActiveAnnotationTrack(track.id)
+      startScrubOrRange(e, e.currentTarget)
+      return
+    }
     if (hasPrimaryModifier(e)) {
       const rect = e.currentTarget.getBoundingClientRect()
       const time = (e.clientX - rect.left) / useEditor.getState().zoom
@@ -943,12 +962,19 @@ function TrackRow({
   return (
     <div className={dropGhost ? 'tl-row media-drop-target' : 'tl-row'} style={{ height: trackH }}>
       <div
-        className={`tl-head track-head ${track.kind}`}
+        className={`tl-head track-head ${track.kind}${
+          track.kind === 'annotation' && activeAnnotationTrackId === track.id
+            ? ' active-annotation-track'
+            : ''
+        }`}
         style={{ width: headerW, height: trackH }}
         data-trackhead={track.id}
         onPointerDown={onHeadDown}
         onPointerMove={onHeadMove}
         onPointerUp={onHeadUp}
+        onClick={() => {
+          if (track.kind === 'annotation') useEditor.getState().setActiveAnnotationTrack(track.id)
+        }}
         onContextMenu={(e) => {
           e.preventDefault()
           onMenu({ x: e.clientX, y: e.clientY, kind: 'track', trackId: track.id, trackKind: track.kind })
@@ -965,13 +991,17 @@ function TrackRow({
               ✥
             </button>
           )}
-          <button
-            className={track.muted ? 'toggled' : ''}
-            title={t('mute')}
-            onClick={() => useEditor.getState().updateTrack(track.id, { muted: !track.muted })}
-          >
-            {track.muted ? '🔇' : '🔊'}
-          </button>
+          {track.kind === 'annotation' ? (
+            <span className="annotation-track-mark" aria-hidden="true">◆</span>
+          ) : (
+            <button
+              className={track.muted ? 'toggled' : ''}
+              title={t('mute')}
+              onClick={() => useEditor.getState().updateTrack(track.id, { muted: !track.muted })}
+            >
+              {track.muted ? '🔇' : '🔊'}
+            </button>
+          )}
           <button
             className={track.locked ? 'toggled' : ''}
             title={t('lock')}
@@ -980,7 +1010,7 @@ function TrackRow({
             {track.locked ? '🔒' : '🔓'}
           </button>
         </div>
-        {trackH >= 46 && (
+        {track.kind !== 'annotation' && trackH >= 46 && (
           <div className="track-gain-row">
             <input
               ref={gainRef}
@@ -1008,6 +1038,7 @@ function TrackRow({
         data-lane={track.id}
         style={{ width: contentW, height: trackH }}
         onDragOver={(e) => {
+          if (track.kind === 'annotation') return
           if (e.dataTransfer.types.includes('kadr/asset') || dragHasMedia(e)) {
             e.preventDefault()
             e.dataTransfer.dropEffect = 'copy'
@@ -1091,11 +1122,75 @@ function TrackRow({
             <small>{tickLabel(dropGhost.start)}</small>
           </div>
         )}
-        {track.clips.map((c) => (
-          <ClipView key={c.id} clip={c} track={track} laneHeight={trackH} view={view} onMenu={onMenu} />
-        ))}
-        <TransitionZones track={track} onMenu={onMenu} />
+        {track.kind === 'annotation'
+          ? (track.annotations ?? []).map((annotation) => (
+              <AnnotationView key={annotation.id} annotation={annotation} track={track} />
+            ))
+          : track.clips.map((c) => (
+              <ClipView key={c.id} clip={c} track={track} laneHeight={trackH} view={view} onMenu={onMenu} />
+            ))}
+        {track.kind !== 'annotation' && <TransitionZones track={track} onMenu={onMenu} />}
       </div>
+    </div>
+  )
+}
+
+function AnnotationView({ annotation, track }: { annotation: AnnotationTask; track: Track }) {
+  const zoom = useEditor((s) => s.zoom)
+  const open = useEditor((s) => s.annotationId === annotation.id)
+  const title = annotation.text.split(/\r?\n/, 1)[0].trim()
+
+  const startMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (track.locked || e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const original = annotation.start
+    let moved = false
+    windowDrag(e, (dx) => {
+      if (!moved && Math.abs(dx) < 2) return
+      if (!moved) useEditor.getState().pushHistory('hAnnotationMove')
+      moved = true
+      useEditor.getState().moveAnnotation(annotation.id, original + dx / useEditor.getState().zoom)
+    }, () => {
+      const st = useEditor.getState()
+      st.setActiveAnnotationTrack(track.id)
+      if (!moved) {
+        st.setPlayhead(annotation.start)
+        st.setAnnotation(annotation.id)
+      }
+    })
+  }
+
+  const startResize = (edge: 'start' | 'end') => (e: React.PointerEvent<HTMLDivElement>) => {
+    if (track.locked || e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const original = edge === 'start' ? annotation.start : annotation.start + annotation.duration
+    let moved = false
+    windowDrag(e, (dx) => {
+      if (!moved && Math.abs(dx) < 2) return
+      if (!moved) useEditor.getState().pushHistory('hAnnotationResize')
+      moved = true
+      useEditor.getState().resizeAnnotation(
+        annotation.id,
+        edge,
+        original + dx / useEditor.getState().zoom
+      )
+    })
+  }
+
+  return (
+    <div
+      className={`annotation-clip status-${annotation.status}${open ? ' selected' : ''}`}
+      data-annotation-id={annotation.id}
+      style={{ left: annotation.start * zoom, width: Math.max(12, annotation.duration * zoom) }}
+      title={title || annotation.id}
+      onPointerDown={startMove}
+    >
+      <div className="annotation-resize left" onPointerDown={startResize('start')} />
+      <span className="annotation-clip-status" />
+      <span className="annotation-clip-label">{title || '…'}</span>
+      <div className="annotation-resize right" onPointerDown={startResize('end')} />
     </div>
   )
 }

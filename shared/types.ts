@@ -231,7 +231,24 @@ export interface Clip {
   label?: string
 }
 
-export type TrackKind = 'video' | 'audio'
+export type AnnotationStatus = 'new' | 'in_progress' | 'done'
+
+export interface AnnotationTask {
+  /** Stable random identity used by the editor and MCP; never derived from timing. */
+  id: string
+  text: string
+  status: AnnotationStatus
+  /** Fixed project-timeline seconds. Annotation timing never follows media clips. */
+  start: number
+  duration: number
+  /** Concise summary written when an agent completes the task. */
+  result?: string
+  createdAt: string
+  updatedAt: string
+  completedAt?: string
+}
+
+export type TrackKind = 'video' | 'audio' | 'annotation'
 
 export interface Track {
   id: string
@@ -244,6 +261,8 @@ export interface Track {
   /** video tracks: animated whole-track transform */
   motion?: Transform3D
   clips: Clip[]
+  /** annotation tracks only; deliberately separate from renderable clips */
+  annotations?: AnnotationTask[]
 }
 
 export interface Project {

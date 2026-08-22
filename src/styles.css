@@ -10,6 +10,9 @@
   --clip-audio: #2f5a39;
   --clip-text: #6e4a2f;
   --sel: #ffb648;
+  --annotation-new: #d4a72c;
+  --annotation-progress: #4f8cff;
+  --annotation-done: #4fa86b;
 }
 
 * { box-sizing: border-box; }
@@ -199,6 +202,44 @@ input[type='color'] { padding: 0; width: 40px; height: 24px; }
 .bin-confirm p { margin: 8px 0; font-size: 13px; line-height: 1.45; }
 button.danger { background: #7a2b2b; border-color: #a04040; }
 button.danger:hover { background: #944; }
+
+/* ---- annotation task list ---- */
+.annotation-panel { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.annotation-panel-head b { color: var(--dim); font-weight: 500; }
+.annotation-panel-head button { padding: 3px 7px; font-size: 11px; }
+.annotation-filters { display: grid; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); }
+.annotation-filters select { width: 100%; }
+.annotation-status-filter { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; }
+.annotation-status-filter button { min-width: 0; padding: 4px 2px; overflow: hidden; font-size: 10px; text-overflow: ellipsis; }
+.annotation-status-filter button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--panel2)); }
+.annotation-list { flex: 1; min-height: 0; overflow-y: auto; padding: 7px; }
+.annotation-empty { padding: 18px 10px; color: var(--dim); text-align: center; }
+.annotation-list-item {
+  position: relative;
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 9px 8px;
+  border-left-width: 3px;
+  text-align: left;
+}
+.annotation-list-item.status-new { border-left-color: var(--annotation-new); }
+.annotation-list-item.status-in_progress { border-left-color: var(--annotation-progress); }
+.annotation-list-item.status-done { border-left-color: var(--annotation-done); }
+.annotation-list-status { width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; flex-shrink: 0; }
+.status-new .annotation-list-status { background: var(--annotation-new); }
+.status-in_progress .annotation-list-status { background: var(--annotation-progress); }
+.status-done .annotation-list-status { background: var(--annotation-done); }
+.annotation-list-copy { display: grid; min-width: 0; gap: 2px; }
+.annotation-list-copy b, .annotation-list-copy small, .annotation-list-copy em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.annotation-list-copy b { font-size: 12px; }
+.annotation-list-copy small { color: var(--dim); font-size: 10px; }
+.annotation-list-copy em { color: #9fb0a3; font-size: 10px; font-style: normal; }
 
 /* ---- preview ---- */
 .center-col {
@@ -786,6 +827,13 @@ button.danger:hover { background: #944; }
   background: var(--bg);
 }
 .lane.audio { background: #161a17; }
+.lane.annotation { background: #1a1813; }
+.track-head.annotation { box-shadow: inset 3px 0 0 #776426; }
+.track-head.annotation.active-annotation-track {
+  background: color-mix(in srgb, var(--annotation-new) 11%, var(--panel));
+  box-shadow: inset 3px 0 0 var(--annotation-new);
+}
+.annotation-track-mark { color: var(--annotation-new); font-size: 11px; }
 .tl-row.media-drop-target .track-head {
   background: color-mix(in srgb, var(--accent) 13%, var(--panel));
   box-shadow: inset -3px 0 0 color-mix(in srgb, var(--accent) 80%, transparent);
@@ -929,6 +977,33 @@ button.danger:hover { background: #944; }
 .clip.audio { background: var(--clip-audio); }
 .clip.text-clip { background: var(--clip-text); }
 .clip.selected { border: 2px solid var(--sel); }
+.annotation-clip {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  min-width: 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 0 8px;
+  cursor: grab;
+  touch-action: none;
+}
+.annotation-clip.status-new { background: color-mix(in srgb, var(--annotation-new) 50%, #2a2618); }
+.annotation-clip.status-in_progress { background: color-mix(in srgb, var(--annotation-progress) 50%, #1a2437); }
+.annotation-clip.status-done { background: color-mix(in srgb, var(--annotation-done) 48%, #192a20); }
+.annotation-clip.selected { border: 2px solid #fff; box-shadow: 0 0 0 1px var(--accent); }
+.annotation-clip-status { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.annotation-clip.status-new .annotation-clip-status { color: #ffe18b; }
+.annotation-clip.status-in_progress .annotation-clip-status { color: #bdd3ff; }
+.annotation-clip.status-done .annotation-clip-status { color: #b5ecc3; }
+.annotation-clip-label { overflow: hidden; color: #fff; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.annotation-resize { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
+.annotation-resize.left { left: 0; }
+.annotation-resize.right { right: 0; }
 .clip-thumb {
   position: absolute;
   left: 0;
@@ -1730,6 +1805,30 @@ button.danger:hover { background: #944; }
 }
 .modal h2 { margin: 0 0 14px; font-size: 16px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.annotation-back { z-index: 90; }
+.annotation-dialog { width: min(560px, calc(100vw - 32px)); border-top: 4px solid var(--annotation-new); }
+.annotation-dialog.status-in_progress { border-top-color: var(--annotation-progress); }
+.annotation-dialog.status-done { border-top-color: var(--annotation-done); }
+.annotation-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.annotation-dialog-head h2 { margin: 2px 0 12px; }
+.annotation-dialog-head small { color: var(--dim); font-variant-numeric: tabular-nums; }
+.annotation-dialog-head > button { padding: 0 8px; font-size: 20px; }
+.annotation-dialog textarea { width: 100%; min-height: 140px; resize: vertical; padding: 10px; line-height: 1.5; user-select: text; }
+.annotation-statuses { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; }
+.annotation-statuses button { display: flex; align-items: center; justify-content: center; gap: 6px; }
+.annotation-statuses button span { width: 8px; height: 8px; border-radius: 50%; }
+.annotation-statuses .status-new span { background: var(--annotation-new); }
+.annotation-statuses .status-in_progress span { background: var(--annotation-progress); }
+.annotation-statuses .status-done span { background: var(--annotation-done); }
+.annotation-statuses button.active { color: #fff; border-color: currentColor; box-shadow: inset 0 0 0 1px currentColor; }
+.annotation-result { margin-top: 12px; padding: 10px 12px; border-left: 3px solid var(--annotation-done); background: rgba(79, 168, 107, 0.09); }
+.annotation-result b { color: #8ed2a4; font-size: 11px; }
+.annotation-result p { margin: 5px 0 0; line-height: 1.45; white-space: pre-wrap; user-select: text; }
+.annotation-meta { display: grid; gap: 3px; margin: 12px 0 0; color: var(--dim); font-size: 10px; }
+.annotation-meta div { display: flex; gap: 8px; }
+.annotation-meta dt { width: 78px; flex-shrink: 0; }
+.annotation-meta dd { margin: 0; overflow: hidden; text-overflow: ellipsis; user-select: text; }
+.annotation-actions { align-items: center; }
 .export-progress progress { width: 100%; }
 .html-player-description { margin: 8px 0 12px; line-height: 1.4; }
 .html-player-settings {

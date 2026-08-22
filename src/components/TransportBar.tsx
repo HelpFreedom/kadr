@@ -64,6 +64,7 @@ export function TransportBar({
       <button title={t('split')} onClick={() => st().splitAtPlayhead()}>✂</button>
       <button title={t('delete')} onClick={() => st().deleteSelection()}>🗑</button>
       <button title={t('addText')} onClick={() => st().insertTextClip(playhead)}>T+</button>
+      <button title={t('addAnnotation')} onClick={() => st().insertAnnotation(playhead)}>A+</button>
       <button
         title={shot === 'fail' ? t('snapshotFail') : t('snapshot')}
         disabled={shot === 'busy'}

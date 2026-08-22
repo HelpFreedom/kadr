@@ -1,6 +1,6 @@
 ---
 name: kadr-editor
-description: Editing the LIVE project inside the Kadr video editor through its kadr_* MCP tools (kadr_state, kadr_snapshot, kadr_eval, kadr_export, kadr_transcribe, kadr_fragment_create). Use whenever those tools are available and the task concerns the open timeline, its clips, audio or captions. Not for standalone Remotion authoring — a dedicated remotion skill, if installed, owns composition internals.
+description: Editing the LIVE project inside the Kadr video editor through its kadr_* MCP tools (kadr_state, kadr_tasks, kadr_task_start, kadr_task_complete, kadr_snapshot, kadr_eval, kadr_export, kadr_transcribe, kadr_fragment_create). Use whenever those tools are available and the task concerns the open timeline, its annotation tasks, clips, audio or captions. Not for standalone Remotion authoring — a dedicated remotion skill, if installed, owns composition internals.
 ---
 
 # Editing in Kadr
@@ -15,6 +15,12 @@ watching. Work in a LOOK → ACT → VERIFY loop, like editing with your own eye
   transitions}), assets with absolute file paths, texts (SRT/TXT docs you can
   Read/Edit as files). All times are seconds. Asset waveform/thumbnail blobs
   are stripped; never echo whole project objects back (results cap at 4 MB).
+- `kadr_tasks` — annotation tasks in timeline order. Work by stable task id,
+  never by array position or remembered time. Call `kadr_task_start(id)` before
+  editing and `kadr_task_complete(id, result, code?)` for the final short edit
+  batch plus completion. Task tools intentionally cannot write start/duration:
+  a user may move the annotation while you work. If completion says task not
+  found, the user deleted it; do not recreate it.
 - `kadr_snapshot` — your eyes: renders the WYSIWYG frame at time t to a PNG
   at source quality (originals are decoded for the shot, not the preview
   proxies; fragments included) and returns its path — Read it to actually

@@ -19,6 +19,9 @@ import { reverseClip } from './engine/reverse'
 import { importFiles, wireDropDiagnostics } from './engine/mediaImport'
 import { snapshotFrame } from './engine/snapshot'
 import { normalizeClip } from './engine/normalize'
+import {
+  applyAnnotationTask, getAnnotationTasks, startAnnotationTask, updateAnnotationTask
+} from './engine/annotationTasks'
 
 wireProxies()
 wireFragmentCapture()
@@ -31,7 +34,8 @@ wireDropDiagnostics()
   useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, PRESETS, startExport, evalAnim,
   transcribe: transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues,
   createFragment, ensureFragmentServer, deleteFragment, autoCaptions, captionsTsx, autosaveNow, activity,
-  reverseClip, importFiles, snapshotFrame, normalizeClip
+  reverseClip, importFiles, snapshotFrame, normalizeClip,
+  getAnnotationTasks, startAnnotationTask, applyAnnotationTask, updateAnnotationTask
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

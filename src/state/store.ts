@@ -1,9 +1,11 @@
 import { create } from 'zustand'
 import type {
-  Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec
+  Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec,
+  AnnotationTask, AnnotationStatus
 } from '@shared/types'
 
 export const uid = () => Math.random().toString(36).slice(2, 10)
+const annotationUid = () => globalThis.crypto?.randomUUID?.() ?? uid()
 
 export const defaultTextStyle = (): TextStyle => ({
   fontFamily: 'sans-serif',
@@ -74,6 +76,17 @@ export function findClip(p: Project, clipId: string): { track: Track; clip: Clip
   return null
 }
 
+export function findAnnotation(
+  p: Project,
+  annotationId: string
+): { track: Track; annotation: AnnotationTask } | null {
+  for (const track of p.tracks) {
+    const annotation = track.annotations?.find((item) => item.id === annotationId)
+    if (annotation) return { track, annotation }
+  }
+  return null
+}
+
 /**
  * Heal foreign or script-written projects on load. Anim slots written as
  * plain numbers (e.g. `gain: 0.5` from a kadr_eval script) become `{value}`,
@@ -97,8 +110,34 @@ export function sanitizeProject(p: Project): Project {
   if (!Number.isFinite(p.height) || p.height <= 0) p.height = 1080
   if (!Number.isFinite(p.fps) || p.fps <= 0) p.fps = 30
   p.assets ??= []
+  p.tracks ??= []
   for (const track of p.tracks) {
     if (!Number.isFinite(track.gain)) track.gain = 1
+    track.clips ??= []
+    if (track.kind === 'annotation') {
+      track.annotations ??= []
+      track.annotations = track.annotations
+        .filter((item): item is AnnotationTask => !!item && typeof item === 'object')
+        .map((item) => {
+          const now = new Date().toISOString()
+          const status: AnnotationStatus =
+            item.status === 'in_progress' || item.status === 'done' ? item.status : 'new'
+          return {
+            id: typeof item.id === 'string' && item.id ? item.id : annotationUid(),
+            text: typeof item.text === 'string' ? item.text : '',
+            status,
+            start: Number.isFinite(item.start) ? Math.max(0, item.start) : 0,
+            duration: Number.isFinite(item.duration) ? Math.max(0.05, item.duration) : 4,
+            result: typeof item.result === 'string' ? item.result : undefined,
+            createdAt: typeof item.createdAt === 'string' ? item.createdAt : now,
+            updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : now,
+            completedAt: status === 'done'
+              ? (typeof item.completedAt === 'string' ? item.completedAt : now)
+              : undefined
+          }
+        })
+        .sort((a, b) => a.start - b.start)
+    }
     for (const c of track.clips) {
       for (const k of ['start', 'duration', 'inPoint'] as const)
         if (!Number.isFinite(c[k])) c[k] = 0
@@ -400,6 +439,10 @@ interface EditorState {
   animClipId: string | null
   /** video track whose Track Motion editor is open */
   motionTrackId: string | null
+  /** annotation card currently open */
+  annotationId: string | null
+  /** destination for A+; falls back to the last available annotation track */
+  activeAnnotationTrackId: string | null
   /** absolute time of a keyframe being dragged in a mini-timeline,
       highlighted on the main timeline while the drag lasts */
   kfMarker: number | null
@@ -430,6 +473,15 @@ interface EditorState {
   removeTrack(trackId: string): void
   moveTrack(trackId: string, toIndex: number): void
   updateTrack(trackId: string, patch: Partial<Track>): void
+
+  /** Create a four-second task at/after the playhead and open its card. */
+  insertAnnotation(at: number): string
+  updateAnnotation(id: string, patch: Partial<Pick<AnnotationTask, 'text' | 'status' | 'result'>>): boolean
+  deleteAnnotation(id: string): boolean
+  moveAnnotation(id: string, start: number): void
+  resizeAnnotation(id: string, edge: 'start' | 'end', time: number): void
+  setAnnotation(id: string | null): void
+  setActiveAnnotationTrack(id: string | null): void
 
   insertClipFromAsset(assetId: string, trackId: string | null, at: number): void
   /** Place several assets back-to-back starting at `at` (one undo entry);
@@ -491,6 +543,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   range: null,
   animClipId: null,
   motionTrackId: null,
+  annotationId: null,
+  activeAnnotationTrackId: null,
   kfMarker: null,
   clipboard: [],
   past: [],
@@ -499,7 +553,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   setProject: (project, path = null) =>
     set({
       project: sanitizeProject(project), projectPath: path, past: [], future: [],
-      selection: [], playhead: 0, playing: false, range: null
+      selection: [], playhead: 0, playing: false, range: null,
+      annotationId: null, activeAnnotationTrackId: null
     }),
   setProjectPath: (projectPath) => set({ projectPath }),
 
@@ -619,8 +674,18 @@ export const useEditor = create<EditorState>((set, get) => ({
     get().pushHistory('hTrack')
     set((s) => {
       const p = clone(s.project)
-      p.tracks.splice(kind === 'video' ? 0 : p.tracks.length, 0, makeTrack(p, kind))
-      return { project: p }
+      const track = makeTrack(p, kind)
+      const firstAudio = p.tracks.findIndex((t) => t.kind === 'audio')
+      const at = kind === 'video'
+        ? 0
+        : kind === 'annotation'
+          ? (firstAudio < 0 ? p.tracks.length : firstAudio)
+          : p.tracks.length
+      p.tracks.splice(at, 0, track)
+      return {
+        project: p,
+        activeAnnotationTrackId: kind === 'annotation' ? track.id : s.activeAnnotationTrackId
+      }
     })
   },
 
@@ -632,9 +697,13 @@ export const useEditor = create<EditorState>((set, get) => ({
     s.pushHistory('hTrack')
     set((st) => {
       const p = clone(st.project)
-      // video stacks above the clicked track, audio below it
-      p.tracks.splice(kind === 'video' ? idx : idx + 1, 0, makeTrack(p, kind))
-      return { project: p }
+      // video stacks above the clicked track; audio/annotation below it
+      const track = makeTrack(p, kind)
+      p.tracks.splice(kind === 'video' ? idx : idx + 1, 0, track)
+      return {
+        project: p,
+        activeAnnotationTrackId: kind === 'annotation' ? track.id : st.activeAnnotationTrackId
+      }
     })
   },
 
@@ -645,7 +714,16 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((st) => {
       const p = clone(st.project)
       p.tracks = p.tracks.filter((t) => t.id !== trackId)
-      return { project: p, selection: [] }
+      const openTrackId = st.annotationId
+        ? findAnnotation(st.project, st.annotationId)?.track.id
+        : undefined
+      return {
+        project: p,
+        selection: [],
+        annotationId: openTrackId === trackId ? null : st.annotationId,
+        activeAnnotationTrackId:
+          st.activeAnnotationTrackId === trackId ? null : st.activeAnnotationTrackId
+      }
     })
   },
 
@@ -666,6 +744,130 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (t) Object.assign(t, patch)
       return { project: p }
     }),
+
+  insertAnnotation: (at) => {
+    const s = get()
+    s.pushHistory('hAnnotation')
+    const id = annotationUid()
+    set((st) => {
+      const p = clone(st.project)
+      let track = st.activeAnnotationTrackId
+        ? p.tracks.find((item) => item.id === st.activeAnnotationTrackId && item.kind === 'annotation')
+        : undefined
+      if (!track || track.locked) {
+        const candidates = p.tracks.filter((item) => item.kind === 'annotation' && !item.locked)
+        track = candidates[candidates.length - 1]
+      }
+      if (!track) {
+        track = makeTrack(p, 'annotation')
+        const audioAt = p.tracks.findIndex((item) => item.kind === 'audio')
+        p.tracks.splice(audioAt < 0 ? p.tracks.length : audioAt, 0, track)
+      }
+      const duration = 4
+      let start = Math.max(0, at)
+      const existing = [...(track.annotations ?? [])].sort((a, b) => a.start - b.start)
+      // Preserve the four-second default. If the playhead is occupied, place the
+      // task in the first following gap instead of silently overlapping it.
+      for (const item of existing) {
+        if (start + duration <= item.start + 1e-6) break
+        if (start < item.start + item.duration - 1e-6) start = item.start + item.duration
+      }
+      const now = new Date().toISOString()
+      const annotation: AnnotationTask = {
+        id, text: '', status: 'new', start, duration, createdAt: now, updatedAt: now
+      }
+      track.annotations ??= []
+      track.annotations.push(annotation)
+      track.annotations.sort((a, b) => a.start - b.start)
+      return {
+        project: p,
+        annotationId: id,
+        activeAnnotationTrackId: track.id,
+        playhead: start
+      }
+    })
+    return id
+  },
+
+  updateAnnotation: (id, patch) => {
+    const s = get()
+    if (!findAnnotation(s.project, id)) return false
+    s.pushHistory('hAnnotation')
+    set((st) => {
+      const p = clone(st.project)
+      const found = findAnnotation(p, id)
+      if (!found) return st
+      if (patch.text !== undefined) found.annotation.text = patch.text
+      if (patch.result !== undefined) found.annotation.result = patch.result
+      if (patch.status !== undefined) {
+        found.annotation.status = patch.status
+        found.annotation.completedAt = patch.status === 'done' ? new Date().toISOString() : undefined
+      }
+      found.annotation.updatedAt = new Date().toISOString()
+      return { project: p }
+    })
+    return true
+  },
+
+  deleteAnnotation: (id) => {
+    const s = get()
+    if (!findAnnotation(s.project, id)) return false
+    s.pushHistory('hAnnotationDelete')
+    set((st) => {
+      const p = clone(st.project)
+      for (const track of p.tracks) {
+        if (track.annotations) track.annotations = track.annotations.filter((item) => item.id !== id)
+      }
+      return { project: p, annotationId: st.annotationId === id ? null : st.annotationId }
+    })
+    return true
+  },
+
+  moveAnnotation: (id, desiredStart) =>
+    set((st) => {
+      const p = clone(st.project)
+      const found = findAnnotation(p, id)
+      if (!found || found.track.locked) return st
+      const current = found.annotation
+      const ordered = (found.track.annotations ?? []).filter((item) => item.id !== id)
+        .sort((a, b) => a.start - b.start)
+      const previous = ordered.filter((item) => item.start < current.start).at(-1)
+      const next = ordered.find((item) => item.start > current.start)
+      const min = previous ? previous.start + previous.duration : 0
+      const max = next ? next.start - current.duration : Infinity
+      current.start = Math.max(min, Math.min(max, Math.max(0, desiredStart)))
+      current.updatedAt = new Date().toISOString()
+      found.track.annotations!.sort((a, b) => a.start - b.start)
+      return { project: p }
+    }),
+
+  resizeAnnotation: (id, edge, time) =>
+    set((st) => {
+      const p = clone(st.project)
+      const found = findAnnotation(p, id)
+      if (!found || found.track.locked) return st
+      const current = found.annotation
+      const ordered = (found.track.annotations ?? []).filter((item) => item.id !== id)
+        .sort((a, b) => a.start - b.start)
+      const previous = ordered.filter((item) => item.start < current.start).at(-1)
+      const next = ordered.find((item) => item.start > current.start)
+      const minDuration = Math.max(0.05, 1 / Math.max(1, p.fps))
+      if (edge === 'start') {
+        const end = current.start + current.duration
+        const min = previous ? previous.start + previous.duration : 0
+        const start = Math.max(min, Math.min(end - minDuration, time))
+        current.start = start
+        current.duration = end - start
+      } else {
+        const max = next ? next.start : Infinity
+        current.duration = Math.max(minDuration, Math.min(max, time) - current.start)
+      }
+      current.updatedAt = new Date().toISOString()
+      return { project: p }
+    }),
+
+  setAnnotation: (annotationId) => set({ annotationId }),
+  setActiveAnnotationTrack: (activeAnnotationTrackId) => set({ activeAnnotationTrackId }),
 
   insertClipFromAsset: (assetId, trackId, at) =>
     get().insertClipsFromAssets([assetId], trackId, at),
@@ -1130,11 +1332,12 @@ function makeTrack(p: Project, kind: TrackKind): Track {
   return {
     id: uid(),
     kind,
-    name: (kind === 'video' ? 'V' : 'A') + n,
+    name: (kind === 'video' ? 'V' : kind === 'audio' ? 'A' : 'AN') + n,
     muted: false,
     locked: false,
     gain: 1,
-    clips: []
+    clips: [],
+    annotations: kind === 'annotation' ? [] : undefined
   }
 }
 

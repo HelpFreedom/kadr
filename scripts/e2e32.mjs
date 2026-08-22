@@ -109,6 +109,25 @@ check('A+ creates an annotation track and focused four-second task card',
   JSON.stringify(created))
 check('task receives a stable random id', created.id.length >= 8, created.id)
 
+// A single press selects the lane for dragging; only a double-click opens the card.
+const annotationClicks = await evalJs(`(async()=>{
+  const block=document.querySelector('[data-annotation-id="${created.id}"]')
+  const r=block.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2
+  const opts={bubbles:true,pointerId:12,isPrimary:true,button:0,clientX:x,clientY:y}
+  block.dispatchEvent(new PointerEvent('pointerdown',opts))
+  window.dispatchEvent(new PointerEvent('pointerup',opts))
+  await new Promise(requestAnimationFrame)
+  const singleOpened=!!document.querySelector('.annotation-dialog')
+  block.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,button:0,clientX:x,clientY:y}))
+  await new Promise(requestAnimationFrame)
+  const doubleOpened=!!document.querySelector('.annotation-dialog')
+  document.querySelector('.annotation-dialog-head button')?.click()
+  return {singleOpened,doubleOpened,hint:block.title}
+})()`)
+check('single press keeps the task draggable and double-click opens its card',
+  !annotationClicks.singleOpened && annotationClicks.doubleOpened && /двойн|double-click/i.test(annotationClicks.hint),
+  JSON.stringify(annotationClicks))
+
 // Timeline drag by two seconds, then resize the right edge by one second.
 const timing = await evalJs(`(async()=>{
   const id=${JSON.stringify(created.id)}
@@ -264,6 +283,36 @@ const missing = await mcpCall('tools/call', {
 })
 const stillMissing = await evalJs(`(async()=>!window.kadrEditor.getAnnotationTasks().some((task)=>task.id==='${doomed}'))()`)
 check('deleted task returns an MCP error and is never recreated', missing.result?.isError === true && stillMissing)
+
+// Regression: closing the first annotation in an existing project must not
+// reveal an old selected clip at zero or change the playhead.
+const preservedViewport = await evalJs(`(async()=>{
+  const ed=window.kadrEditor
+  const project={version:1,id:ed.uid(),name:'Annotation viewport',width:1920,height:1080,fps:30,
+    background:'#000000',tracks:[
+      {id:ed.uid(),kind:'video',name:'V1',muted:false,locked:false,gain:1,clips:[]},
+      {id:ed.uid(),kind:'audio',name:'A1',muted:false,locked:false,gain:1,clips:[]}
+    ],assets:[]}
+  let st=ed.useEditor.getState(); st.setProject(project); st=ed.useEditor.getState()
+  st.insertTextClip(0)
+  st=ed.useEditor.getState(); st.updateClip(st.selection[0],{duration:60}); st.setPlayhead(30)
+  await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame)
+  ;[...document.querySelectorAll('.transport button')].find((el)=>el.textContent.trim()==='A+').click()
+  await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame)
+  const textarea=document.querySelector('.annotation-dialog textarea')
+  const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set
+  setter.call(textarea,'Первая аннотация готового проекта')
+  textarea.dispatchEvent(new Event('input',{bubbles:true}))
+  await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame)
+  const before=document.querySelector('.tl-scroll').scrollLeft
+  document.querySelector('.annotation-dialog .primary').click()
+  await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame)
+  const after=document.querySelector('.tl-scroll').scrollLeft
+  return {before,after,playhead:ed.useEditor.getState().playhead}
+})()`)
+check('saving the first annotation preserves timeline position and playhead',
+  preservedViewport.before > 0 && Math.abs(preservedViewport.after-preservedViewport.before) < 2 &&
+  preservedViewport.playhead === 30, JSON.stringify(preservedViewport))
 
 mcp.kill()
 await evalJs(`(async()=>window.kadr.claudeClose())()`)

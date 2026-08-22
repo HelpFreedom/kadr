@@ -286,26 +286,20 @@ export function Timeline({ height }: { height: number }) {
     })
   }, [zoom, headerW])
 
+  // Selection and annotation focus are independent requests. In particular,
+  // closing an annotation must not reveal an old selected clip and yank the
+  // timeline viewport back to the beginning of the project.
   useEffect(() => {
     const scroller = scrollRef.current
-    const focusedId = annotationId ?? selectedId
-    if (!scroller || !focusedId) return
-    const raf = requestAnimationFrame(() => {
-      const clip = scroller.querySelector<HTMLElement>(
-        `[data-clip-id="${CSS.escape(focusedId)}"], [data-annotation-id="${CSS.escape(focusedId)}"]`
-      )
-      if (!clip) return
-      const viewport = scroller.getBoundingClientRect()
-      const bounds = clip.getBoundingClientRect()
-      const topEdge = viewport.top + RULER_H
-      const leftEdge = viewport.left + headerW
-      if (bounds.top < topEdge) scroller.scrollTop -= topEdge - bounds.top + 6
-      else if (bounds.bottom > viewport.bottom) scroller.scrollTop += bounds.bottom - viewport.bottom + 6
-      if (bounds.left < leftEdge) scroller.scrollLeft -= leftEdge - bounds.left + 12
-      else if (bounds.right > viewport.right) scroller.scrollLeft += bounds.right - viewport.right + 12
-    })
-    return () => cancelAnimationFrame(raf)
-  }, [selectedId, annotationId, headerW])
+    if (!scroller || !selectedId || useEditor.getState().annotationId) return
+    return revealTimelineItem(scroller, selectedId, headerW)
+  }, [selectedId, headerW])
+
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller || !annotationId) return
+    return revealTimelineItem(scroller, annotationId, headerW)
+  }, [annotationId, headerW])
 
   useEffect(() => {
     if (!menu) return
@@ -838,6 +832,28 @@ interface ViewWindow {
   end: number
 }
 
+function revealTimelineItem(
+  scroller: HTMLDivElement,
+  focusedId: string,
+  headerW: number
+): () => void {
+  const raf = requestAnimationFrame(() => {
+    const item = scroller.querySelector<HTMLElement>(
+      `[data-clip-id="${CSS.escape(focusedId)}"], [data-annotation-id="${CSS.escape(focusedId)}"]`
+    )
+    if (!item) return
+    const viewport = scroller.getBoundingClientRect()
+    const bounds = item.getBoundingClientRect()
+    const topEdge = viewport.top + RULER_H
+    const leftEdge = viewport.left + headerW
+    if (bounds.top < topEdge) scroller.scrollTop -= topEdge - bounds.top + 6
+    else if (bounds.bottom > viewport.bottom) scroller.scrollTop += bounds.bottom - viewport.bottom + 6
+    if (bounds.left < leftEdge) scroller.scrollLeft -= leftEdge - bounds.left + 12
+    else if (bounds.right > viewport.right) scroller.scrollLeft += bounds.right - viewport.right + 12
+  })
+  return () => cancelAnimationFrame(raf)
+}
+
 // groups a burst of wheel notches over one gain slider into a single undo entry
 const gainWheelMark = { id: '', ts: 0 }
 
@@ -1136,6 +1152,7 @@ function TrackRow({
 }
 
 function AnnotationView({ annotation, track }: { annotation: AnnotationTask; track: Track }) {
+  const t = useT()
   const zoom = useEditor((s) => s.zoom)
   const open = useEditor((s) => s.annotationId === annotation.id)
   const title = annotation.text.split(/\r?\n/, 1)[0].trim()
@@ -1152,12 +1169,7 @@ function AnnotationView({ annotation, track }: { annotation: AnnotationTask; tra
       moved = true
       useEditor.getState().moveAnnotation(annotation.id, original + dx / useEditor.getState().zoom)
     }, () => {
-      const st = useEditor.getState()
-      st.setActiveAnnotationTrack(track.id)
-      if (!moved) {
-        st.setPlayhead(annotation.start)
-        st.setAnnotation(annotation.id)
-      }
+      useEditor.getState().setActiveAnnotationTrack(track.id)
     })
   }
 
@@ -1184,8 +1196,16 @@ function AnnotationView({ annotation, track }: { annotation: AnnotationTask; tra
       className={`annotation-clip status-${annotation.status}${open ? ' selected' : ''}`}
       data-annotation-id={annotation.id}
       style={{ left: annotation.start * zoom, width: Math.max(12, annotation.duration * zoom) }}
-      title={title || annotation.id}
+      title={`${title ? `${title}\n` : ''}${t('annotationTimelineHint')}`}
       onPointerDown={startMove}
+      onDoubleClick={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        const st = useEditor.getState()
+        st.setActiveAnnotationTrack(track.id)
+        st.setPlayhead(annotation.start)
+        st.setAnnotation(annotation.id)
+      }}
     >
       <div className="annotation-resize left" onPointerDown={startResize('start')} />
       <span className="annotation-clip-status" />

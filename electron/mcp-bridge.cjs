@@ -290,6 +290,31 @@ server.registerTool('kadr_fragment_create', {
   } catch (e) { return asError(e) }
 })
 
+server.registerTool('kadr_neon_wave', {
+  description:
+    'Generate a «neon wave» clip: an audio-reactive glowing sine line (the user\'s Blender ' +
+    'preset rebuilt as a Remotion fragment) over [start, end) project seconds. The loudness of ' +
+    'the timeline mix in that range — or of ONE audio track when trackId is given — drives the ' +
+    'wiggle frequency and height (Blender "Bake Sound" follower: 5 ms attack / 200 ms release). ' +
+    'Opaque black background, project size, >=60 fps; lands on the topmost free video track and ' +
+    'is selected. Returns the fragment id and its entry TSX: `S` at the top holds every style ' +
+    'knob (colour ramp, glow, streaks, amplitude, speed), `ENV` the loudness per frame — edit ' +
+    'the file to restyle, the preview hot-reloads. Regenerate (call again) after the audio changes.',
+  inputSchema: {
+    start: z.number().describe('clip start, project seconds'),
+    end: z.number().describe('clip end, project seconds'),
+    trackId: z.string().optional().describe('restrict the sound to this audio track (from kadr_state); default = whole mix'),
+    name: z.string().optional().describe('fragment name, default "wave"')
+  }
+}, async ({ start, end, trackId, name }) => {
+  try {
+    const opts = { range: { start, end }, source: trackId ? { trackId } : 'mix', name }
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.neonWave(${JSON.stringify(opts)})
+      return { fragmentId: r.fragmentId, clipId: r.clipId, entryFile: r.entry, frames: r.frames, peak: r.peak }`))
+  } catch (e) { return asError(e) }
+})
+
 server.connect(new StdioServerTransport()).catch((e) => {
   console.error('mcp-bridge failed:', e)
   process.exit(1)

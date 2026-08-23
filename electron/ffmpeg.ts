@@ -3,7 +3,7 @@ import { execFile, spawn, ChildProcess } from 'child_process'
 import { promisify } from 'util'
 import { promises as fsp } from 'fs'
 import { join, basename } from 'path'
-import type { ProbeResult, ExportJob, ExportProgress, WaveformData } from '@shared/types'
+import type { ProbeResult, ExportJob, ExportProgress, WaveformData, AudioSegment } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
 
 const execFileP = promisify(execFile)
@@ -489,6 +489,22 @@ function runCollect(bin: string, args: string[], maxBytes = 64 * 1024 * 1024): P
   })
 }
 
+/** Like runCollect but streams stdout to `onData` — no size cap (a minutes-long
+    f32 PCM decode would blow the 64 MB limit in seconds). */
+export function runStream(bin: string, args: string[], onData: (chunk: Buffer) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let err = ''
+    child.stdout.on('data', onData)
+    child.stderr.on('data', (c) => { err += c })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`${bin} exited ${code}: ${err.slice(0, 500)}`))
+    })
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Final export pass: mix audio segments and mux with the rendered video.
 
@@ -650,4 +666,35 @@ export class ExportMuxer {
       })
     })
   }
+}
+
+/**
+ * Mix timeline AudioSegments into a pcm_s16le wav — the same segment graph as
+ * exports, so what you hear is what gets analysed. Shared by transcription and
+ * the loudness-envelope IPC. `onMuxer` hands the muxer out for cancellation.
+ */
+export async function mixdownWav(
+  segments: AudioSegment[],
+  duration: number,
+  outPath: string,
+  onMuxer?: (m: ExportMuxer) => void
+): Promise<void> {
+  const muxer = new ExportMuxer()
+  onMuxer?.(muxer)
+  await muxer.run(
+    {
+      projectName: 'mixdown',
+      preset: {
+        id: 'wav', name: 'wav', container: 'mp4', codec: '', ffmpegVideo: '',
+        width: 0, height: 0, fps: 0, videoBitrate: 0,
+        audioCodec: 'pcm_s16le', audioBitrate: '256k', audioOnly: true
+      },
+      outputPath: outPath,
+      width: 0, height: 0, fps: 0,
+      duration,
+      audioSegments: segments
+    },
+    '',
+    () => { /* mixing is fast; callers report their own progress */ }
+  )
 }

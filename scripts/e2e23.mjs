@@ -7,6 +7,7 @@ import { writeFileSync, unlinkSync, readFileSync } from 'fs'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
 const ENV_FILE = `${process.env.HOME}/.config/kadr/claude-env.json`
+const GEN_FILE = `${process.env.HOME}/.config/kadr/kadr-mcp.json`
 
 async function getPageWs() {
   for (let i = 0; i < 30; i++) {
@@ -179,7 +180,9 @@ try { envBackup = readFileSync(ENV_FILE, 'utf8') } catch { /* none */ }
 writeFileSync(ENV_FILE, JSON.stringify({ command: 'bash', args: [] }))
 try {
   const opened = await evalJs(`(async () => window.kadr.claudeOpen(80, 24, null))()`)
-  const mcp = spawn('node', ['electron/mcp-bridge.cjs', String(opened.port)],
+  // the /eval bridge is locked with a per-session token (argv[3] of the generated mcp-config)
+  const TOKEN = JSON.parse(readFileSync(GEN_FILE, 'utf8')).mcpServers.kadr.args?.[2]
+  const mcp = spawn('node', ['electron/mcp-bridge.cjs', String(opened.port), TOKEN],
     { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'inherit'] })
   const pending = new Map()
   let buf = ''

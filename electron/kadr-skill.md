@@ -1,6 +1,6 @@
 ---
 name: kadr-editor
-description: Editing the LIVE project inside the Kadr video editor through its kadr_* MCP tools (kadr_state, kadr_snapshot, kadr_eval, kadr_export, kadr_transcribe, kadr_fragment_create). Use whenever those tools are available and the task concerns the open timeline, its clips, audio or captions. Not for standalone Remotion authoring — a dedicated remotion skill, if installed, owns composition internals.
+description: Editing the LIVE project inside the Kadr video editor through its kadr_* MCP tools (kadr_state, kadr_snapshot, kadr_eval, kadr_export, kadr_transcribe, kadr_fragment_create, kadr_neon_wave). Use whenever those tools are available and the task concerns the open timeline, its clips, audio or captions. Not for standalone Remotion authoring — a dedicated remotion skill, if installed, owns composition internals.
 ---
 
 # Editing in Kadr
@@ -64,6 +64,12 @@ project, path)` so project-owned fragments get their workspace links back.
 Keep `fragment = { component, meta }` exported and meta.json's
 durationInFrames in sync with timing changes; media used inside a
 composition must be imported from files copied INTO the fragment folder.
+
+`kadr_neon_wave` is a ready-made audio-reactive fragment: a glowing sine line
+whose wiggles follow the loudness of the range (whole mix or one audio track
+via trackId). Use it when the user asks for a sound wave / audio visualizer
+over a piece of the timeline; restyle by editing `S` in the returned TSX, and
+call it again after the audio under it changes (the loudness is baked in).
 To embed video inside a composition use `<Video>` — NOT `<OffthreadVideo>`:
 OffthreadVideo needs Remotion's native compositor binary, which requires
 glibc ≥ 2.32 and refuses to start on older systems (render dies with

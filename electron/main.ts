@@ -10,6 +10,7 @@ import {
 } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
+import { registerEnvelopeIpc } from './envelope'
 import { registerFragmentIpc } from './fragments'
 import type { ExportJob, Project } from '@shared/types'
 
@@ -186,6 +187,7 @@ app.whenReady().then(() => {
   void sweepPartFiles()
   registerClaudeIpc(() => win)
   registerTranscribeIpc(() => win)
+  registerEnvelopeIpc()
   registerFragmentIpc(() => win)
   createWindow()
   app.on('activate', () => {

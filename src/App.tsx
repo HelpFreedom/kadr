@@ -8,6 +8,7 @@ import { ExportDialog } from './components/ExportDialog'
 import { ClaudePanel } from './components/ClaudePanel'
 import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
 import { CaptionsDialog } from './components/CaptionsDialog'
+import { NeonWaveDialog } from './components/NeonWaveDialog'
 import { useEditor, newProject } from './state/store'
 import { dropPayload, dropUsable, importDrop, importFiles } from './engine/mediaImport'
 import { syncProjectFragments } from './engine/fragments'
@@ -284,6 +285,7 @@ export default function App() {
       <TranscribeDialog />
       <SubtitlePanel />
       <CaptionsDialog />
+      <NeonWaveDialog />
       {claudeOpen && <ClaudePanel onClose={() => setClaudeOpen(false)} />}
     </div>
   )

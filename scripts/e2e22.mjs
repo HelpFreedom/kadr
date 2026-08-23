@@ -205,8 +205,8 @@ try {
   const names = (tools.result?.tools ?? []).map((t) => t.name).sort()
   check('MCP exposes kadr tools',
     JSON.stringify(names) === JSON.stringify(
-      ['kadr_eval', 'kadr_export', 'kadr_fragment_create', 'kadr_snapshot', 'kadr_state',
-       'kadr_transcribe']),
+      ['kadr_eval', 'kadr_export', 'kadr_fragment_create', 'kadr_neon_wave', 'kadr_snapshot',
+       'kadr_state', 'kadr_transcribe']),
     names.join(','))
 
   const state = await mcpCall('tools/call', { name: 'kadr_state', arguments: {} })

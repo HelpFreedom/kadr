@@ -13,6 +13,22 @@ import { normalizeClip, useNormalizeUi } from '@/engine/normalize'
 import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
+import { useNeonWaveUi } from './NeonWaveDialog'
+
+/** Neon wave (audio-reactive fragment) from the selected range. */
+function NeonWaveButton() {
+  const t = useT()
+  const range = useEditor((s) => s.range)
+  return (
+    <button
+      disabled={!range}
+      title={t('nwButtonHint')}
+      onClick={() => useNeonWaveUi.getState().setOpen(true)}
+    >
+      🌊 {t('nwButton')}
+    </button>
+  )
+}
 
 /** Transcribe the selected range (Shift-drag on the ruler) into SRT/TXT. */
 function TranscribeRangeButton() {
@@ -262,6 +278,7 @@ export function Timeline({ height }: { height: number }) {
         >
           ✨ {t('capButton')}
         </button>
+        <NeonWaveButton />
         <span className="dim hint-inline">{t('dropHint')}</span>
         <span className="flex1" />
         <label className="zoom-ctl">

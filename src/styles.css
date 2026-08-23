@@ -1430,3 +1430,7 @@ button.danger:hover { background: #944; }
   pointer-events: none;
   transition: width 0.3s;
 }
+
+/* neon wave dialog: sound-source radios stacked */
+.nw-sources { display: flex; flex-direction: column; gap: 4px; }
+.nw-sources label { display: flex; align-items: center; gap: 4px; cursor: pointer; }

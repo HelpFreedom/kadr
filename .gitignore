@@ -4,3 +4,4 @@ dist/
 *.log
 .claude/
 *.autosave.kadr
+node_modules

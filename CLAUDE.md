@@ -68,11 +68,23 @@ mixes audio and muxes/transcodes per preset.
   liveness ping on `GET /` stays open.
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
   via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
-  kadr_snapshot / kadr_export / kadr_transcribe / kadr_fragment_create.
+  kadr_snapshot / kadr_export / kadr_transcribe / kadr_fragment_create /
+  kadr_neon_wave.
 - `electron/transcribe.ts` + `scripts/transcribe.py` — faster-whisper
   runner (VAD, anti-hallucination thresholds and post-filters, NDJSON
   segments with word timestamps); audio comes from an ExportMuxer mixdown
   (WYSIWYG).
+- `shared/envelope.ts` + `electron/envelope.ts` — loudness envelope of a
+  timeline range (Blender "Bake Sound to F-Curves" semantics: channels
+  summed, |s|, one-pole follower with 5 ms attack / 200 ms release, frame
+  sampling by linear interpolation), computed in main over an ExportMuxer
+  mixdown (`audio:envelope` IPC). Feeds `src/engine/neonWave.ts` — the 🌊
+  neon-wave generator: an audio-reactive fragment whose TSX bakes the
+  envelope (`ENV`) and style (`S`); the final look pass replays Blender's
+  compositor Lens Distortion exactly in a WebGL shader (per-axis uv·sc
+  with sc = 1/(1+max k), d = 1/(1+√(1−4k·r²)), per-channel k for
+  dispersion). Empty segments short-circuit to zeros — ExportMuxer with
+  no inputs builds an ffmpeg command without any `-i` and fails.
 - `electron/fragments.ts` — Remotion workspace (`~/kadr-fragments`):
   scaffold, vite dev server (watchdogged), fragment create/delete,
   `remotion render` once per content hash at near-lossless settings

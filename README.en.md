@@ -52,6 +52,9 @@ captions to this part», watch it happen live in the preview.
 - ✨ **Auto-captions** — one dialog: transcribe → animated karaoke captions
   (word-precise highlight, pop/rise/fade entrances), drag & scale them with
   the mouse right in the preview.
+- 🌊 **Neon wave** — an audio-reactive glowing line driven by the loudness
+  of the selected range (whole mix or a single track); restyle it in the
+  fragment's code, the envelope matches Blender's "Bake Sound" exactly.
 - ⚛️ **Remotion fragments** — programmable React/TSX motion graphics as
   timeline clips. Live preview with hot reload (no renders while
   iterating!), automatic pixel-capture mode when you put GL effects, 3D or

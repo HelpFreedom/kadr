@@ -20,6 +20,7 @@ import { importFiles, wireDropDiagnostics } from './engine/mediaImport'
 import { snapshotFrame } from './engine/snapshot'
 import { wireExportChime } from './engine/chime'
 import { normalizeClip } from './engine/normalize'
+import { neonWave, neonWaveTsx, NEON_WAVE_DEFAULTS } from './engine/neonWave'
 
 wireProxies()
 wireFragmentCapture()
@@ -33,7 +34,8 @@ wireDropDiagnostics()
   useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, PRESETS, startExport, evalAnim,
   transcribe: transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues,
   createFragment, ensureFragmentServer, deleteFragment, autoCaptions, captionsTsx, autosaveNow, activity,
-  reverseClip, importFiles, snapshotFrame, normalizeClip, syncProjectFragments
+  reverseClip, importFiles, snapshotFrame, normalizeClip, syncProjectFragments,
+  neonWave, neonWaveTsx, NEON_WAVE_DEFAULTS
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

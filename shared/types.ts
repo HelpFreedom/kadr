@@ -317,6 +317,17 @@ export interface TranscribeRequest {
   language: string // 'auto' | 'ru' | 'en' | ...
 }
 
+/** Loudness envelope of a mixed range (neon-wave module): one value per frame. */
+export interface EnvelopeRequest {
+  /** segments in range coordinates (start at 0), as for transcription */
+  audioSegments: AudioSegment[]
+  duration: number
+  fps: number
+  /** follower attack/release in seconds; defaults = Blender's sound bake (0.005 / 0.2) */
+  attack?: number
+  release?: number
+}
+
 // ---------------------------------------------------------------------------
 // Export
 
@@ -438,6 +449,8 @@ export interface KadrApi {
   saveSnapshot(dir: string | null, baseName: string, png: ArrayBuffer): Promise<string>
   /** EBU R128 loudness of a source range: integrated LUFS + true peak dBTP. */
   measureLoudness(path: string, start: number, duration: number): Promise<{ i: number; tp: number }>
+  /** Blender-compatible loudness envelope of a mixed range, one value per frame (see shared/envelope.ts). */
+  audioEnvelope(req: EnvelopeRequest): Promise<number[]>
 
   exportDialog(defaultName: string, ext: string): Promise<string | null>
   exportBegin(job: ExportJob): Promise<void>

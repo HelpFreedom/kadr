@@ -55,9 +55,20 @@ mixes audio and muxes/transcodes per preset.
   `userData/claude-env.json`, extra MCP servers via
   `userData/claude-mcp.json`; `sweepStaleSessions()` clears leftovers of
   hard-killed runs at startup.
+  /eval IS AUTHENTICATED and must stay that way — it runs arbitrary JS in
+  the page, and the page holds `window.kadr` (file writes, pty spawn), so a
+  bare localhost socket would be reachable by anything on the machine and by
+  any WEB PAGE too (a cross-origin fetch with a simple content type needs no
+  permission, and an unreadable reply does not stop the code from running; a
+  fragment previewed from the workspace dev server is such a page). Two
+  locks: a per-session random token in an `x-kadr-token` header — a custom
+  header forces a preflight, which the server 404s, so a page cannot even
+  send the request — and a flat refusal of any request carrying an `Origin`.
+  The token reaches the MCP server as argv[3] of the generated config; the
+  liveness ping on `GET /` stays open.
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
   via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
-  kadr_export / kadr_transcribe / kadr_fragment_create.
+  kadr_snapshot / kadr_export / kadr_transcribe / kadr_fragment_create.
 - `electron/transcribe.ts` + `scripts/transcribe.py` — faster-whisper
   runner (VAD, anti-hallucination thresholds and post-filters, NDJSON
   segments with word timestamps); audio comes from an ExportMuxer mixdown
@@ -70,6 +81,15 @@ mixes audio and muxes/transcodes per preset.
   pixel-capture windows (created with `enableLargerThanScreen` — some
   window managers/displays clamp hidden windows otherwise). The player
   page syncs to the editor clock by nudging playbackRate, not seek jumps.
+  Every cache in the app builds into a `<key>.part.<ext>` sidecar and is
+  RENAMED on success, so the presence of a cache file always means
+  "finished". This matters most for fragment renders: remotion writes its
+  output progressively, and a killed render used to leave a truncated file
+  exactly where the next export looks for a hit — loud for an opaque
+  fragment (an mp4 without its moov box does not probe) but SILENT for a
+  transparent one, since a short WebM parses fine and just ends early.
+  `sweepPartFiles` drops leftover sidecars at startup: nothing is building
+  then, so any that exist are corpses.
 - `src/state/store.ts` — zustand store. Undo convention: callers invoke
   `pushHistory(labelKey)` once before a discrete edit; high-level actions
   push their own. `sanitizeProject` heals foreign/script-written projects
@@ -145,6 +165,36 @@ mixes audio and muxes/transcodes per preset.
   * ffmpeg leaves x264's b_deterministic off, so two identical runs never
     produce identical files: verify picture changes by hashing rendered
     frames (`globalThis.KADR_FRAME_HASH = []`), never by comparing output.
+  * The raw-frame ring is TWO buffers by measurement, not by default. The
+    loop does spend a few ms per frame waiting there, but the pipe is
+    drained by libuv on the same thread, so a deeper ring adds no
+    concurrency, only working set: 1080p60, alternating rounds, 2 slots
+    50.5 fps / 3 slots 45.7 / 4 slots 45.3, pixels identical at every depth.
+  WHERE AN EXPORT'S TIME GOES, so the next person profiling does not repeat
+  the dead ends. Every run prints `[kadr] export stage ms/frame`; on a real
+  1080p60 project it reads roughly prepare 0.3 · draw 1.7 · read 9.4 ·
+  encode 6.2, i.e. most of the time is the frame LEAVING the renderer, not
+  compositing or decoding. Two traps: `read` is TRANSFER, not a wait on the
+  GPU (a `gl.finish()` after the draw moves nothing between the laps), and
+  it is contention-sensitive — the same 8.3 MB measured 3.3 ms on an idle
+  machine and 9.4 ms on a busy one, so profile idle or you will chase a
+  ghost. The one real lever left is that ffmpeg receives RGBA and converts
+  it to yuv420p itself, which costs it more than the encode: measured
+  ceilings on identical frames are 89.5 fps for what ships, 121.5 from
+  yuv444p and 181.8 from yuv420p, and converting on the GPU would cut the
+  readback to 3.1 MB as well — worth roughly 2×. It is NOT done because it
+  cannot yet be made bit-exact, and exports must not change a pixel.
+  swscale's path is understood — textbook BT.709 limited matrix (exact on
+  uniform fields), a plain horizontal pair average, and an 8-tap vertical
+  chroma filter (-2,-6,16,56,56,16,-6,-2)/128 summing to exactly 1 — which
+  gets a float model within ONE unit of 255 on 0.05% of luma and ~1.4% of
+  chroma samples (whole-frame PSNR 71.3 dB), but the last unit is
+  swscale's internal fixed-point rounding and no one- or two-stage integer
+  model reproduced it, for 4:2:0 or 4:4:4. Implement it from libswscale's
+  source, not by measurement. Also: `-sws_flags` on the command line does
+  NOT reach this conversion (the scale filter's own `flags` default wins),
+  so an A/B on those flags that compares output bytes proves nothing, and
+  filter threading is already on by default.
 - `src/engine/subtitles.ts` / `captions.ts` — SRT parse/serialize,
   word-precise cue splitting (`segmentsToRichCues`), auto-captions
   fragment generator.

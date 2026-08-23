@@ -237,6 +237,22 @@ export interface BlendFrame {
  * 8-sample pass runs as before, so this can only ever save redundant work.
  * A recorder that hits an unknown compositor call returns null = "assume it
  * moves".
+ *
+ * WHY THIS IS EXACT, AND THE ONE WAY TO BREAK IT. The signature is not a
+ * hand-kept list of "things that count as movement" — it replays the real
+ * drawFrame and records every compositor call with all of its arguments, so
+ * new animated properties, effects and transitions are covered the day they
+ * are added. The single input it does NOT record is the layer's `source`
+ * object: only its cacheKey (and, for captured fragments, raw.version). That
+ * is sound today because within one output frame no source can change — the
+ * decoded VideoFrames are collected once per frame in the exporter's
+ * prepareFrame, and pool elements are seeked there too, so every sub-sample
+ * reads the very same pixels. It follows that motion blur smears TRANSFORMS,
+ * never motion inside the footage. If sub-frame video sampling is ever added
+ * (a true shutter, resampling the source at each sub-sample time), this
+ * function must start recording what the source is showing — otherwise it
+ * will silently declare those frames identical and freeze the very motion the
+ * feature was written to blur.
  */
 export function frameSignature(
   project: Project,

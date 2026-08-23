@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
 import {
-  probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, canPackAlpha, sourceMatrix,
+  probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, packedAlphaPlan,
   ExportMuxer, RawVideoEncoder
 } from './ffmpeg'
 import { registerClaudeIpc } from './claude'
@@ -183,6 +183,7 @@ app.whenReady().then(() => {
   })
   registerIpc()
   void pruneDecodedCache()
+  void sweepPartFiles()
   registerClaudeIpc(() => win)
   registerTranscribeIpc(() => win)
   registerFragmentIpc(() => win)
@@ -310,14 +311,15 @@ async function requestDecoded(
   } catch { /* not built yet */ }
   await fs.mkdir(decodedDir(), { recursive: true })
   if (opts?.packed) {
-    if (!(await canPackAlpha(srcPath))) {
+    const plan = await packedAlphaPlan(srcPath)
+    if (!plan.canPack) {
       throw new Error('alpha packing skipped: full-range source')
     }
-    opts = { ...opts, matrix: await sourceMatrix(srcPath) }
-    // lossless colour+matte intermediates are big (~400 MB per minute of
-    // 1080p60); refuse rather than fill the disk — the caller falls back to
-    // the slow element path, which is correct, just slow
-    const need = Math.max(2e9, duration * 9e6) + 3e9
+    opts = { ...opts, matrix: plan.matrix }
+    // lossless colour+matte intermediates are big (~220 MB per minute of
+    // 1080p60, four times that at 4K); refuse rather than fill the disk — the
+    // caller falls back to the slow element path, which is correct, just slow
+    const need = Math.max(2e9, duration * plan.bytesPerSecond) + 3e9
     try {
       const st = await fs.statfs(decodedDir())
       const free = st.bsize * st.bavail
@@ -380,6 +382,33 @@ async function pruneDecodedCache(): Promise<void> {
       console.log(`[kadr] decode cache: dropped ${f.p} (${Math.round(f.size / 1e6)} MB)`)
     }
   } catch { /* no cache dir yet */ }
+}
+
+/**
+ * Every cache here builds into a `<key>.part.<ext>` sidecar and renames on
+ * success, so a survivor of a kill is always a `.part.` file and never a
+ * cache hit. Nothing is building at startup, so any that remain are corpses:
+ * drop them rather than let them count against the cache budget forever.
+ * Directories (the reverse worker's scratch `.tmp` dir) are left alone.
+ */
+async function sweepPartFiles(): Promise<void> {
+  const dirs = ['decoded', 'proxies', 'reversed', 'fragment-renders']
+    .map((d) => join(app.getPath('userData'), d))
+  let dropped = 0
+  for (const dir of dirs) {
+    let names: string[]
+    try { names = await fs.readdir(dir) } catch { continue } // never used yet
+    for (const name of names) {
+      if (!name.includes('.part.')) continue
+      const p = join(dir, name)
+      try {
+        if (!(await fs.stat(p)).isFile()) continue
+        await fs.unlink(p)
+        dropped++
+      } catch { /* raced away */ }
+    }
+  }
+  if (dropped) console.log(`[kadr] swept ${dropped} interrupted cache build(s)`)
 }
 
 // reversed renders: keyed by source identity + range, built one at a time

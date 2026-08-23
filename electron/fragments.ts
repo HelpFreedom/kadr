@@ -529,48 +529,71 @@ async function renderFragment(
   } catch { /* meta is optional for the decision */ }
   const ext = transparent ? 'webm' : 'mp4'
   // 'q2' marks the render settings generation — old low-quality cache misses
-  const out = join(renderDir(), `${id}-${fragmentHash(id)}-q2${transparent ? '-a' : ''}.${ext}`)
+  const base = `${id}-${fragmentHash(id)}-q2${transparent ? '-a' : ''}`
+  const out = join(renderDir(), `${base}.${ext}`)
   try {
     await fs.access(out)
     return { path: out, cached: true } // exact content already rendered
   } catch { /* not yet */ }
   await fs.mkdir(renderDir(), { recursive: true })
+  // Render into a sidecar and rename on success, so the presence of the cache
+  // file always means "finished". Renderers get killed — the app quits, the
+  // startup sweep reaps a leftover from a crashed session — and remotion
+  // writes its output progressively, so a direct write leaves a TRUNCATED
+  // file sitting exactly where the next export looks for a hit. An opaque
+  // fragment would at least fail loudly (an mp4 without its moov box does not
+  // probe), but a transparent one is a WebM: it parses fine and just ends
+  // early, so the clip would silently freeze on its last rendered frame.
+  const tmp = join(renderDir(), `${base}.part.${ext}`)
 
   // Quality matters more than render time here (one cached render per
   // content hash): PNG frames avoid Remotion's default JPEG-80 pass, VP9
   // replaces VP8 for alpha (dramatically better on sharp graphics), and a
   // low CRF keeps this intermediate visually lossless — the final export
   // pass re-encodes it once more.
-  const args = ['remotion', 'render', 'src/index.ts', id, out, '--log=error', '--image-format=png']
+  const args = ['remotion', 'render', 'src/index.ts', id, tmp, '--log=error', '--image-format=png']
   if (transparent) args.push('--codec=vp9', '--pixel-format=yuva420p', '--crf=12')
   else args.push('--codec=h264', '--crf=15')
 
   const extraEnv = await netEnv()
-  const job = renderChain.then(() => new Promise<void>((resolve, reject) => {
-    const child = spawn('npx', args, {
-      cwd: WORKSPACE,
-      env: { ...process.env, ...extraEnv },
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-    let all = ''
-    const onData = (c: Buffer) => {
-      all += c
-      // remotion prints e.g. "Rendered 120/300"
-      const m = all.match(/Rendered (\d+)\/(\d+)(?![\s\S]*Rendered \d+\/\d+)/)
-      if (m) onProgress(Math.min(0.99, Number(m[1]) / Math.max(1, Number(m[2]))))
+  const job = renderChain.then(async () => {
+    try {
+      await fs.access(out)
+      return true // another caller rendered it while we waited in the queue
+    } catch { /* still missing */ }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('npx', args, {
+          cwd: WORKSPACE,
+          env: { ...process.env, ...extraEnv },
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
+        let all = ''
+        const onData = (c: Buffer) => {
+          all += c
+          // remotion prints e.g. "Rendered 120/300"
+          const m = all.match(/Rendered (\d+)\/(\d+)(?![\s\S]*Rendered \d+\/\d+)/)
+          if (m) onProgress(Math.min(0.99, Number(m[1]) / Math.max(1, Number(m[2]))))
+        }
+        child.stdout!.on('data', onData)
+        child.stderr!.on('data', onData)
+        child.on('error', reject)
+        child.on('close', (code) => {
+          if (code === 0) resolve()
+          else reject(new Error(`remotion render exited ${code}: ${all.slice(-800)}`))
+        })
+      })
+      await fs.rename(tmp, out)
+    } catch (err) {
+      await fs.unlink(tmp).catch(() => { /* nothing to clean */ })
+      throw err
     }
-    child.stdout!.on('data', onData)
-    child.stderr!.on('data', onData)
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(`remotion render exited ${code}: ${all.slice(-800)}`))
-    })
-  }))
+    return false
+  })
   renderChain = job.catch(() => { /* keep the queue alive */ })
-  await job
+  const cached = await job
   onProgress(1)
-  return { path: out, cached: false }
+  return { path: out, cached }
 }
 
 // ------------------------------------------------------------ pixel capture

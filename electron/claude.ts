@@ -4,6 +4,7 @@
 // (mcp-bridge.cjs, spawned by claude itself) talks to.
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { createServer, type Server } from 'http'
+import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
@@ -124,12 +125,35 @@ async function evalInPage(win: BrowserWindow, code: string): Promise<string> {
   return win.webContents.executeJavaScript(wrapped, true)
 }
 
-/** Local bridge: POST /eval {code} from mcp-bridge.cjs into the renderer. */
-function startBridge(win: BrowserWindow): Promise<{ server: Server; port: number }> {
+/**
+ * Local bridge: POST /eval {code} from mcp-bridge.cjs into the renderer.
+ *
+ * /eval is arbitrary JS in the page, and the page holds window.kadr (file
+ * writes, pty spawn) — so the socket needs a door, not just an address.
+ * Anything running on this machine can reach 127.0.0.1, and a WEB PAGE can
+ * too: a fetch() with a simple content type is sent cross-origin without the
+ * browser asking permission first, and the reply being unreadable does not
+ * stop the code from running. A fragment previewed from the workspace vite
+ * server is such a page. Two cheap locks close that:
+ *   • a per-session secret in a custom header — a custom header forces the
+ *     browser to ask permission first (preflight), which this server answers
+ *     with 404, so a page cannot even send the request;
+ *   • rejecting anything that carries an Origin at all — only browsers set
+ *     it, and the only legitimate client here is a node process.
+ * The health check (GET /) stays open: mcp-bridge only needs *a* reply.
+ */
+function startBridge(
+  win: BrowserWindow
+): Promise<{ server: Server; port: number; token: string }> {
+  const token = randomBytes(24).toString('hex')
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
       if (req.method !== 'POST' || req.url !== '/eval') {
         res.writeHead(404).end()
+        return
+      }
+      if (req.headers.origin !== undefined || req.headers['x-kadr-token'] !== token) {
+        res.writeHead(403).end()
         return
       }
       let body = ''
@@ -149,7 +173,7 @@ function startBridge(win: BrowserWindow): Promise<{ server: Server; port: number
     server.on('error', reject)
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address()
-      if (addr && typeof addr === 'object') resolve({ server, port: addr.port })
+      if (addr && typeof addr === 'object') resolve({ server, port: addr.port, token })
       else reject(new Error('bridge listen failed'))
     })
   })
@@ -189,7 +213,7 @@ async function openSession(
   const cmdName = process.env.KADR_CLAUDE_CMD || cfg.command || 'claude'
   const bin = (await which(cmdName)) ?? cmdName
 
-  let bridge: { server: Server; port: number }
+  let bridge: { server: Server; port: number; token: string }
   try {
     bridge = await startBridge(win)
   } catch (err) {
@@ -211,7 +235,11 @@ async function openSession(
         ...extraServers,
         kadr: {
           command: 'node',
-          args: [join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'), String(bridge.port)]
+          args: [
+            join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'),
+            String(bridge.port),
+            bridge.token
+          ]
         }
       }
     }, null, 1)

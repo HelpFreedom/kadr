@@ -9,8 +9,12 @@ const { z } = require('zod')
 const http = require('http')
 
 const PORT = Number(process.argv[2])
+// Per-session secret for /eval. The editor generates it and passes it here
+// through the generated --mcp-config, so it never touches disk in a
+// world-readable place beyond that file; without it the bridge answers 403.
+const TOKEN = process.argv[3] || ''
 if (!PORT) {
-  console.error('usage: mcp-bridge.cjs <editor-bridge-port>')
+  console.error('usage: mcp-bridge.cjs <editor-bridge-port> <token>')
   process.exit(1)
 }
 
@@ -36,11 +40,20 @@ function editorEval(code) {
     const body = JSON.stringify({ code })
     const req = http.request(
       { host: '127.0.0.1', port: PORT, path: '/eval', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          'x-kadr-token': TOKEN
+        } },
       (res) => {
         let data = ''
         res.on('data', (c) => { data += c })
         res.on('end', () => {
+          if (res.statusCode === 403) {
+            reject(new Error('editor bridge rejected this session (stale token) — ' +
+              'reopen the Kadr terminal panel'))
+            return
+          }
           try {
             const r = JSON.parse(data)
             if (r.error) reject(new Error(r.error))

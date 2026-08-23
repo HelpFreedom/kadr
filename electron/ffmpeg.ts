@@ -227,43 +227,67 @@ export function measureLoudness(
   })
 }
 
+export interface PackedAlphaPlan {
+  /** false = keep the slower element-decode path for this source */
+  canPack: boolean
+  /** the matrix a browser decode of this source ends up using */
+  matrix: string
+  /** size the packed intermediate will reach, bytes per second of source */
+  bytesPerSecond: number
+}
+
 /**
- * Can this alpha source be packed as colour-over-matte for fast decoding?
- * Everything but full-range sources can: the packer converts the picture to
- * BT.709 limited, which is the one space Chromium hands to WebGL untouched.
+ * Everything requestDecoded needs to decide on packing a source as
+ * colour-over-matte, from ONE ffprobe.
+ *
+ * Every source but a full-range one can be packed: the packer converts the
+ * picture to BT.709 limited, the one space Chromium hands to WebGL untouched.
  * (Full-range YUV is rare in alpha footage and would need its own dance, so
  * it keeps the slower element-decode path — correct, just slow.)
  */
-export async function canPackAlpha(src: string): Promise<boolean> {
+export async function packedAlphaPlan(src: string): Promise<PackedAlphaPlan> {
   const t = await probeColorTags(src)
-  return t.range !== 'pc'
+  // The lossless intermediate grows with PIXELS, not with running time:
+  // measured 3.7 MB/s for 1080p60, i.e. ~0.030 bytes per source pixel. The
+  // disk check used to reserve a flat 9 MB/s, which happens to be that same
+  // 2.4× margin at 1080p60 and a serious UNDER-estimate at anything larger —
+  // 4K carries four times the pixels, so a long 4K source could pass the
+  // check and then run the volume dry mid-build. Keep the margin, follow the
+  // frame size. A source that would not probe is assumed to be 1080p60,
+  // exactly what the flat figure assumed.
+  const w = t.width || 1920
+  const h = t.height || 1080
+  const fps = t.fps || 60
+  return {
+    canPack: t.range !== 'pc',
+    // Untagged footage (Remotion's VP9 renders included) is read as BT.601 by
+    // the <video> pipeline — measured against known RGB: BT.709 turned pure
+    // red into (255, 36, 12).
+    matrix: t.matrix || 'bt601',
+    bytesPerSecond: w * h * fps * 0.075
+  }
 }
 
-/** The matrix a browser decode of this source ends up using. */
-export async function sourceMatrix(src: string): Promise<string> {
-  const t = await probeColorTags(src)
-  // Untagged footage (Remotion's VP9 renders included) is read as BT.601 by
-  // the <video> pipeline — measured against known RGB: BT.709 turned pure
-  // red into (255, 36, 12).
-  return t.matrix || 'bt601'
-}
-
-async function probeColorTags(src: string): Promise<{ matrix: string; range: string; height: number }> {
-  let height = 0
+async function probeColorTags(
+  src: string
+): Promise<{ matrix: string; range: string; width: number; height: number; fps: number }> {
   let s: Record<string, string> = {}
   try {
     const { stdout } = await execFileP(FFPROBE, [
       '-v', 'error', '-select_streams', 'v:0', '-print_format', 'json',
-      '-show_entries', 'stream=height,color_space,color_range', src
+      '-show_entries', 'stream=width,height,r_frame_rate,color_space,color_range', src
     ], { maxBuffer: 1024 * 1024 })
     s = (JSON.parse(stdout).streams || [])[0] || {}
-    height = Number(s.height) || 0
   } catch { /* fall through to the heuristic */ }
   const known = (v?: string) => (v && v !== 'unknown' && v !== 'reserved' ? v : '')
+  const [num, den] = String(s.r_frame_rate || '').split('/')
+  const fps = Number(num) / (Number(den) || 1)
   return {
     matrix: known(s.color_space),
     range: known(s.color_range) === 'pc' ? 'pc' : 'tv',
-    height
+    width: Number(s.width) || 0,
+    height: Number(s.height) || 0,
+    fps: Number.isFinite(fps) && fps > 0 ? fps : 0
   }
 }
 

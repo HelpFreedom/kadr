@@ -198,6 +198,17 @@ export function startExport(
     // contextIsolation off the frame buffers pass by reference (no copies).
     // Double buffer: fill one while ffmpeg still owns the other. Falls back
     // to main-side WS, then IPC.
+    // TWO is the measured optimum, not a placeholder. A buffer may only be
+    // refilled once its write has actually reached the pipe (see
+    // preload.rawEncodeFrame), so the ring depth is how far the loop may run
+    // ahead of ffmpeg, and the loop does spend ~4 ms per frame waiting on it.
+    // Deepening the ring does NOT recover that: the pipe is drained by libuv
+    // on this very thread, so extra buffers add no concurrency, only working
+    // set. Measured on a 1080p60 project, three alternating rounds each:
+    //   2 slots → 50.5 fps (read 14.3, encode 4.2)
+    //   3 slots → 45.7 fps (read 14.4, encode 6.2)
+    //   4 slots → 45.3 fps (read 12.8, encode 8.1)
+    // Pixels were identical at every depth; only the pacing changed.
     let rawDirect: string | null = null
     const slots: Uint8Array[] = []
     const slotPending: (Promise<void> | null)[] = [null, null]

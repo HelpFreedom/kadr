@@ -299,6 +299,9 @@ export function startExport(
       for (let k = 0; k < totalFrames; k++) {
         if (cancelled) throw new Error('cancelled')
         if (encodeError) throw encodeError
+        if (comp.contextLost()) {
+          throw new Error(`GPU context lost at frame ${k} — restart kadr and re-export`)
+        }
         // sample mid-frame to avoid cut-boundary ambiguity
         const t = span.start + (k + 0.5) / fps
         mark = performance.now()
@@ -462,6 +465,7 @@ export function startExport(
       try { encoder?.close() } catch { /* already closed */ }
       for (const src of sources.values()) src?.close()
       pool.dispose()
+      comp.dispose()
     }
   }
 

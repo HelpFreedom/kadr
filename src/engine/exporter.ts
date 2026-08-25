@@ -299,9 +299,10 @@ export function startExport(
       for (let k = 0; k < totalFrames; k++) {
         if (cancelled) throw new Error('cancelled')
         if (encodeError) throw encodeError
-        if (comp.contextLost()) {
-          throw new Error(`GPU context lost at frame ${k} — restart kadr and re-export`)
-        }
+        // a lost context makes every GL call a no-op — readPixels then leaves
+        // its buffer untouched and the run would finish "successfully" as a
+        // black file. Fail loudly instead.
+        if (comp.contextLost()) throw new Error(`GPU context lost at frame ${k} — restart Kadr and export again`)
         // sample mid-frame to avoid cut-boundary ambiguity
         const t = span.start + (k + 0.5) / fps
         mark = performance.now()
@@ -453,6 +454,8 @@ export function startExport(
         muxer!.finalize()
         await writeChain
       }
+      // the per-frame guard above cannot see a loss during the LAST frame
+      if (comp.contextLost()) throw new Error('GPU context lost while rendering the final frame — restart Kadr and export again')
       // hand off to ffmpeg in the main process (audio mix + mux);
       // further progress arrives via onExportProgress events
       await window.kadr.exportVideoDone()
@@ -465,7 +468,9 @@ export function startExport(
       try { encoder?.close() } catch { /* already closed */ }
       for (const src of sources.values()) src?.close()
       pool.dispose()
-      comp.dispose()
+      // the export canvas is detached and never reused, so its context can go
+      // now instead of waiting for GC (see Compositor.dispose)
+      try { comp.dispose() } catch { /* context already gone */ }
     }
   }
 

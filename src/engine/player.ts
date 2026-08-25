@@ -537,12 +537,17 @@ interface PlayerHooks {
   setPlayhead(t: number): void
   setPlaying(p: boolean): void
   setLoading(l: boolean): void
+  /** the GL context died / came back — the preview cannot draw in between */
+  setGpuLost(lost: boolean): void
   duration(): number
 }
 
 /** Live preview: master clock + media element sync + GPU composite. */
 export class Player {
   private comp: Compositor | null = null
+  private canvas: HTMLCanvasElement | null = null
+  private onLost: ((e: Event) => void) | null = null
+  private onRestored: (() => void) | null = null
   private pool = new MediaPool({ audio: true, proxy: true })
   private raf = 0
   private gcCounter = 0
@@ -575,6 +580,41 @@ export class Player {
 
   attach(canvas: HTMLCanvasElement) {
     this.comp = new Compositor(canvas)
+    // A GPU reset (driver hiccup, another app eating VRAM, Chromium force-losing
+    // the oldest context once a renderer holds 16) turns every GL call into a
+    // no-op. Left alone the preview simply goes black and STAYS black with
+    // nothing to explain it, so: ask for the context back, rebuild the
+    // compositor when it returns, and tell the UI while it is gone.
+    this.canvas = canvas
+    // grab the restore handle NOW, while the context is alive: getExtension
+    // returns null on a lost context — exactly when it would be needed
+    const loseExt = canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context') ?? null
+    this.onLost = (e: Event) => {
+      e.preventDefault() // without this Chromium never offers a restore
+      this.comp = null
+      this.hooks.setGpuLost(true)
+      // the restore must NOT be asked for from inside the lost event — Chromium
+      // ignores it there (measured: the context never came back). Ask on the
+      // next turn; if the GPU cannot give it back, the banner stays up.
+      setTimeout(() => {
+        try {
+          loseExt?.restoreContext()
+        } catch { /* nothing more we can do */ }
+      }, 0)
+    }
+    this.onRestored = () => {
+      // the canvas keeps the same context object, but every program, buffer
+      // and texture in it is gone — a fresh Compositor rebuilds them, and its
+      // texture cache starts empty so sources re-upload on the next draw
+      try {
+        this.comp = new Compositor(canvas)
+        this.hooks.setGpuLost(false)
+      } catch (err) {
+        console.error('preview: GL context restored but the compositor failed to rebuild:', err)
+      }
+    }
+    canvas.addEventListener('webglcontextlost', this.onLost)
+    canvas.addEventListener('webglcontextrestored', this.onRestored)
     let lastErrLog = 0
     const loop = (ts: number) => {
       // one bad frame (corrupt clip data, GL hiccup) must never kill the
@@ -595,7 +635,15 @@ export class Player {
 
   detach() {
     cancelAnimationFrame(this.raf)
+    if (this.canvas && this.onLost) this.canvas.removeEventListener('webglcontextlost', this.onLost)
+    if (this.canvas && this.onRestored) this.canvas.removeEventListener('webglcontextrestored', this.onRestored)
+    this.canvas = null
+    this.onLost = null
+    this.onRestored = null
     this.pool.dispose()
+    // NB the compositor is NOT disposed: the preview canvas is reused (React
+    // remounts it in dev), and Compositor.dispose kills the context a canvas
+    // hands out forever — the next mount would get a dead one
     this.comp = null
   }
 

@@ -59,6 +59,11 @@ export async function snapshotFrame(opts: {
 } = {}): Promise<SnapshotResult> {
   const st = () => useEditor.getState()
   if (!previewCanvas) throw new Error('preview is not mounted')
+  // the canvas keeps its last good frame (preserveDrawingBuffer), so a lost
+  // context would hand back that stale picture for every requested time
+  if (previewCanvas.getContext('webgl2')?.isContextLost()) {
+    throw new Error('GPU context lost — the preview cannot be captured until it is back')
+  }
 
   let dir = opts.dir ?? null
   if (!dir) {

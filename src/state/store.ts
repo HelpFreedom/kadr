@@ -382,6 +382,8 @@ interface EditorState {
   playhead: number
   playing: boolean
   previewLoading: boolean
+  /** the preview's GL context died (GPU reset); nothing can be drawn until it is back */
+  previewGpuLost: boolean
   /** timeline pixels per second */
   zoom: number
   exportOpen: boolean
@@ -467,6 +469,7 @@ interface EditorState {
   setPlayhead(t: number): void
   setPlaying(p: boolean): void
   setPreviewLoading(l: boolean): void
+  setPreviewGpuLost(lost: boolean): void
   setZoom(z: number): void
   setExportOpen(open: boolean): void
   setRange(r: TimeRange | null): void
@@ -481,6 +484,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   playhead: 0,
   playing: false,
   previewLoading: false,
+  previewGpuLost: false,
   zoom: 60,
   exportOpen: false,
   range: null,
@@ -1145,6 +1149,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setPlayhead: (t) => set({ playhead: Math.max(0, t) }),
   setPlaying: (playing) => set({ playing }),
   setPreviewLoading: (previewLoading) => set({ previewLoading }),
+  setPreviewGpuLost: (previewGpuLost) => set({ previewGpuLost }),
   setZoom: (zoom) => set({ zoom: Math.min(MAX_ZOOM, Math.max(4, zoom)) }),
   setExportOpen: (exportOpen) => set({ exportOpen }),
   setRange: (range) =>

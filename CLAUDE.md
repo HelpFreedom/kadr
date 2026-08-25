@@ -154,6 +154,19 @@ mixes audio and muxes/transcodes per preset.
   (`startRead`/`finishRead` through a pixel-pack buffer). `holdSources`
   keeps a dynamic texture from re-uploading once per motion-blur
   sub-sample.
+  CONTEXT LIFECYCLE: `dispose()` frees the GL resources and drops the
+  context — ONLY for a compositor on a throwaway canvas (the exporter
+  builds one per run). A canvas hands out the SAME context object
+  forever, so disposing the preview's compositor would black the preview
+  out for good; `Player.detach` therefore leaves it alone. `contextLost()`
+  exists because a lost context makes every GL call a silent no-op —
+  `readPixels` leaves its buffer untouched, so an export would finish
+  "successfully" as a black file. The exporter checks per frame and after
+  the last one; the preview asks for the context back on
+  `webglcontextlost` and rebuilds on `webglcontextrestored`. Two traps
+  worth knowing: `getExtension` returns null on a LOST context (take the
+  `WEBGL_lose_context` handle while it is alive), and `restoreContext()`
+  is ignored when called from inside the lost event — defer it a turn.
 - `src/gl/transitions.ts` / `src/gl/edges.ts` / `src/gl/glow.ts` — GLSL
   registries: 14 overlap transitions, 12 edge (tip) transitions, the smoky
   outer-glow effect.

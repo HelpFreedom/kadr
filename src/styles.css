@@ -1434,3 +1434,11 @@ button.danger:hover { background: #944; }
 /* neon wave dialog: sound-source radios stacked */
 .nw-sources { display: flex; flex-direction: column; gap: 4px; }
 .nw-sources label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+
+/* preview: a lost GL context must say so instead of showing black */
+.preview-gpu-lost {
+  position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; text-align: center;
+  padding: 0 24px; background: rgba(0, 0, 0, 0.72);
+  color: var(--warn, #ffb454); font-size: 13px; line-height: 1.5;
+}

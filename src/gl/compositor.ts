@@ -957,32 +957,64 @@ export class Compositor {
     return entry
   }
 
-  /** A lost context turns every GL call into a silent no-op — callers that
-      read pixels back must fail loudly instead of producing black frames. */
+  /**
+   * Has the GL context gone away (GPU reset, driver hiccup, or Chromium
+   * force-losing the oldest context once a renderer holds 16)? Every call on a
+   * lost context is a SILENT no-op: `readPixels` leaves its buffer untouched,
+   * so a caller that does not ask ships black frames as if all were well.
+   */
   contextLost(): boolean {
     return this.gl.isContextLost()
   }
 
-  /** Release every GPU resource and the context itself. Export compositors
-      are created per run; Chromium caps live WebGL contexts per renderer
-      and each one pins command-buffer memory in the GPU process. */
+  /**
+   * Release every GPU resource and drop the context.
+   *
+   * ONLY for a compositor on a throwaway canvas — the export path builds one
+   * per run. This ends with `loseContext()`, and a canvas hands out the SAME
+   * context object forever, so calling it on the preview's compositor would
+   * leave the preview permanently black.
+   *
+   * Without it the export's context lived on until GC got round to the
+   * detached canvas: measured up to 4 stranded at once across 25 exports, each
+   * pinning command-buffer memory in the GPU process, and the 16-context cap
+   * is enforced by force-losing the OLDEST one — which is the preview's.
+   */
   dispose() {
     const gl = this.gl
-    for (const { tex } of this.textures.values()) gl.deleteTexture(tex)
-    this.textures.clear()
-    for (const o of this.overlays) {
-      gl.deleteFramebuffer(o.fbo)
-      gl.deleteTexture(o.tex)
-    }
-    this.overlays = []
-    if (this.fx) {
-      for (const o of [this.fx.layer, this.fx.field, this.fx.blur]) {
+    if (!gl.isContextLost()) {
+      for (const entry of this.textures.values()) gl.deleteTexture(entry.tex)
+      for (const o of this.overlays) {
         gl.deleteFramebuffer(o.fbo)
         gl.deleteTexture(o.tex)
       }
-      this.fx = null
+      if (this.fx) {
+        for (const o of [this.fx.layer, this.fx.field, this.fx.blur]) {
+          gl.deleteFramebuffer(o.fbo)
+          gl.deleteTexture(o.tex)
+        }
+      }
+      for (const b of this.pbos) if (b) gl.deleteBuffer(b)
+      gl.deleteBuffer(this.vbo)
+      for (const t of this.transProgs.values()) gl.deleteProgram(t.prog)
+      for (const prog of [this.prog, this.blitProg, this.blurProg?.prog, this.fieldProg?.prog, this.glowProg?.prog]) {
+        if (prog) gl.deleteProgram(prog)
+      }
+      // the extension is what actually frees the context; the deletes above
+      // only make the release prompt where it is missing
+      gl.getExtension('WEBGL_lose_context')?.loseContext()
     }
-    gl.getExtension('WEBGL_lose_context')?.loseContext()
+    this.textures.clear()
+    this.transProgs.clear()
+    this.overlays = []
+    this.overlaySize = 0
+    this.fx = null
+    this.fxSize = 0
+    this.pbos = [null, null]
+    this.blitProg = null
+    this.blurProg = null
+    this.fieldProg = null
+    this.glowProg = null
   }
 }
 

@@ -43,6 +43,10 @@ interface Session {
 }
 
 let session: Session | null = null
+/** bumped by every open/close request; a spawn whose generation is stale is abandoned */
+let sessionGen = 0
+/** open/close are serialized through this chain — see openSession */
+let sessionChain: Promise<unknown> = Promise.resolve()
 
 /**
  * Kill leftovers of previous editor sessions: any process whose cmdline
@@ -202,13 +206,13 @@ async function userConfig(): Promise<ClaudeConfig> {
   }
 }
 
-async function openSession(
+async function spawnSession(
   win: BrowserWindow,
   cols: number,
   rows: number,
   cwd: string | null
 ): Promise<{ ok: boolean; port?: number; error?: string }> {
-  if (session) closeSession()
+  killSession() // a reopen without a close in between
   const cfg = await userConfig()
   const cmdName = process.env.KADR_CLAUDE_CMD || cfg.command || 'claude'
   const bin = (await which(cmdName)) ?? cmdName
@@ -270,17 +274,24 @@ async function openSession(
       cwd: dir,
       env: { ...process.env, ...cfg.env } as Record<string, string>
     })
-    p.onData((data) => win.webContents.send('claude:data', data))
+    // publish BEFORE wiring the handlers: data emitted between spawn and the
+    // assignment would otherwise be dropped by the identity guard below
+    const mine: Session = { pty: p, server: bridge.server, port: bridge.port }
+    session = mine
+    // both handlers are keyed to THIS session: a pty that outlived its panel
+    // (a kill that lost a race, say) must never paint into the live terminal
+    p.onData((data) => {
+      if (session === mine) win.webContents.send('claude:data', data)
+    })
     p.onExit(({ exitCode }) => {
       // only announce deaths of the CURRENT session: deliberate closes
-      // (panel toggle, StrictMode remount) null `session` before killing
-      if (session?.pty === p) {
+      // (panel toggle, StrictMode remount) drop `session` before killing
+      if (session === mine) {
         win.webContents.send('claude:exit', exitCode)
-        session.server.close()
+        mine.server.close()
         session = null
       }
     })
-    session = { pty: p, server: bridge.server, port: bridge.port }
     return { ok: true, port: bridge.port }
   } catch (err) {
     bridge.server.close()
@@ -288,7 +299,7 @@ async function openSession(
   }
 }
 
-function closeSession() {
+function killSession() {
   if (!session) return
   const s = session
   session = null
@@ -300,6 +311,43 @@ function closeSession() {
     try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
   }, 1500)
   s.server.close()
+}
+
+/**
+ * Open and close run ONE AT A TIME, and every request takes a generation.
+ *
+ * `spawnSession` is async (config read, `which`, the node-pty import) while a
+ * close is instant, so a close that overtook an in-flight open used to find
+ * `session` still null, do nothing, and let the pending spawn install itself
+ * afterwards — an orphaned claude nobody could reach or kill. React StrictMode
+ * turned that race into the norm: it mounts ClaudePanel twice in dev
+ * (mount → cleanup → mount), so every panel open spawned two ptys, both
+ * writing into the same 'claude:data' channel — two interleaved sessions in
+ * one terminal (issue #11). A fast open→close leaked one the same way in any
+ * build. Serializing fixes the leak; the generation also lets a spawn that has
+ * already been superseded be skipped instead of started and killed.
+ */
+function openSession(
+  win: BrowserWindow,
+  cols: number,
+  rows: number,
+  cwd: string | null
+): Promise<{ ok: boolean; port?: number; error?: string }> {
+  const gen = ++sessionGen
+  const job = sessionChain.then(() =>
+    gen === sessionGen
+      ? spawnSession(win, cols, rows, cwd)
+      : { ok: false, error: 'superseded' }
+  )
+  sessionChain = job.catch(() => undefined)
+  return job
+}
+
+function closeSession(): Promise<void> {
+  sessionGen++ // abandon anything still in flight
+  const job = sessionChain.then(killSession)
+  sessionChain = job.catch(() => undefined)
+  return job
 }
 
 /**

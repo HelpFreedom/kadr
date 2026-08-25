@@ -14,6 +14,10 @@ let rawEnc: ChildProcess | null = null
 let rawEncErr = ''
 let rawEncExit: Promise<void> | null = null
 
+// capability token for the kadr:// media protocol (issue #13). Sync on purpose:
+// fileUrl must work from the renderer's very first frame.
+const MEDIA_TOKEN: string = ipcRenderer.sendSync('media:token')
+
 const api: KadrApi = {
   rawEncodeStart: (o) => {
     const out = join(tmpdir(), `kadr-export-raw-${Date.now()}.mp4`)
@@ -75,7 +79,9 @@ const api: KadrApi = {
     // the element never loads and the preview spins forever (issue #6)
     const posix = path.replace(/\\/g, '/')
     const abs = posix.startsWith('/') ? posix : `/${posix}`
-    return `kadr://media${encodeURI(abs).replace(/[?#]/g, encodeURIComponent)}`
+    // ?t= is the capability token gating the protocol (issue #13, see main.ts);
+    // ? and # are escaped above, so the query can only be this one
+    return `kadr://media${encodeURI(abs).replace(/[?#]/g, encodeURIComponent)}?t=${MEDIA_TOKEN}`
   },
   pathForFile: (f) => {
     try { return webUtils.getPathForFile(f) } catch { return '' }

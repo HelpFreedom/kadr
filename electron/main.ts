@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'e
 import { join, dirname, basename } from 'path'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { createHash } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import {
   probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, packedAlphaPlan,
@@ -141,6 +141,26 @@ function streamBody(stream: ReturnType<typeof createReadStream>): ReadableStream
   })
 }
 
+/**
+ * kadr:// is a privileged scheme (bypassCSP + CORS + `Access-Control-Allow-Origin: *`,
+ * all of which the media elements need — without them Chromium taints their
+ * pixels and preview/export go black, see the note at the top), and its handler
+ * streams any absolute path. That is fine for this editor's own renderer, which
+ * holds node access anyway — but the fragment dev server serves pages on ANOTHER
+ * origin (the <iframe> preview, the offscreen capture window) whose code is
+ * written by hand, by Claude, or arrives inside somebody else's project, and
+ * which has no such access. Measured before this lock: such a page could
+ * `fetch('kadr://media/etc/hostname')` and read the reply (issue #13).
+ *
+ * So every URL carries a per-run capability token that only the preload knows:
+ * a page that cannot read the privileged renderer's JS cannot forge one.
+ * A directory allowlist was considered and rejected — media legitimately lives
+ * wherever the user picked it, and a project loaded through kadr_eval never
+ * passes main at all, so the allowlist would have had silent holes exactly
+ * where a miss means a black preview.
+ */
+const MEDIA_TOKEN = randomBytes(24).toString('hex')
+
 function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   const stat = statSync(filePath)
   const size = stat.size
@@ -172,6 +192,9 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
 app.whenReady().then(() => {
   protocol.handle('kadr', (request) => {
     const url = new URL(request.url)
+    if (url.searchParams.get('t') !== MEDIA_TOKEN) {
+      return new Response('forbidden', { status: 403 })
+    }
     let filePath = decodeURIComponent(url.pathname)
     // Windows drive paths travel as /D:/dir/file — drop the URL's leading
     // slash so fs gets D:/dir/file (node accepts forward slashes there)
@@ -533,6 +556,7 @@ function registerIpc() {
     return r.filePaths
   })
 
+  ipcMain.on('media:token', (e) => { e.returnValue = MEDIA_TOKEN })
   ipcMain.handle('media:probe', (_e, path: string) => probeMedia(path))
 
   // sanitized basename + MIME-derived extension for downloaded/pasted media

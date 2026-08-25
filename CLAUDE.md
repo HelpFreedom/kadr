@@ -40,7 +40,16 @@ mixes audio and muxes/transcodes per preset.
   The scheme MUST stay registered with `corsEnabled: true` (+ ACAO:*
   responses and `crossOrigin='anonymous'` on media elements incl. Image)
   — modern Chromium otherwise taints kadr:// pixels and preview/export go
-  black. Startup sweeps leftover helper processes; shutdown force-exits
+  black. Those same privileges (plus `bypassCSP`) make the scheme a
+  file-read capability, so every URL carries a per-run token: `fileUrl` in
+  the preload appends `?t=<48 hex>` (fetched once over a sync `media:token`
+  IPC) and the handler 403s anything else. Without it a page served by the
+  FRAGMENT dev server — another origin, no node access, i.e. composition code
+  written by hand, by an assistant, or arriving inside somebody else's
+  project — could read any file the user can. A directory allowlist was
+  considered and rejected: media lives wherever the user picked it, and a
+  project loaded through `kadr_eval` never passes main at all, so the
+  allowlist would have had holes exactly where a miss means a black preview. Startup sweeps leftover helper processes; shutdown force-exits
   (window-all-closed → app.exit failsafe, render-process-gone → exit).
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
@@ -55,6 +64,15 @@ mixes audio and muxes/transcodes per preset.
   `userData/claude-env.json`, extra MCP servers via
   `userData/claude-mcp.json`; `sweepStaleSessions()` clears leftovers of
   hard-killed runs at startup.
+  Open and close are SERIALIZED through one promise chain and carry a
+  generation: spawning is async (config read, `which`, the node-pty import)
+  while a close is instant, so a close that overtakes an in-flight open would
+  otherwise find no session, do nothing, and let the pending spawn install
+  itself afterwards — an orphan nobody can reach or kill. React StrictMode
+  turns that race into the norm in dev (it mounts the panel twice), which used
+  to give every panel open two ptys writing into one terminal. Both pty
+  handlers are keyed to their own session object, so a pty that outlived its
+  panel can never paint into the live terminal.
   /eval IS AUTHENTICATED and must stay that way — it runs arbitrary JS in
   the page, and the page holds `window.kadr` (file writes, pty spawn), so a
   bare localhost socket would be reachable by anything on the machine and by

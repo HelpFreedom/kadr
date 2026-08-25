@@ -956,6 +956,34 @@ export class Compositor {
     }
     return entry
   }
+
+  /** A lost context turns every GL call into a silent no-op — callers that
+      read pixels back must fail loudly instead of producing black frames. */
+  contextLost(): boolean {
+    return this.gl.isContextLost()
+  }
+
+  /** Release every GPU resource and the context itself. Export compositors
+      are created per run; Chromium caps live WebGL contexts per renderer
+      and each one pins command-buffer memory in the GPU process. */
+  dispose() {
+    const gl = this.gl
+    for (const { tex } of this.textures.values()) gl.deleteTexture(tex)
+    this.textures.clear()
+    for (const o of this.overlays) {
+      gl.deleteFramebuffer(o.fbo)
+      gl.deleteTexture(o.tex)
+    }
+    this.overlays = []
+    if (this.fx) {
+      for (const o of [this.fx.layer, this.fx.field, this.fx.blur]) {
+        gl.deleteFramebuffer(o.fbo)
+        gl.deleteTexture(o.tex)
+      }
+      this.fx = null
+    }
+    gl.getExtension('WEBGL_lose_context')?.loseContext()
+  }
 }
 
 function hexToRgb(hex: string | undefined): [number, number, number] {

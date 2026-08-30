@@ -119,6 +119,26 @@ npm install        # postinstall пересоберёт node-pty под Electron
 npm run dev
 ```
 
+> **Windows: ошибка MSB8040 / «Spectre» при `npm install`.**
+> `node-pty` при сборке из исходников требует библиотеки Spectre-митигации
+> MSVC. Если в Visual Studio не установлен компонент
+> «MSVC v143 – C++ x64/x86 **Spectre-mitigated libs**», `electron-rebuild`
+> падает (ошибка MSB8040). Проект решает это автоматически: `postinstall`
+> перед пересборкой выключает `SpectreMitigation` в `node-pty/binding.gyp`
+> и `deps/winpty/src/winpty.gyp` (см. `scripts/fix-spectre.js`). Если вы
+> собираете сам модуль вручную — либо поставьте Spectre-libs через
+> «Visual Studio Installer → Modify → Individual components», либо
+> установите в vcxproj `<SpectreMitigation>false</SpectreMitigation>`.
+>
+> **Windows: пустое окно и `ERR_CONNECTION_REFUSED` при `npm run dev`.**
+> В Node ≥ 17 имя `localhost` разрешается в IPv6 `[::1]` в первую очередь,
+> поэтому dev-сервер Vite мог слушать только IPv6, в то время как
+> рендерер Electron ходил в `127.0.0.1` — окно оставалось пустым.
+> Проект уже фиксирует хост: `server.host: '127.0.0.1'` в секции `renderer`
+> файла `electron.vite.config.ts`. Если вы добавляли свой dev-сервер или
+> меняли конфиг — убедитесь, что он слушает `127.0.0.1` (IPv4), а не
+> только `[::1]`.
+
 Импортируйте медиа, монтируйте, жмите «Экспорт». Для ИИ-ассистента
 нажмите 🤖 (CLI `claude` должен быть установлен и залогинен). Если для
 Claude/npm нужен прокси — создайте `~/.config/kadr/claude-env.json`:

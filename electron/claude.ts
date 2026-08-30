@@ -11,7 +11,8 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import type { IPty } from 'node-pty'
 
-// The session inherits this process's environment. Anything extra the
+// The session inherits this process's environment MINUS the markers of any
+// Claude session that launched the editor (see SESSION_MARKERS). Anything extra the
 // user's claude needs (proxies, custom PATH…) plus command/args overrides
 // live in userData/claude-env.json: { "command": "...", "args": [...],
 // "env": { "HTTPS_PROXY": "...", ... } }. If you proxy claude, exclude
@@ -68,7 +69,8 @@ export async function sweepStaleSessions(): Promise<number> {
     join(app.getPath('userData'), 'reversed'),
     join(app.getPath('userData'), 'decoded'),
     join(app.getPath('userData'), 'fragment-renders'),
-    join(app.getAppPath(), 'scripts', 'transcribe.py')
+    join(app.getAppPath(), 'scripts', 'transcribe.py'),
+    join(app.getAppPath(), 'scripts', 'ttsqc_run.py')
   ]
   let entries: string[]
   try { entries = await fs.readdir('/proc') } catch { return 0 } // non-Linux
@@ -191,6 +193,52 @@ function which(cmd: string): Promise<string | null> {
   })
 }
 
+/**
+ * Markers a Claude Code session puts in the environment of everything it
+ * spawns. They have to go before the panel's own session starts.
+ *
+ * If the editor was launched FROM a Claude session — which is exactly what
+ * happens when an agent starts it to test something — Electron inherits
+ * `CLAUDE_CODE_CHILD_SESSION=1`, node-pty passes it on, and the panel's claude
+ * decides it is a nested session: it prints «Transcript saving is off —
+ * inherited CLAUDE_CODE_CHILD_SESSION marker» and keeps no history. The panel
+ * is not a nested session, though. The user opens it by hand from the editor's
+ * UI, and its transcripts are theirs to keep; that it happened to be started
+ * through another session is an accident of process lineage, nothing more.
+ *
+ * The list is explicit on purpose. Dropping everything that matches CLAUDE_*
+ * would also take configuration the user may legitimately set for their own
+ * CLI (CLAUDE_CONFIG_DIR being the dangerous one — it decides where the
+ * credentials live), and a panel that cannot authenticate is a far worse
+ * failure than a missing transcript. A marker added by a future version simply
+ * has to be added here as well.
+ */
+const SESSION_MARKERS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_BRIDGE_SESSION',
+  'CLAUDE_PID',
+  'CLAUDE_EFFORT'
+]
+
+/**
+ * The environment the panel's session runs in: ours, minus the markers of the
+ * session that happened to launch the editor, plus whatever the user put in
+ * claude-env.json (their own overrides always win — including, if they ever
+ * want one back, a marker).
+ */
+function sessionEnv(extra?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = { ...process.env } as Record<string, string>
+  for (const key of SESSION_MARKERS) delete env[key]
+  return { ...env, ...extra }
+}
+
 interface ClaudeConfig {
   command?: string
   args?: string[]
@@ -272,7 +320,7 @@ async function spawnSession(
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
       cwd: dir,
-      env: { ...process.env, ...cfg.env } as Record<string, string>
+      env: sessionEnv(cfg.env)
     })
     // publish BEFORE wiring the handlers: data emitted between spawn and the
     // assignment would otherwise be dropped by the identity guard below

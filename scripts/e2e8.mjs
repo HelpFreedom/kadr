@@ -186,9 +186,8 @@ check('link toggle at clip start snapshots keyframes at exactly t=0',
 
 // 6. lockX: drag moves only Y
 await evalJs(`(() => {
-  const btns = [...document.querySelectorAll('.anim-toolbar button')]
-  const lockBtn = btns.find(b => b.textContent.trim() === 'X')
-  lockBtn.click()
+  // the toolbar is icon-driven now; data-act is the stable handle
+  document.querySelector('.anim-toolbar button[data-act="lock-x"]').click()
   return 1
 })()`)
 await new Promise((r) => setTimeout(r, 200))
@@ -213,9 +212,8 @@ check('lock X: drag changes only Y', Math.abs(after.x - before.x) < 0.01 && Math
 
 // 7. snap toggle off: tiny offset stays (no snap back to 0)
 await evalJs(`(() => {
-  const btns = [...document.querySelectorAll('.anim-toolbar button')]
-  btns.find(b => b.textContent.includes('🔒X')).click() // unlock X
-  btns.find(b => b.textContent.includes('🧲')).click()  // snap off
+  document.querySelector('.anim-toolbar button[data-act="lock-x"]').click() // unlock X
+  document.querySelector('.anim-toolbar button[data-act="snap"]').click()   // snap off
   const st = () => window.kadrEditor.useEditor.getState()
   const c = st().project.tracks.find(t => t.name === 'V1').clips[0]
   // reset x to static 0 for a clean check

@@ -204,6 +204,10 @@ export interface Project {
   texts?: TextDoc[]
   /** free-floating timeline markers (M key / addMarker), track-independent */
   markers?: TimelineMarker[]
+  /** synthesised voice-overs: script, settings and detector state per asset */
+  voiceRuns?: VoiceRun[]
+  /** defect regions found in a voice-over, or placed there by the user */
+  defects?: AudioDefect[]
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +333,417 @@ export interface EnvelopeRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Text to speech (ElevenLabs)
+
+/**
+ * Synthesis parameters. There is deliberately NO api key field: the key lives
+ * in the main process only (electron/tts.ts) and never reaches the renderer,
+ * which is scriptable through kadr_eval.
+ */
+export interface TtsParams {
+  voiceId: string
+  modelId: string
+  stability: number
+  similarityBoost: number
+  style?: number
+  speakerBoost?: boolean
+  /** ElevenLabs' own `speed` (0.7-1.2) - NOT the atempo pass below */
+  speed?: number
+  /** requested container/rate, e.g. 'mp3_44100_128' */
+  outputFormat?: string
+}
+
+/** Everything the module remembers between sessions - the key excepted. */
+export interface TtsSettings extends TtsParams {
+  /** post-synthesis speed-up (the atempo=1.1 of the user's script); 1 = off */
+  tempo: number
+  tempoEnabled: boolean
+  /** run the defect detector after synthesis */
+  defectCheck: boolean
+  /** regenerate a phrase as soon as the user confirms it is a defect */
+  regenerateOnConfirm: boolean
+  /** python >= 3.11 with torch/whisper for the detector; '' = built-in default */
+  ttsqcPython: string
+  /** outbound proxy override; '' = take HTTPS_PROXY from the environment */
+  proxy: string
+}
+
+/**
+ * A synthesised voice-over: which asset holds it, the exact script behind it,
+ * and everything needed to regenerate one phrase of it identically later.
+ */
+export interface VoiceRun {
+  id: string
+  /** the audio asset; a splice rewrites this file and swaps the id */
+  assetId: string
+  /** the exact text that was sent to TTS, on disk */
+  scriptPath: string
+  /** sha1 of that file: ttsqc word indices are valid only while it matches */
+  scriptHash: string
+  /** detector run directory (<userData>/ttsqc-runs/...), once it has run */
+  runDir?: string
+  duration: number
+  /** ttsqc AnalysisResult.trust / .stats, kept verbatim */
+  trust?: number
+  stats?: Record<string, unknown>
+  tts?: TtsParams
+  /** per-chunk ElevenLabs request ids, for previous_request_ids stitching */
+  chunkRequestIds?: string[]
+  /**
+   * Speed-up applied to THIS file (1 = none). A regenerated phrase must be
+   * sped up by the same factor or the tempo jumps mid-sentence, so it is read
+   * from here and never from the current settings.
+   */
+  tempo: number
+  createdAt: number
+}
+
+/** How a phrase boundary was found; decides the crossfade and how much to trust it. */
+export type CutKind = 'silence' | 'gap' | 'fallback' | 'fileStart' | 'fileEnd'
+
+/**
+ * The stretch of audio a defect would be regenerated as: whole sentences, cut
+ * in the middle of the silence around them.
+ *
+ * NOT ttsqc's `play` span — that one is padded, capped at 12 s and sometimes
+ * replaced outright by "defect ±1 s"; it is a listening window, and cutting on
+ * it would splice mid-word.
+ */
+export interface DefectPhrase {
+  /** cut points, SOURCE seconds of the voice-over asset, millisecond precision */
+  t0: number
+  t1: number
+  /** ttsqc sentence numbers, inclusive */
+  sentFrom: number
+  sentTo: number
+  /** script word indices, [from, to) */
+  wordFrom: number
+  wordTo: number
+  /** character range into the script FILE — the exact text to re-synthesise */
+  charFrom: number
+  charTo: number
+  text: string
+  cut: [CutKind, CutKind]
+}
+
+/** proposed → the user judges → confirmed/rejected → regenerated (done/failed).
+    There is deliberately no persisted 'regenerating': after a crash it would be
+    a lie. Work in flight lives in useVoiceUi.busy instead. */
+export type DefectState = 'proposed' | 'confirmed' | 'rejected' | 'done' | 'failed'
+
+/**
+ * One suspected defect in a voice-over.
+ *
+ * Times are SOURCE seconds of `assetId`, not timeline seconds: clips get moved,
+ * trimmed, split and rippled, and a timeline number would be wrong after the
+ * first of those. Binding to the asset also means a regeneration — which
+ * rewrites the file — is obliged to fix every clip that uses it.
+ */
+export interface AudioDefect {
+  /** Kadr's own id; the only key the UI, undo and IPC use */
+  id: string
+  runId: string
+  assetId: string
+  origin: 'detector' | 'user'
+  /** ttsqc's Defect.id ('d007') — UNIQUE ONLY WITHIN its run, never a key */
+  detectorId?: string
+  cls?: string
+  tier?: string
+  confidence?: number
+  /** ttsqc's real primary key: [lo, hi) script word indices, hi===lo = insertion.
+      Survives regeneration, unlike every timecode. */
+  words?: [number, number]
+  evidence?: Record<string, unknown>
+  text?: string
+  contextBefore?: string
+  contextAfter?: string
+  /** ttsqc's `play` span verbatim — verdicts.json must carry exactly this or
+      the training matcher loses its `play` branch */
+  play?: [number, number]
+  /** the defect itself, source seconds */
+  src: [number, number]
+  phrase: DefectPhrase
+  state: DefectState
+  note?: string
+  attempts?: number
+  /** asset produced by the splice that fixed it */
+  resultAssetId?: string
+  judgedAt?: number
+}
+
+/** One ttsqc finding as it comes out of the driver: the detector's own JSON
+    (snake_case, `class` not `cls` — its to_json() renames it) plus our phrase. */
+export interface RawDefect {
+  id: string
+  class: string
+  tier: string
+  confidence: number
+  words: [number, number]
+  audio: [number, number]
+  play: [number, number]
+  text: string
+  context_before: string
+  context_after: string
+  evidence: Record<string, unknown>
+  phrase: DefectPhrase
+}
+
+/** Re-synthesis of ONE phrase, for splicing back into a voice-over. */
+export interface PhraseSynthRequest {
+  text: string
+  outPath: string
+  params: TtsParams
+  /** the speed-up of the FILE being patched — never the current setting, or the
+      tempo jumps mid-sentence */
+  tempo: number
+  /** script around the phrase: conditions the intonation without being spoken */
+  previousText?: string
+  nextText?: string
+  /** stronger continuity when the original was synthesised in chunks */
+  previousRequestIds?: string[]
+  /** a fresh take needs a fresh seed on every attempt */
+  seed?: number
+  /**
+   * How much silence the patch must carry at each edge, seconds.
+   *
+   * Measured from the ORIGINAL around its cut points, not chosen: the pause at
+   * a sentence boundary was 76 ms on a real voice-over, and a patch that ended
+   * right after its last word swallowed most of it. Too much silence is
+   * trimmed, too little is padded.
+   */
+  keepLead?: number
+  keepTail?: number
+  /** proxy for the API call; '' = take HTTPS_PROXY from the environment */
+  proxy?: string
+}
+
+export interface PhraseSynthResult {
+  path: string
+  duration: number
+  requestId: string
+  /** what the guard noticed but did not consider fatal */
+  warnings: string[]
+}
+
+/** One replaced stretch inside a splice. */
+export interface SpliceUnit {
+  /** cut points in the ORIGINAL file, source seconds */
+  cut0: number
+  cut1: number
+  /** the new audio to put between them */
+  patchPath: string
+  /** level correction for the patch, dB */
+  gainDb: number
+  /** crossfade length at both seams, seconds */
+  fade: number
+}
+
+export interface SpliceRequest {
+  src: string
+  out: string
+  units: SpliceUnit[]
+}
+
+export interface SpliceResult {
+  path: string
+  /** MEASURED, never computed: resampling and mp3 padding shift it by ms */
+  duration: number
+  /**
+   * Seam quality. `step` is the biggest sample-to-sample jump AT the joint and
+   * `stepAround` the biggest in the second around it — a click is when the
+   * joint is the worse of the two. `jumpDb` is the level change, informational
+   * only: a seam at a sentence boundary swings 20 dB even when untouched.
+   */
+  seams: Array<{ at: number; jumpDb: number; step: number; stepAround: number
+                 peakAround: number; clean: boolean }>
+}
+
+/** One row of the training corpus, in ttsqc's own verdict format.
+    `t0/t1` MUST be the detector's `play` span verbatim: train._same matches on
+    `play` or `audio`, and substituting our cut points would break that branch. */
+export interface VerdictRow {
+  id: string
+  t0: number
+  t1: number
+  a0: number
+  a1: number
+  verdict: 'yes' | 'no' | null
+}
+
+/** A defect the user pointed at themselves. Kept in a SEPARATE file: ttsqc
+    drops rows that match no flag, and once they outnumber the matching ones it
+    discards the ENTIRE file, genuine labels included (`bestn < len(rows) * 0.5`,
+    train.py:134). A session with many own marks and few rejections hits that
+    easily — measured: 20 of 40 still passes, 21 voids everything. */
+export interface UserMarkRow {
+  id: string
+  a0: number
+  a1: number
+  words?: [number, number]
+}
+
+export interface VoiceVerdictsRequest {
+  runDir: string
+  verdicts: VerdictRow[]
+  marks: UserMarkRow[]
+  /** длительность файла, в координатах которого пришли a0/a1: по ней main
+      узнаёт, какую версию разбора они описывают, и переводит их обратно */
+  audioDuration?: number
+}
+
+/**
+ * Промежуточные версии озвучки на диске.
+ *
+ * Каждая перегенерация пишет НОВЫЙ файл (`base.fix1.flac`, `base.fix1.fix1.flac`
+ * …) и намеренно не трогает предыдущий: дубль может не понравиться, и вернуться
+ * должно быть куда. Но убирать их не умел никто — у пользователя накопилось
+ * 4.3 ГБ за один рабочий день.
+ *
+ * Правило считает MAIN, а не рендерер: тот присылает только `keep` — пути всех
+ * ассетов проекта. Под удаление попадает лишь файл вида `<base>(.fixN)+.(wav|
+ * flac)` в той же папке, что и какой-нибудь из них, и только если сам он в
+ * `keep` не входит. Оригинал `<base>.<ext>` под шаблон не подходит вовсе,
+ * поэтому остаётся всегда.
+ */
+export interface VoiceVersionsRequest {
+  /** пути ВСЕХ ассетов проекта — что угодно из них удалено не будет */
+  keep: string[]
+  /** false (по умолчанию) — только посчитать; true — удалить */
+  apply?: boolean
+}
+
+export interface VoiceVersionsResult {
+  files: Array<{ path: string; name: string; size: number; mtime: number }>
+  bytes: number
+  /** сколько файлов действительно удалено (только при apply) */
+  removed?: number
+}
+
+/**
+ * Пересчитать разбор под НОВУЮ версию файла после склейки.
+ *
+ * Разбор описывает звук таким, каким он был в момент проверки. Склейка
+ * переписывает файл, и всё правее шва уезжает — а ручная отметка ищет фразу
+ * именно по разбору. Без этого пересчёта отметка, поставленная после первой же
+ * перегенерации, подхватывает ЧУЖОЕ предложение, и следующая склейка вырезает
+ * не тот кусок.
+ */
+export interface VoiceReindexRequest {
+  runDir: string
+  /** файл, который теперь лежит на таймлайне */
+  audio: string
+  /** его ИЗМЕРЕННАЯ длительность */
+  duration: number
+  units: Array<{ cut0: number; cut1: number; patchDur: number }>
+}
+
+export interface VoiceLearnResult {
+  ok: boolean
+  examples: number
+  positives: number
+  /** distinct audio files — cross-validation needs at least two */
+  files: number
+  /** user marks that a generated candidate covers (usable for training) */
+  userMatched: number
+  /** user marks the generator never proposes — counted, not trainable */
+  userUnmatched: number
+  runs: number
+  crossVal?: Record<string, number>
+  /** когда и какого размера получился файл модели — доказательство, что она
+      действительно пересобрана: число примеров от переобучения не меняется */
+  savedAt?: number
+  savedSize?: number
+  problem?: string
+  saved?: string
+  backup?: string
+}
+
+export interface VoiceCheckRequest {
+  /** the voice-over file to analyse — the asset itself, never a mixdown:
+      a mixdown would leave nothing to splice into */
+  audioPath: string
+  /** the exact script that was synthesised */
+  scriptPath: string
+  device?: string
+  maxFlags?: number
+  minConfidence?: number
+  /** how many words from a sentence edge still count as "at the boundary" */
+  edgeWords?: number
+  /** python >= 3.11 with torch/whisper; '' = the configured default */
+  python?: string
+}
+
+export interface VoiceCheckResult {
+  runDir: string
+  /** content-hashed copy of the analysed audio, inside runDir */
+  audio: string
+  duration: number
+  trust: number
+  stats: Record<string, unknown>
+  defects: RawDefect[]
+  /** [sentence number, t0, t1] for every sentence that got aligned */
+  sentences: Array<[number, number, number]>
+}
+
+export interface VoicePhraseRequest {
+  runDir: string
+  start: number
+  end: number
+  edgeWords?: number
+  python?: string
+  /** длительность файла, к которому относятся start/end. Драйвер сверяет её с
+      разбором и отказывается считать фразу по чужой версии звука. */
+  audioDuration?: number
+}
+
+export interface VoiceSelfTest {
+  ok: boolean
+  python: string
+  problems: string[]
+  cuda?: { available: boolean; name?: string; freeMb?: number; totalMb?: number }
+  modules?: Record<string, string | null>
+  files?: Record<string, boolean>
+  /** HOME/MODELS/SCORER/CACHE… — в частности путь к модели, которую
+      перезаписывает «Переобучить» */
+  paths?: Record<string, string>
+  /** когда эта модель последний раз записана: по числу примеров переобучение
+      не видно (корпус не меняется), а по времени файла — видно */
+  scorerMtime?: number
+}
+
+export interface TtsVoice {
+  id: string
+  name: string
+  category?: string
+  previewUrl?: string
+  labels?: Record<string, string>
+}
+
+export interface TtsRequest {
+  text: string
+  /** absolute path of the wav to write */
+  outPath: string
+  params: TtsParams
+  /** atempo factor applied in the same pass as the decode; 1 = untouched */
+  tempo?: number
+  /** proxy for the API call; '' = take HTTPS_PROXY from the environment */
+  proxy?: string
+}
+
+export interface TtsResult {
+  path: string
+  duration: number
+  /** the exact text that was sent, written next to the audio */
+  scriptPath: string
+  /** sha1 of that file - word indices are valid only while it matches */
+  scriptHash: string
+  chunks: number
+  /** per-chunk ElevenLabs request ids, for previous_request_ids stitching */
+  requestIds: string[]
+  tempo: number
+}
+
+// ---------------------------------------------------------------------------
 // Export
 
 export interface ExportPreset {
@@ -389,6 +804,73 @@ export interface ProbeResult {
   asset: Omit<MediaAsset, 'id'>
 }
 
+/* ------------------------------ disk storage ------------------------------ */
+
+export type StorageGroupId =
+  | 'proxies' | 'decoded' | 'fragments' | 'ttsqcCache'
+  | 'reversed' | 'imported' | 'voiceRuns'
+
+/** A project, reduced to what identifies the files it owns on disk. */
+export interface StorageProject {
+  name: string
+  path: string | null
+  assets: string[]
+  fragmentIds: string[]
+  runDirs: string[]
+}
+
+export interface StorageGroup {
+  id: StorageGroupId
+  dir: string
+  /** true = deleting costs time only; the artefact is derived and comes back */
+  rebuildable: boolean
+  /** false = the group cannot be tied to projects at all (a shared cache) */
+  attributed: boolean
+  files: number
+  bytes: number
+  /** files no known project claims — the safe thing to delete */
+  stale: { files: number; bytes: number }
+  /** id = the project's path ('#open' when unsaved); name is only a label,
+   *  and several projects are routinely called the same thing */
+  byProject: { id: string; name: string; files: number; bytes: number }[]
+}
+
+export interface StorageScan {
+  groups: StorageGroup[]
+  projects: { id: string; name: string; path: string | null; assets: number }[]
+  totalBytes: number
+  freeBytes: number
+}
+
+export interface StoragePruneRequest {
+  group: StorageGroupId
+  /** 'stale' = what nobody claims · 'project' = one project's derived files */
+  scope: 'stale' | 'project' | 'all'
+  /** the project's id (its path), never its name */
+  project?: string
+  projects?: string[]
+  open?: StorageProject | null
+  /**
+   * Deleting requires saying so. The default is to do NOTHING, because the
+   * opposite default already cost 2.5 GB: a caller asked for a dry run against
+   * a main process built before `dryRun` existed, the unknown field was
+   * ignored, and the request read as "delete everything unclaimed". Anything
+   * this handler does not understand must fail towards keeping the files.
+   */
+  confirm?: boolean
+  /** count what would go, delete nothing */
+  dryRun?: boolean
+  /** restrict to these file names inside the group — the selection rules still
+   *  apply, so this can never reach a file the scope would have spared */
+  only?: string[]
+}
+
+export interface StoragePruneResult {
+  removed: number
+  bytes: number
+  error?: string
+}
+
 export interface KadrApi {
   openMediaDialog(): Promise<string[]>
   probeMedia(path: string): Promise<ProbeResult>
@@ -418,6 +900,8 @@ export interface KadrApi {
   autosaveProject(project: Project, mainPath: string | null): Promise<string>
 
   /** App-wide JSON stores in userData (presets etc.) — survive any restart. */
+  storageScan(projects: string[], open: StorageProject | null): Promise<StorageScan>
+  storagePrune(req: StoragePruneRequest): Promise<StoragePruneResult>
   readUserStore(name: string): Promise<unknown>
   writeUserStore(name: string, data: unknown): Promise<void>
 
@@ -449,6 +933,8 @@ export interface KadrApi {
   saveSnapshot(dir: string | null, baseName: string, png: ArrayBuffer): Promise<string>
   /** EBU R128 loudness of a source range: integrated LUFS + true peak dBTP. */
   measureLoudness(path: string, start: number, duration: number): Promise<{ i: number; tp: number }>
+  /** plain mean/peak dBFS — for short spans where R128 has not settled */
+  meanVolume(path: string, start: number, duration: number): Promise<{ mean: number; max: number }>
   /** Blender-compatible loudness envelope of a mixed range, one value per frame (see shared/envelope.ts). */
   audioEnvelope(req: EnvelopeRequest): Promise<number[]>
 
@@ -505,6 +991,43 @@ export interface KadrApi {
   transcribe(req: TranscribeRequest): Promise<TranscribeResult>
   transcribeCancel(): Promise<void>
   onTranscribeProgress(cb: (p: { progress: number; text: string }) => void): () => void
+
+  /** Flush the user's verdicts into the training corpus of one run. */
+  voiceVerdicts(req: VoiceVerdictsRequest):
+    Promise<{ verdicts: number; marks: number; droppedMarks: number }>
+  /** Move a finished analysis onto the file a splice has just produced. */
+  voiceReindex(req: VoiceReindexRequest): Promise<{ duration: number; splices: number }>
+  /** Intermediate voice-over versions on disk: count them, or delete them. */
+  voiceVersions(req: VoiceVersionsRequest): Promise<VoiceVersionsResult>
+  /** Retrain the confidence model on everything collected so far. */
+  voiceLearn(req?: { dry?: boolean; python?: string }): Promise<VoiceLearnResult>
+
+  /** Re-synthesise one phrase and splice it back into a voice-over. */
+  ttsSpeakPhrase(req: PhraseSynthRequest): Promise<PhraseSynthResult>
+  voiceSplice(req: SpliceRequest): Promise<SpliceResult>
+  /** the silence run containing this second, for matching a patch's edges */
+  voiceSilenceAt(path: string, at: number): Promise<{ from: number; to: number }>
+
+  /** Local defect detector (python/ttsqc). Long, GPU-bound, one job at a time. */
+  voiceSelfTest(python?: string): Promise<VoiceSelfTest>
+  voiceCheck(req: VoiceCheckRequest): Promise<VoiceCheckResult>
+  voiceCheckCancel(): Promise<void>
+  onVoiceProgress(cb: (p: { progress: number; stage: string }) => void): () => void
+  /** Phrase around a hand-placed marker — reuses a finished run, no models. */
+  voicePhraseAt(req: VoicePhraseRequest): Promise<{ words: [number, number]; phrase: DefectPhrase }>
+
+  /** ElevenLabs speech synthesis. The API key stays in the main process: the
+      renderer may set it and ask whether one exists, never read it back. */
+  ttsHasKey(): Promise<boolean>
+  /** true when the main process synthesises locally (KADR_TTS_MOCK=1).
+      Tests MUST gate on this, not on ttsHasKey — that one is true whenever a
+      real key is stored and would let a suite spend the user's credits. */
+  ttsIsMock(): Promise<boolean>
+  ttsSetKey(key: string): Promise<void>
+  ttsVoices(proxy?: string): Promise<TtsVoice[]>
+  ttsSpeak(req: TtsRequest): Promise<TtsResult>
+  ttsCancel(): Promise<void>
+  onTtsProgress(cb: (p: { progress: number; stage: string; text?: string }) => void): () => void
 
   /** Plain text file IO for transcripts (absolute paths). */
   readTextFile(path: string): Promise<string | null>

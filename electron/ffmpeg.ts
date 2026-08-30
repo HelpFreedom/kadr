@@ -450,7 +450,27 @@ export async function makeReversed(
 }
 
 /** atempo only accepts 0.5..2 per instance — chain factors for wider speeds. */
-function atempoChain(speed: number): string[] {
+/** ffmpeg's atempo only accepts 0.5-2.0 per instance, so anything outside
+    that range becomes a chain. Shared with the TTS speed-up pass. */
+/**
+ * Как кодировать звук озвучки, по расширению файла.
+ *
+ * FLAC — БЕЗ ПОТЕРЬ, поэтому все свойства, на которых стоит перегенерация,
+ * сохраняются: рез посемплово точен, `acrossfade` сшивает то же самое, а
+ * повторные склейки не копят поколений. `-sample_fmt s16` обязателен — иначе
+ * ffmpeg волен выбрать s32, и файл перестал бы быть побитовой копией того же
+ * PCM (проверено: с s16 round-trip wav→flac→wav идентичен байт в байт).
+ * Речь ужимается примерно в 2.4 раза (реальные 12 минут: 71.4 → 29.4 МБ) за
+ * 0.6 с — против 142 МБ, которые тот же материал занимал стерео-PCM.
+ * `.wav` остаётся для всего, что уже лежит у пользователя.
+ */
+export function audioCodecArgs(outPath: string): string[] {
+  return /\.flac$/i.test(outPath)
+    ? ['-c:a', 'flac', '-sample_fmt', 's16', '-compression_level', '5']
+    : ['-c:a', 'pcm_s16le']
+}
+
+export function atempoChain(speed: number): string[] {
   const out: string[] = []
   let s = Math.min(8, Math.max(0.25, speed))
   while (s > 2) {
@@ -491,6 +511,32 @@ function runCollect(bin: string, args: string[], maxBytes = 64 * 1024 * 1024): P
 
 /** Like runCollect but streams stdout to `onData` — no size cap (a minutes-long
     f32 PCM decode would blow the 64 MB limit in seconds). */
+/**
+ * Plain mean/peak level of a source range, dBFS.
+ *
+ * measureLoudness (EBU R128 integrated) needs a few seconds of material to
+ * settle — on a 2-second phrase its answer wanders by dBs. For matching the
+ * level of a short patch to the stretch it replaces, the crude mean is the
+ * honest tool: what matters is the DIFFERENCE, measured the same way on both.
+ */
+export async function meanVolume(src: string, start: number, duration: number):
+  Promise<{ mean: number; max: number }> {
+  const args = ['-v', 'info', '-nostats', '-ss', start.toFixed(3), '-t', duration.toFixed(3),
+    '-i', src, '-map', 'a:0', '-af', 'volumedetect', '-f', 'null', '-']
+  const err = await new Promise<string>((resolve) => {
+    const child = spawn(FFMPEG, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let out = ''
+    child.stderr.on('data', (c) => { out += c })
+    child.on('close', () => resolve(out))
+    child.on('error', () => resolve(''))
+  })
+  const num = (re: RegExp) => {
+    const m = re.exec(err)
+    return m ? parseFloat(m[1]) : -91
+  }
+  return { mean: num(/mean_volume:\s*(-?[\d.]+)/), max: num(/max_volume:\s*(-?[\d.]+)/) }
+}
+
 export function runStream(bin: string, args: string[], onData: (chunk: Buffer) => void): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })

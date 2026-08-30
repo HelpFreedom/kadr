@@ -17,6 +17,7 @@ import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
 import { activity } from './autosave'
 import { projectDuration } from '@/state/store'
+import { logWarn } from './log'
 
 export interface ExportHandle {
   cancel(): void
@@ -221,7 +222,7 @@ export function startExport(
         })
         for (let s = 0; s < 2; s++) slots.push(new Uint8Array(rw * rh * 4))
       } catch (err) {
-        console.warn('[kadr] direct raw encoder unavailable, falling back', err)
+        logWarn('экспорт', 'прямой кодировщик недоступен, работаю запасным путём', err)
         rawDirect = null
       }
       if (!rawDirect) {
@@ -578,7 +579,7 @@ export function startExport(
               }
               // no frame is never acceptable — fall back so the output can
               // only ever be slower, not frozen
-              console.warn(`[kadr] fast decode yielded no frame for ${asset.name} — falling back`)
+              logWarn('экспорт', `${asset.name}: быстрый декодер не дал кадр, перехожу на перемотку`)
               sources.set(clip.id, null)
               packed?.delete(clip.id) // element frames are plain RGBA
               s.close()
@@ -586,7 +587,7 @@ export function startExport(
             },
             () => {
               // fast path died (codec quirk?) — element seeks from here on
-              console.warn(`[kadr] fast decode failed for ${asset.name} — falling back`)
+              logWarn('экспорт', `${asset.name}: быстрый декодер отказал, перехожу на перемотку`)
               sources.set(clip.id, null)
               packed?.delete(clip.id) // element frames are plain RGBA
               s.close()
@@ -628,7 +629,7 @@ function alphaPackedFallback(asset: MediaAsset): Promise<MediaAsset | null> {
         { packed: true, alpha: true, codec: asset.codec })
       return { ...asset, path }
     })().catch((err) => {
-      console.warn(`[kadr] alpha packing failed for ${asset.name} — keeping element seeks`, err)
+      logWarn('экспорт', `${asset.name}: упаковать альфу не вышло, остаюсь на перемотке`, err)
       return null
     })
     alphaPacks.set(asset.path, p)
@@ -654,7 +655,7 @@ function undecodableFallback(asset: MediaAsset): Promise<MediaAsset | null> {
         { alpha: !!hasAlpha, codec })
       return { ...asset, path }
     })().catch((err) => {
-      console.warn(`[kadr] decode fallback failed for ${asset.name}`, err)
+      logWarn('экспорт', `${asset.name}: запасное декодирование не удалось`, err)
       return null
     })
     undecodable.set(asset.path, p)

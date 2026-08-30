@@ -198,7 +198,8 @@ const menu = await evalJs(`(() => {
   if (!m) return { open: false }
   const btns = [...m.querySelectorAll('button')]
   const target = btns.find(b => /Растворение|Dissolve/.test(b.textContent))
-  const checked = btns.find(b => b.textContent.includes('✓'))?.textContent ?? ''
+  // the tick is an icon now: find the row whose .ctx-check actually drew one
+  const checked = btns.find(b => b.querySelector('.ctx-check svg'))?.textContent ?? ''
   target.click()
   return { open: true, buttons: btns.length, checked }
 })()`)

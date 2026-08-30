@@ -6,10 +6,14 @@ import { createHash, randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import {
   probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, packedAlphaPlan,
-  ExportMuxer, RawVideoEncoder
+  ExportMuxer, RawVideoEncoder, meanVolume
 } from './ffmpeg'
+import { mediaCacheKey, proxySuffix, decodedSuffix, reverseSuffix } from './cacheKeys'
+import { registerStorageIpc } from './storage'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
+import { registerTtsIpc } from './tts'
+import { registerVoiceIpc } from './voice'
 import { registerEnvelopeIpc } from './envelope'
 import { registerFragmentIpc } from './fragments'
 import type { ExportJob, Project } from '@shared/types'
@@ -63,6 +67,8 @@ process.on('uncaughtException', (err) => {
 })
 
 let win: BrowserWindow | null = null
+/** window.open name of the detached preview — see src/engine/popout.ts */
+const PREVIEW_WIN = 'kadr-preview'
 
 function createWindow() {
   win = new BrowserWindow({
@@ -83,6 +89,38 @@ function createWindow() {
     }
   })
   win.setMenuBarVisibility(false)
+  const owner = win
+  // The preview can be detached into a window of its own (src/engine/popout.ts).
+  // The renderer opens an about:blank popup — same origin and same renderer
+  // process, which is the only reason the live GL canvas can be adopted into
+  // it — and moves the preview's DOM across. Exactly one window name is
+  // allowed: the Remotion fragment pages served by the workspace dev server
+  // run inside this webContents too, and nothing they contain has any business
+  // opening an OS window.
+  win.webContents.setWindowOpenHandler(({ frameName }) => {
+    if (frameName !== PREVIEW_WIN) return { action: 'deny' }
+    return {
+      action: 'allow',
+      overrideBrowserWindowOptions: {
+        title: 'Kadr',
+        // --c-bg-0: about:blank is white, and the styles arrive a beat later
+        backgroundColor: '#0b0d12',
+        minWidth: 320,
+        minHeight: 200,
+        autoHideMenuBar: true
+      }
+    }
+  })
+  win.webContents.on('did-create-window', (child, { frameName }) => {
+    if (frameName !== PREVIEW_WIN) return
+    child.setMenuBarVisibility(false)
+    child.removeMenu()
+    // closing the editor must not leave the preview window behind: while one
+    // is open window-all-closed never fires and the app would never quit
+    const closeChild = () => { if (!child.isDestroyed()) child.destroy() }
+    owner.on('close', closeChild)
+    child.on('closed', () => owner.isDestroyed() || owner.removeListener('close', closeChild))
+  })
   // a killed/crashed renderer leaves a dead window and an immortal main
   // process (the running project is lost either way — autosave has it);
   // exit cleanly so the next launch starts fresh instead of being blocked
@@ -210,7 +248,10 @@ app.whenReady().then(() => {
   void sweepPartFiles()
   registerClaudeIpc(() => win)
   registerTranscribeIpc(() => win)
+  registerTtsIpc(() => win)
+  registerVoiceIpc(() => win)
   registerEnvelopeIpc()
+  registerStorageIpc()
   registerFragmentIpc(() => win)
   createWindow()
   app.on('activate', () => {
@@ -276,10 +317,7 @@ async function requestProxy(
 ): Promise<string> {
   const stat = statSync(srcPath)
   // alpha proxies are a different artifact (webm) — separate cache identity
-  const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}${opts?.alpha ? ':a' : ''}`)
-    .digest('hex')
-    .slice(0, 20)
+  const key = mediaCacheKey(srcPath, stat.size, stat.mtimeMs, proxySuffix(opts?.alpha))
   const ext = opts?.alpha ? 'webm' : 'mp4'
   const out = join(proxyDir(), `${key}.${ext}`)
   try {
@@ -321,11 +359,7 @@ async function requestDecoded(
   opts?: { alpha?: boolean; codec?: string; packed?: boolean; matrix?: string }
 ): Promise<string> {
   const stat = statSync(srcPath)
-  const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}` +
-      `${opts?.packed ? ':p' : opts?.alpha ? ':a' : ''}`)
-    .digest('hex')
-    .slice(0, 20)
+  const key = mediaCacheKey(srcPath, stat.size, stat.mtimeMs, decodedSuffix(opts))
   // packed = colour over its alpha matte in one fast-decodable H.264 mp4
   const ext = opts?.alpha && !opts?.packed ? 'webm' : 'mp4'
   const out = join(decodedDir(), `${key}.${ext}`)
@@ -447,10 +481,7 @@ async function requestReversed(
   info: { kind: string; hasAudio: boolean; width: number; height: number; fps: number }
 ): Promise<string> {
   const stat = statSync(srcPath)
-  const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}:${start.toFixed(3)}:${duration.toFixed(3)}`)
-    .digest('hex')
-    .slice(0, 20)
+  const key = mediaCacheKey(srcPath, stat.size, stat.mtimeMs, reverseSuffix(start, duration))
   const out = join(reverseDir(), `${key}.${info.kind === 'video' ? 'mp4' : 'wav'}`)
   try {
     await fs.access(out)
@@ -524,6 +555,10 @@ function registerIpc() {
 
   ipcMain.handle('media:loudness', (_e, srcPath: string, start: number, duration: number) =>
     measureLoudness(srcPath, start, duration)
+  )
+
+  ipcMain.handle('media:mean-volume', (_e, srcPath: string, start: number, duration: number) =>
+    meanVolume(srcPath, start, duration)
   )
 
   ipcMain.handle(

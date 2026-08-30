@@ -8,6 +8,7 @@ import { useEditor, findClip, usePosePresets, type PosePreset } from '@/state/st
 import { evalAnim } from '@/engine/anim'
 import { videoLayersAt } from '@/engine/player'
 import { useT, type TKey } from '@/i18n'
+import { Icon, type IconName } from './icons'
 import { CtxMenu } from './CtxMenu'
 
 const KF_EPS = 0.02
@@ -774,11 +775,11 @@ export function AnimEditor({ width }: { width: number }) {
     )
   }
 
-  const shapeTools: { id: Tool; icon: string; title: TKey }[] = [
-    { id: 'edges', icon: '⊞', title: 'toolEdges' },
-    { id: 'rect', icon: '▭', title: 'toolRect' },
-    { id: 'ellipse', icon: '◯', title: 'toolEllipse' },
-    { id: 'triangle', icon: '△', title: 'toolTriangle' }
+  const shapeTools: { id: Tool; icon: IconName; title: TKey }[] = [
+    { id: 'edges', icon: 'crop', title: 'toolEdges' },
+    { id: 'rect', icon: 'square', title: 'toolRect' },
+    { id: 'ellipse', icon: 'circle', title: 'toolEllipse' },
+    { id: 'triangle', icon: 'triangle', title: 'toolTriangle' }
   ]
 
   const params = mode === 'transform' ? transformDefs : [...MASK_PARAMS, ...selShapeParams]
@@ -803,11 +804,11 @@ export function AnimEditor({ width }: { width: number }) {
             setPresetMenu(presetMenu ? null : { x: r.left, y: r.bottom + 4 })
           }}
         >
-          ⭐ {t('presets')}
+          <Icon name="star" size={14} /> {t('presets')}
         </button>
         <span className="flex1" />
         <button className={`link-toggle ${linked ? 'on' : ''}`} title={t('linkHint')} onClick={toggleLink}>
-          {linked ? '🔗' : '⛓'} {t('linkToTimeline')}
+          <Icon name={linked ? 'link' : 'unlink'} size={14} /> {t('linkToTimeline')}
         </button>
       </div>
 
@@ -824,24 +825,31 @@ export function AnimEditor({ width }: { width: number }) {
         )}
         <button
           className={snapOn ? 'active' : ''}
+          data-act="snap"
           title={t('snapToggle')}
+          aria-label={t('snapToggle')}
+          aria-pressed={snapOn}
           onClick={() => setSnapOn(!snapOn)}
         >
-          🧲
+          <Icon name="magnet" />
         </button>
         <button
           className={lockX ? 'active locked' : ''}
+          data-act="lock-x"
           title={t('lockX')}
+          aria-pressed={lockX}
           onClick={() => setLockX(!lockX)}
         >
-          {lockX ? '🔒X' : 'X'}
+          <Icon name={lockX ? 'lock' : 'unlock'} size={13} /> X
         </button>
         <button
           className={lockY ? 'active locked' : ''}
+          data-act="lock-y"
           title={t('lockY')}
+          aria-pressed={lockY}
           onClick={() => setLockY(!lockY)}
         >
-          {lockY ? '🔒Y' : 'Y'}
+          <Icon name={lockY ? 'lock' : 'unlock'} size={13} /> Y
         </button>
       </div>
 
@@ -852,9 +860,11 @@ export function AnimEditor({ width }: { width: number }) {
               key={s.id}
               className={tool === s.id ? 'active' : ''}
               title={t(s.title)}
+              aria-label={t(s.title)}
+              data-act={`shape-${s.id}`}
               onClick={() => setTool(s.id)}
             >
-              {s.icon}
+              <Icon name={s.icon} />
             </button>
           ))}
           {shapes.length > 1 && (
@@ -886,8 +896,9 @@ export function AnimEditor({ width }: { width: number }) {
                   ))
                   setSelShape(0)
                 }}
+                aria-label={t('deleteShape')}
               >
-                🗑
+                <Icon name="trash" />
               </button>
             </>
           )}
@@ -953,7 +964,9 @@ export function AnimEditor({ width }: { width: number }) {
           {asset?.thumbnail ? (
             <img src={asset.thumbnail} alt="" draggable={false} />
           ) : (
-            <div className="anim-layer-fill">{clip.kind === 'text' ? 'T' : '◼'}</div>
+            <div className="anim-layer-fill">
+              {clip.kind === 'text' ? 'T' : <Icon name="image" size={22} />}
+            </div>
           )}
           <div className="mask-shade" style={{ left: 0, top: 0, bottom: 0, width: `${cur.mL * 100}%` }} />
           <div className="mask-shade" style={{ right: 0, top: 0, bottom: 0, width: `${cur.mR * 100}%` }} />
@@ -1014,7 +1027,10 @@ export function AnimEditor({ width }: { width: number }) {
         <div className="stage-cross" />
         <div className="stage-zoom dim">
           {Math.round(stageZoom * 100)}%
-          <button onClick={() => setStageZoom(DEFAULT_STAGE_ZOOM)} title="reset">⟲</button>
+          <button onClick={() => setStageZoom(DEFAULT_STAGE_ZOOM)} title={t('ctxRestoreView')}
+                  aria-label={t('ctxRestoreView')}>
+            <Icon name="reload" size={12} />
+          </button>
         </div>
       </div>
 
@@ -1048,9 +1064,10 @@ export function AnimEditor({ width }: { width: number }) {
                 <button
                   className="preset-del"
                   title={t('deletePreset')}
+                  aria-label={t('deletePreset')}
                   onClick={() => usePosePresets.getState().deletePreset(p.id)}
                 >
-                  ✕
+                  <Icon name="close" size={13} />
                 </button>
               </div>
             ))}
@@ -1097,24 +1114,31 @@ export function AnimEditor({ width }: { width: number }) {
           <span className="flex1" />
           <button
             title={t('toClipStart')}
+            aria-label={t('toClipStart')}
             onClick={() => useEditor.getState().setPlayhead(clip.start)}
           >
-            |◀
+            <Icon name="first" size={14} />
           </button>
-          <button title={t('kfPrev')} onClick={() => jumpKf(-1)}>◀</button>
+          <button title={t('kfPrev')} aria-label={t('kfPrev')} onClick={() => jumpKf(-1)}>
+            <Icon name="chevronLeft" size={14} />
+          </button>
           <button
             title={t('kfDelete')}
             disabled={!(mode === 'transform' ? rowT : rowM).some((x) => Math.abs(x - rel) < KF_EPS)}
+            aria-label={t('kfDelete')}
             onClick={() => removeKfsAt(mode === 'transform' ? transformDefs : maskDefs, rel)}
           >
-            ◆✕
+            <Icon name="diamondMinus" size={14} />
           </button>
-          <button title={t('kfNext')} onClick={() => jumpKf(1)}>▶</button>
+          <button title={t('kfNext')} aria-label={t('kfNext')} onClick={() => jumpKf(1)}>
+            <Icon name="chevronRight" size={14} />
+          </button>
           <button
             title={t('toClipEnd')}
+            aria-label={t('toClipEnd')}
             onClick={() => useEditor.getState().setPlayhead(clip.start + clip.duration)}
           >
-            ▶|
+            <Icon name="last" size={14} />
           </button>
         </div>
         {[

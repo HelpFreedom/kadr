@@ -6,6 +6,7 @@ import type { Anim, Transform3D } from '@shared/types'
 import { useEditor, projectDuration } from '@/state/store'
 import { KF_EPS, applyValue, evalAnim, resetValue, snap1, windowDrag } from './animUtils'
 import { useT, type TKey } from '@/i18n'
+import { Icon } from './icons'
 
 const defAnim = (v: number): Anim => ({ value: v })
 
@@ -311,7 +312,7 @@ export function TrackMotionEditor({ width }: { width: number }) {
           title={t('linkHint')}
           onClick={toggleLink}
         >
-          {linked ? '🔗' : '⛓'} {t('linkToTimeline')}
+          <Icon name={linked ? 'link' : 'unlink'} size={14} /> {t('linkToTimeline')}
         </button>
       </div>
       <div className="anim-toolbar">
@@ -320,8 +321,15 @@ export function TrackMotionEditor({ width }: { width: number }) {
           {t('smoothMotion')}
         </label>
         <span className="flex1" />
-        <button className={snapOn ? 'active' : ''} title={t('snapToggle')} onClick={() => setSnapOn(!snapOn)}>
-          🧲
+        <button
+          className={snapOn ? 'active' : ''}
+          data-act="snap"
+          title={t('snapToggle')}
+          aria-label={t('snapToggle')}
+          aria-pressed={snapOn}
+          onClick={() => setSnapOn(!snapOn)}
+        >
+          <Icon name="magnet" />
         </button>
         <button onClick={resetAll}>{t('ctxRestoreView')}</button>
       </div>
@@ -366,7 +374,10 @@ export function TrackMotionEditor({ width }: { width: number }) {
         <div className="stage-cross" />
         <div className="stage-zoom dim">
           {Math.round(stageZoom * 100)}%
-          <button onClick={() => setStageZoom(0.6)} title="reset">⟲</button>
+          <button onClick={() => setStageZoom(0.6)} title={t('ctxRestoreView')}
+                  aria-label={t('ctxRestoreView')}>
+            <Icon name="reload" size={12} />
+          </button>
         </div>
       </div>
 
@@ -394,11 +405,24 @@ export function TrackMotionEditor({ width }: { width: number }) {
             t={rel.toFixed(2)}s · {t('frameLbl')} {Math.floor(rel * fps)}
           </span>
           <span className="flex1" />
-          <button title={t('toClipStart')} onClick={() => useEditor.getState().setPlayhead(0)}>|◀</button>
-          <button title={t('kfPrev')} onClick={() => jump(-1)}>◀</button>
-          <button title={t('kfDelete')} disabled={!onKf} onClick={() => removeKfsAt(rel)}>◆✕</button>
-          <button title={t('kfNext')} onClick={() => jump(1)}>▶</button>
-          <button title={t('toClipEnd')} onClick={() => useEditor.getState().setPlayhead(duration)}>▶|</button>
+          <button title={t('toClipStart')} aria-label={t('toClipStart')}
+                  onClick={() => useEditor.getState().setPlayhead(0)}>
+            <Icon name="first" size={14} />
+          </button>
+          <button title={t('kfPrev')} aria-label={t('kfPrev')} onClick={() => jump(-1)}>
+            <Icon name="chevronLeft" size={14} />
+          </button>
+          <button title={t('kfDelete')} aria-label={t('kfDelete')} disabled={!onKf}
+                  onClick={() => removeKfsAt(rel)}>
+            <Icon name="diamondMinus" size={14} />
+          </button>
+          <button title={t('kfNext')} aria-label={t('kfNext')} onClick={() => jump(1)}>
+            <Icon name="chevronRight" size={14} />
+          </button>
+          <button title={t('toClipEnd')} aria-label={t('toClipEnd')}
+                  onClick={() => useEditor.getState().setPlayhead(duration)}>
+            <Icon name="last" size={14} />
+          </button>
         </div>
         <div className="mini-row">
           <span className="mini-label">{t('trackMotion')}</span>

@@ -98,6 +98,8 @@ const api: KadrApi = {
   writeProject: (path, project) => ipcRenderer.invoke('project:write', path, project),
   autosaveProject: (project, mainPath) => ipcRenderer.invoke('project:autosave', project, mainPath),
 
+  storageScan: (projects, open) => ipcRenderer.invoke('storage:scan', projects, open),
+  storagePrune: (req) => ipcRenderer.invoke('storage:prune', req),
   readUserStore: (name) => ipcRenderer.invoke('store:read', name),
   writeUserStore: (name, data) => ipcRenderer.invoke('store:write', name, data),
 
@@ -113,6 +115,7 @@ const api: KadrApi = {
   pickDirectory: (title) => ipcRenderer.invoke('dialog:pick-dir', title),
   saveSnapshot: (dir, baseName, png) => ipcRenderer.invoke('snapshot:save', dir, baseName, png),
   measureLoudness: (path, start, duration) => ipcRenderer.invoke('media:loudness', path, start, duration),
+  meanVolume: (path, start, duration) => ipcRenderer.invoke('media:mean-volume', path, start, duration),
   audioEnvelope: (req) => ipcRenderer.invoke('audio:envelope', req),
   onProxyProgress: (cb) => {
     const handler = (_e: unknown, p: { path: string; progress: number }) => cb(p)
@@ -156,6 +159,35 @@ const api: KadrApi = {
     const handler = (_e: unknown, p: { id: string; phase: string; progress: number }) => cb(p)
     ipcRenderer.on('fragment:progress', handler)
     return () => ipcRenderer.removeListener('fragment:progress', handler)
+  },
+
+  ttsSpeakPhrase: (req) => ipcRenderer.invoke('tts:speak-phrase', req),
+  voiceSplice: (req) => ipcRenderer.invoke('voice:splice', req),
+  voiceSilenceAt: (path, at) => ipcRenderer.invoke('voice:silence-at', path, at),
+  voiceVerdicts: (req) => ipcRenderer.invoke('voice:verdicts', req),
+  voiceReindex: (req) => ipcRenderer.invoke('voice:reindex', req),
+  voiceVersions: (req) => ipcRenderer.invoke('voice:versions', req),
+  voiceLearn: (req) => ipcRenderer.invoke('voice:learn', req),
+  voiceSelfTest: (python) => ipcRenderer.invoke('voice:selftest', python),
+  voiceCheck: (req) => ipcRenderer.invoke('voice:check', req),
+  voiceCheckCancel: () => ipcRenderer.invoke('voice:cancel'),
+  voicePhraseAt: (req) => ipcRenderer.invoke('voice:phrase-at', req),
+  onVoiceProgress: (cb) => {
+    const handler = (_e: unknown, p: { progress: number; stage: string }) => cb(p)
+    ipcRenderer.on('voice:progress', handler)
+    return () => ipcRenderer.removeListener('voice:progress', handler)
+  },
+
+  ttsHasKey: () => ipcRenderer.invoke('tts:has-key'),
+  ttsIsMock: () => ipcRenderer.invoke('tts:is-mock'),
+  ttsSetKey: (key) => ipcRenderer.invoke('tts:set-key', key),
+  ttsVoices: (proxy) => ipcRenderer.invoke('tts:voices', proxy),
+  ttsSpeak: (req) => ipcRenderer.invoke('tts:speak', req),
+  ttsCancel: () => ipcRenderer.invoke('tts:cancel'),
+  onTtsProgress: (cb) => {
+    const handler = (_e: unknown, p: { progress: number; stage: string; text?: string }) => cb(p)
+    ipcRenderer.on('tts:progress', handler)
+    return () => ipcRenderer.removeListener('tts:progress', handler)
   },
 
   transcribe: (req) => ipcRenderer.invoke('transcribe:run', req),

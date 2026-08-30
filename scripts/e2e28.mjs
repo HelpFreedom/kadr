@@ -112,12 +112,13 @@ const saved = await evalJs(`(async () => {
   btn.click()
   await new Promise(r => setTimeout(r, 600))
   const flash = document.querySelector('.save-flash')
-  return { flash: flash?.textContent ?? null, err: flash?.classList.contains('error') ?? null,
+  return { flash: flash?.textContent ?? null, tick: !!flash?.querySelector('svg'),
+           err: flash?.classList.contains('error') ?? null,
            dot: !!document.querySelector('.dirty-dot') }
 })()`)
 let onDisk = false
 try { onDisk = statSync('/tmp/kadr-test/save/p.kadr').size > 10 } catch { /* missing */ }
-check('save writes the file and flashes ✓', onDisk && saved.flash?.includes('✓') && saved.err === false,
+check('save writes the file and flashes a tick', onDisk && saved.tick === true && saved.err === false,
   JSON.stringify(saved))
 check('dirty dot clears after save', saved.dot === false)
 

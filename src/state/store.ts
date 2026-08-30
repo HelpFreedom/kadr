@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
-  Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec
+  Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec,
+  VoiceRun, AudioDefect, DefectState
 } from '@shared/types'
 
 export const uid = () => Math.random().toString(36).slice(2, 10)
@@ -103,6 +104,51 @@ export function sanitizeProject(p: Project): Project {
   for (const m of p.markers) {
     if (typeof m.label !== 'string' || !m.label) m.label = '•'
     if (m.time < 0) m.time = 0
+  }
+  // a voice-over is meaningless without its asset and its script; tempo must be
+  // a real factor or a regenerated phrase would be stretched by NaN
+  p.voiceRuns = (p.voiceRuns ?? []).filter(
+    (r) => r && typeof r.id === 'string' && typeof r.assetId === 'string' &&
+      typeof r.scriptPath === 'string' && p.assets.some((a) => a.id === r.assetId)
+  )
+  for (const r of p.voiceRuns) {
+    if (!Number.isFinite(r.tempo) || r.tempo <= 0) r.tempo = 1
+    if (!Number.isFinite(r.duration) || r.duration < 0) r.duration = 0
+    if (typeof r.scriptHash !== 'string') r.scriptHash = ''
+  }
+  // Дефекты держатся на ассете и на прогоне: без любого из них они бессмысленны.
+  // Инвариант «дефект лежит внутри своей фразы» чинится, а не обсуждается — на
+  // нём стоит вся перегенерация.
+  const runIds = new Set(p.voiceRuns.map((r) => r.id))
+  const assetIds = new Set(p.assets.map((a) => a.id))
+  const DEFECT_STATES = ['proposed', 'confirmed', 'rejected', 'done', 'failed']
+  p.defects = (p.defects ?? []).filter(
+    (d) => d && typeof d.id === 'string' && assetIds.has(d.assetId) && runIds.has(d.runId) &&
+      Array.isArray(d.src) && d.src.length === 2 &&
+      Number.isFinite(d.src[0]) && Number.isFinite(d.src[1]) && d.src[1] > d.src[0]
+  )
+  for (const d of p.defects) {
+    if (!DEFECT_STATES.includes(d.state)) d.state = 'proposed'
+    if (d.origin !== 'user') d.origin = 'detector'
+    if (d.src[0] < 0) d.src[0] = 0
+    if (!Number.isFinite(d.confidence as number)) delete d.confidence
+    if (d.words && !(Number.isInteger(d.words[0]) && Number.isInteger(d.words[1]) &&
+        d.words[1] >= d.words[0])) delete d.words
+    const ph = d.phrase
+    if (!ph || !Number.isFinite(ph.t0) || !Number.isFinite(ph.t1) || ph.t1 <= ph.t0) {
+      // фраза потеряна: вырождаем её в сам дефект и честно помечаем, что резать
+      // по ней нельзя, пока разбор не пересчитан
+      d.phrase = {
+        t0: d.src[0], t1: d.src[1], sentFrom: -1, sentTo: -1,
+        wordFrom: -1, wordTo: -1, charFrom: -1, charTo: -1, text: '',
+        cut: ['fallback', 'fallback']
+      }
+      d.note = 'границы фразы потеряны — пересчитайте разбор'
+    } else {
+      if (!Array.isArray(ph.cut) || ph.cut.length !== 2) ph.cut = ['fallback', 'fallback']
+      if (ph.t0 > d.src[0]) ph.t0 = d.src[0]
+      if (ph.t1 < d.src[1]) ph.t1 = d.src[1]
+    }
   }
   for (const track of p.tracks) {
     if (!Number.isFinite(track.gain)) track.gain = 1
@@ -413,6 +459,36 @@ interface EditorState {
   removeAssets(assetIds: string[]): void
   /** register transcript/text docs in the sources (one undo entry) */
   addTexts(docs: TextDoc[]): void
+  /** Land a finished voice-over — asset, script docs, run record and clip — as
+      one undoable step. */
+  /** Land a spliced voice-over: new audio, remapped clips, rippled timeline —
+      one undo entry. Returns null with a reason when it cannot be done safely. */
+  applyVoiceSplice(v: {
+    runId: string
+    oldAssetId: string
+    newAsset: MediaAsset
+    /** каждая заменённая фраза и дефекты, которые ею закрыты */
+    units: Array<{ cut0: number; cut1: number; patchDur: number; ids: string[] }>
+    newDuration: number
+    ripple: boolean
+    rippleAllTracks: boolean
+  }): { delta: number; warnings: string[] } | { error: string }
+  /** Detector pass: run metadata + its findings, one undo entry. */
+  applyCheckResult(runId: string, runPatch: Partial<VoiceRun>, defects: AudioDefect[]): void
+  /** A defect the user spotted themselves. */
+  addUserDefect(d: AudioDefect): void
+  /** The user's verdict on one or many defects. */
+  setDefectState(ids: string | string[], state: DefectState, patch?: Partial<AudioDefect>): void
+  /** Edge drag and other live edits — the CALLER pushes history once. */
+  updateDefect(id: string, patch: Partial<AudioDefect>): void
+  removeDefects(ids: string | string[]): void
+  addVoiceOver(v: {
+    asset: MediaAsset
+    run: VoiceRun
+    texts?: TextDoc[]
+    trackId?: string | null
+    at: number
+  }): { clipId: string; trackId: string } | null
   removeText(id: string): void
   /** place a remotion fragment clip on the topmost free video track */
   insertFragmentClip(fragmentId: string, meta: FragmentSpec, start: number, duration: number): string
@@ -542,6 +618,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((st) => {
       const p = clone(st.project)
       p.assets = p.assets.filter((a) => !ids.has(a.id))
+      // озвучка и её дефекты держатся на ассете: без него они мусор, и
+      // sanitizeProject всё равно выбросил бы их при следующей загрузке
+      p.voiceRuns = (p.voiceRuns ?? []).filter((r) => !ids.has(r.assetId))
+      p.defects = (p.defects ?? []).filter((d) => !ids.has(d.assetId))
       const dead = new Set<string>()
       // clips lose their source — drop them everywhere, locked tracks included
       for (const tr of p.tracks) {
@@ -557,6 +637,237 @@ export const useEditor = create<EditorState>((set, get) => ({
         animClipId: st.animClipId && dead.has(st.animClipId) ? null : st.animClipId
       }
     })
+  },
+
+  applyVoiceSplice: ({ runId, oldAssetId, newAsset, units, newDuration,
+                       ripple, rippleAllTracks }) => {
+    const s = get()
+    const sorted = [...units].sort((a, b) => a.cut0 - b.cut0)
+    const total = sorted.reduce((n, u) => n + (u.patchDur - (u.cut1 - u.cut0)), 0)
+
+    /** Source second before the splice → after it. null inside a replaced
+        phrase: that audio no longer exists, so nothing may be mapped onto it. */
+    const remap = (t: number): number | null => {
+      let d = 0
+      for (const u of sorted) {
+        if (t > u.cut0 + 1e-6 && t < u.cut1 - 1e-6) return null
+        if (t >= u.cut1 - 1e-6) d += u.patchDur - (u.cut1 - u.cut0)
+      }
+      return t + d
+    }
+
+    const affected: Array<{ clip: Clip; track: Track; oldStart: number; oldEnd: number
+                            inPoint: number; duration: number }> = []
+    for (const track of s.project.tracks) {
+      for (const clip of track.clips) {
+        if (clip.assetId !== oldAssetId) continue
+        const speed = clip.speed || 1
+        const a = remap(clip.inPoint)
+        const b = remap(clip.inPoint + clip.duration * speed)
+        if (a === null || b === null || b <= a) {
+          // a clip edge sits inside the phrase being replaced: there is no
+          // honest answer for where it should land, so we refuse instead of
+          // silently mangling the cut the user made
+          return { error: `клип «${clip.label}» разрезан внутри заменяемой фразы — ` +
+            'автоматически починить нельзя. Сведите озвучку в один клип или снимите разрез.' }
+        }
+        affected.push({ clip, track, oldStart: clip.start, oldEnd: clip.start + clip.duration,
+                        inPoint: a, duration: (b - a) / speed })
+      }
+    }
+    if (!affected.length) return { error: 'на таймлайне нет клипов этой озвучки' }
+
+    // Куда переехала каждая заменённая фраза: её начало на месте (remap не
+    // двигает то, что до реза), а конец задаётся длиной вставки. Без этого
+    // повторная перегенерация той же фразы резала бы по старым координатам.
+    const unitOf = new Map<string, { from: number; to: number }>()
+    for (const u of sorted) {
+      const from = remap(u.cut0) ?? u.cut0
+      for (const id of u.ids) unitOf.set(id, { from, to: from + u.patchDur })
+    }
+
+    const warnings: string[] = []
+    let dropped = 0
+    get().pushHistory('hVoiceFix')
+    set((st) => {
+      const p = clone(st.project)
+      p.assets = [...p.assets, newAsset]
+
+      // shift events: after this clip ended, everything moves by d
+      const events = affected.map((a) => ({ at: a.oldEnd, d: a.duration - (a.oldEnd - a.oldStart) }))
+        .sort((x, y) => x.at - y.at)
+      const shiftFor = (start: number) =>
+        ripple ? events.reduce((n, e) => (e.at <= start + 1e-6 ? n + e.d : n), 0) : 0
+      const tracksToRipple = new Set(
+        rippleAllTracks ? p.tracks.filter((t) => !t.locked).map((t) => t.id)
+                        : affected.map((a) => a.track.id))
+
+      for (const track of p.tracks) {
+        for (const c of track.clips) {
+          const mine = affected.find((a) => a.clip.id === c.id)
+          if (mine) {
+            c.assetId = newAsset.id
+            c.inPoint = mine.inPoint
+            c.duration = mine.duration
+            c.start = mine.oldStart + shiftFor(mine.oldStart)
+            continue
+          }
+          if (!ripple || !tracksToRipple.has(track.id)) continue
+          // a clip that STRADDLES the splice cannot be fixed by shifting: it
+          // would have to stretch. Say so rather than pretend.
+          const spans = events.some((e) => c.start < e.at - 1e-6 && c.start + c.duration > e.at + 1e-6)
+          if (spans) {
+            if (!warnings.length || !warnings.some((w) => w.includes('накрывает место склейки'))) {
+              warnings.push('часть клипов накрывает место склейки — их длину сдвиг не исправит')
+            }
+            continue
+          }
+          c.start += shiftFor(c.start)
+        }
+      }
+      if (!ripple) warnings.push('сдвиг выключен: клипы правее могут наехать друг на друга')
+
+      p.voiceRuns = (p.voiceRuns ?? []).map((r) =>
+        r.id === runId ? { ...r, assetId: newAsset.id, duration: newDuration } : r)
+
+      const kept: AudioDefect[] = []
+      for (const d of p.defects ?? []) {
+        if (d.assetId !== oldAssetId) { kept.push(d); continue }
+        const mine = unitOf.get(d.id)
+        if (mine) {
+          // ГРАНИЦЫ ОБЯЗАНЫ ПЕРЕЕХАТЬ. Раньше здесь менялись только ассет и
+          // состояние, а фраза оставалась в координатах ДО склейки — и вторая
+          // перегенерация той же фразы резала уже не там, третья ещё дальше, и
+          // дорожка портилась. Теперь фраза — это ровно то, что сейчас вставлено.
+          kept.push({
+            ...d, assetId: newAsset.id, state: 'done', resultAssetId: newAsset.id,
+            attempts: (d.attempts ?? 0) + 1,
+            src: [mine.from, mine.to],
+            phrase: { ...d.phrase, t0: mine.from, t1: mine.to }
+          })
+          continue
+        }
+        const a = remap(d.src[0])
+        const b = remap(d.src[1])
+        if (a === null || b === null) {
+          // Звук этой находки заменён. Раньше она превращалась в отметку на всю
+          // новую фразу — и свежая, ещё не разобранная запись оказывалась
+          // целиком помечена дефектом. Правильно её просто убрать: решение по
+          // ней уже выгружено в корпус (это делается ДО склейки), а что теперь
+          // в этом месте звучит — знает только новый разбор.
+          dropped++
+          continue
+        }
+        const ph0 = remap(d.phrase.t0)
+        const ph1 = remap(d.phrase.t1)
+        kept.push({ ...d, assetId: newAsset.id, src: [a, b],
+                    phrase: { ...d.phrase, t0: ph0 ?? a, t1: ph1 ?? b } })
+      }
+      p.defects = kept
+      return { project: p }
+    })
+    if (dropped) {
+      const n = dropped % 100
+      const word = n >= 11 && n <= 14 ? 'отметок'
+        : n % 10 === 1 ? 'отметка'
+        : n % 10 >= 2 && n % 10 <= 4 ? 'отметки'
+        : 'отметок'
+      const verb = n % 10 === 1 && n !== 11 ? 'снята' : 'сняты'
+      warnings.push(`внутри заменённых фраз ${verb} ещё ${dropped} ${word}: ` +
+        'этого звука больше нет, переспросите детектор')
+    }
+    return { delta: total, warnings }
+  },
+
+  applyCheckResult: (runId, runPatch, defects) => {
+    get().pushHistory('hDefects')
+    set((s) => {
+      const p = clone(s.project)
+      p.voiceRuns = (p.voiceRuns ?? []).map((r) => (r.id === runId ? { ...r, ...runPatch } : r))
+      // прежние находки ЭТОГО прогона заменяем: повторный разбор — это новая
+      // правда о файле, а не добавка к старой. Вердикты пользователя по другим
+      // прогонам не трогаем.
+      // ВАЖНО для этапа обучения: решения по заменяемым находкам должны быть
+      // выгружены в корпус ДО этого вызова — здесь они перестают существовать.
+      const keep = (p.defects ?? []).filter((d) => d.runId !== runId || d.origin === 'user')
+      p.defects = [...keep, ...defects]
+      return { project: p }
+    })
+  },
+
+  addUserDefect: (d) => {
+    get().pushHistory('hDefectUser')
+    set((s) => ({ project: { ...s.project, defects: [...(s.project.defects ?? []), d] } }))
+  },
+
+  setDefectState: (ids, state, patch) => {
+    const list = Array.isArray(ids) ? ids : [ids]
+    if (!list.length) return
+    get().pushHistory('hDefectVerdict')
+    const now = Date.now()
+    set((s) => ({
+      project: {
+        ...s.project,
+        defects: (s.project.defects ?? []).map(
+          (d) => (list.includes(d.id) ? { ...d, ...patch, state, judgedAt: now } : d))
+      }
+    }))
+  },
+
+  updateDefect: (id, patch) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        defects: (s.project.defects ?? []).map((d) => (d.id === id ? { ...d, ...patch } : d))
+      }
+    })),
+
+  removeDefects: (ids) => {
+    const list = Array.isArray(ids) ? ids : [ids]
+    if (!list.length) return
+    get().pushHistory('hDefectDelete')
+    set((s) => ({
+      project: {
+        ...s.project,
+        defects: (s.project.defects ?? []).filter((d) => !list.includes(d.id))
+      }
+    }))
+  },
+
+  addVoiceOver: ({ asset, run, texts, trackId, at }) => {
+    // one history entry for the whole landing: the asset, its script docs, the
+    // run record and the clip belong together — undoing half of it would leave
+    // a voice-over whose audio or whose script is gone
+    get().pushHistory('hSpeak')
+    let result: { clipId: string; trackId: string } | null = null
+    set((s) => {
+      const p = clone(s.project)
+      p.assets = [...p.assets, asset]
+      if (texts?.length) p.texts = [...(p.texts ?? []), ...texts]
+      p.voiceRuns = [...(p.voiceRuns ?? []), run]
+      let track = trackId ? p.tracks.find((t) => t.id === trackId && !t.locked) : undefined
+      if (!track || track.kind !== 'audio') track = p.tracks.find((t) => t.kind === 'audio' && !t.locked)
+      if (!track) {
+        // insertClipsFromAssets would silently drop the clip here; a voice-over
+        // that produced no sound on the timeline is a failure, not a no-op
+        track = makeTrack(p, 'audio')
+        p.tracks.push(track)
+      }
+      const clip: Clip = {
+        id: uid(),
+        assetId: asset.id,
+        kind: 'media',
+        start: Math.max(0, at),
+        duration: asset.duration,
+        inPoint: 0,
+        label: asset.name,
+        ...newClipDefaults()
+      }
+      track.clips.push(clip)
+      result = { clipId: clip.id, trackId: track.id }
+      return { project: p, selection: [clip.id] }
+    })
+    return result
   },
 
   addTexts: (docs) => {

@@ -3,6 +3,7 @@
 import { transitionGlsl } from './transitions'
 import { edgeGlsl } from './edges'
 import { GLOW_FIELD_FS, GLOW_FS, type GlowParams } from './glow'
+import { logError } from '@/engine/log'
 
 const VS = `#version 300 es
 layout(location=0) in vec3 aPos;   // NDC xy premultiplied by w, plus w
@@ -879,7 +880,7 @@ export class Compositor {
       try {
         prog = this.buildProgram(TRANS_VS, transFS(transitionGlsl(type)))
       } catch (err) {
-        console.error(`[kadr] transition "${type}" failed to compile`, err)
+        logError('эффекты', `переход «${type}» не компилируется`, err)
         prog = this.buildProgram(TRANS_VS, transFS(transitionGlsl('crossfade')))
       }
       gl.useProgram(prog)
@@ -906,7 +907,7 @@ export class Compositor {
       try {
         prog = this.buildProgram(TRANS_VS, edgeFS(edgeGlsl(type)))
       } catch (err) {
-        console.error(`[kadr] edge effect "${type}" failed to compile`, err)
+        logError('эффекты', `краевой эффект «${type}» не компилируется`, err)
         prog = this.buildProgram(TRANS_VS, edgeFS(edgeGlsl('blurZoomIn')))
       }
       gl.useProgram(prog)

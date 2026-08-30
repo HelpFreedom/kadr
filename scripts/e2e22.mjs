@@ -206,7 +206,9 @@ try {
   check('MCP exposes kadr tools',
     JSON.stringify(names) === JSON.stringify(
       ['kadr_eval', 'kadr_export', 'kadr_fragment_create', 'kadr_neon_wave', 'kadr_snapshot',
-       'kadr_state', 'kadr_transcribe']),
+       'kadr_state', 'kadr_transcribe',
+       'kadr_voice_check', 'kadr_voice_learn', 'kadr_voice_mark', 'kadr_voice_regenerate',
+       'kadr_voice_speak', 'kadr_voice_verdict']),
     names.join(','))
 
   const state = await mcpCall('tools/call', { name: 'kadr_state', arguments: {} })

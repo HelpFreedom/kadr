@@ -10,8 +10,8 @@
 
 Kadr is a multi-track video editor (Electron + React + TypeScript) built
 around one idea: *an AI agent should be able to edit video next to you, on
-the same timeline, with the same tools.* Press 🤖, type «add animated
-captions to this part», watch it happen live in the preview.
+the same timeline, with the same tools.* Press “Claude”, type “add animated
+captions to this part”, watch it happen live in the preview.
 
 ## Highlights
 
@@ -55,6 +55,49 @@ captions to this part», watch it happen live in the preview.
 - 🌊 **Neon wave** — an audio-reactive glowing line driven by the loudness
   of the selected range (whole mix or a single track); restyle it in the
   fragment's code, the envelope matches Blender's "Bake Sound" exactly.
+- 🗣️ **ElevenLabs voice-over** — any text (from the media bin, a file on
+  disk, or typed into the dialog) becomes an audio clip on the timeline.
+  Long text is cut at sentence boundaries under the model's limit and
+  stitched with `previous_text`/`next_text`, so the intonation does not
+  break at the seams; the optional speed-up is applied in the same ffmpeg
+  pass as the decode, costing no extra generation. Output is FLAC and
+  keeps the channel count the synthesis returned (mono stays mono —
+  upmixing to stereo quietly cost 3 dB). **The API key never reaches the
+  renderer** and never enters the project file: it lives in `<userData>`
+  with mode 0600, and the page can only ask whether one is set.
+- 🎯 **Voice-over defect detection and single-phrase regeneration** — a
+  local detector (the author's own project, vendored into the editor)
+  marks suspicious spots on the timeline as violet bands: left-click for
+  "defect", right-click for "not a defect", double-click to hear the
+  phrase. Confirmed spots are **regenerated together in one pass**: the
+  new take is synthesised from the exact script substring with its
+  surrounding context, matched in tempo and level, and spliced with an
+  equal-power crossfade in the middle of the real silence between
+  sentences. The new length is measured, never computed, and everything
+  to the right shifts on every track, so picture and sound stay in sync.
+  Your verdicts accumulate and retrain the detector on request.
+- 🪟 **Preview in a window of its own** — the button next to the frame
+  snapshot detaches the preview into a real OS window: resize it, move it
+  to a second monitor, watch it full-screen while the timeline stays in
+  the main window. The very same canvas moves across — no GPU context is
+  rebuilt, no fragment reloads, and Space and the arrows drive the
+  transport from either window. A second click brings it back.
+- 🎨 **A real design system** — one token palette, icons instead of emoji
+  (every OS ships its own emoji font, and they never lined up with the
+  text beside them), contrast measured against WCAG 2.2 AA, a visible
+  keyboard focus ring, one shell behind every dialog (Escape, a focus
+  trap, and editor shortcuts that no longer fire through an open dialog),
+  and a timeline scrollbar you can actually grab — with a minimum thumb
+  size, because at high zoom on a 15-minute project it used to degenerate
+  into a single pixel.
+- 🧰 **Session log and storage panel** — two unobtrusive topbar buttons.
+  The log says what actually failed (twenty places used to report only to
+  the console), lives in memory only and dies with the window. Storage
+  shows what the editor has left on disk and splits it into rebuildable
+  (proxies, decoded intermediates, fragment renders — cleanable by type
+  and by project) and referenced (reversed clips, downloads, voice-overs),
+  which is never offered up to a cheerful one-click delete. Wipe the
+  proxies, open the project a year later — it picks them back up.
 - ⚛️ **Remotion fragments** — programmable React/TSX motion graphics as
   timeline clips. Live preview with hot reload (no renders while
   iterating!), automatic pixel-capture mode when you put GL effects, 3D or
@@ -104,8 +147,10 @@ captions to this part», watch it happen live in the preview.
 | Node.js ≥ 20 | everything | |
 | ffmpeg + ffprobe | import, audio mix, export | any recent build in PATH |
 | python3 + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | speech-to-text, auto-captions | `pip install faster-whisper`; models download on first use |
-| [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | the 🤖 panel | optional; uses your existing login |
+| [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | the “Claude” panel | optional; uses your existing login |
 | network (one-time) | Remotion fragments workspace | `~/kadr-fragments`, ~150 MB |
+| an [ElevenLabs](https://elevenlabs.io) key | voice-over | optional; entered in the voice-over settings and kept outside the project |
+| python ≥ 3.11 with torch | voice-over defect detection | optional; the interpreter is a setting, and without it the module degrades to plain voice-over instead of breaking |
 
 ## Getting started
 
@@ -115,8 +160,8 @@ npm install        # postinstall rebuilds node-pty for Electron
 npm run dev
 ```
 
-Import media, edit, press Export. For the AI assistant press 🤖 (the
-`claude` CLI must be installed and logged in). If your network needs a
+Import media, edit, press Export. For the AI assistant press “Claude”
+in the topbar (the `claude` CLI must be installed and logged in). If your network needs a
 proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
 
 ```json
@@ -126,15 +171,22 @@ proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
 ## How the AI integration works
 
 Kadr starts a local HTTP bridge into the renderer and hands Claude an MCP
-server with five tools:
+server with thirteen tools:
 
 | Tool | What it does |
 |---|---|
 | `kadr_state` | full live project: tracks, clips, asset paths, transcripts, presets |
 | `kadr_eval` | run JS against the editor API (every edit lands in undo history) |
+| `kadr_snapshot` | render the frame to a PNG — the agent's eyes: it sees what you see |
 | `kadr_export` | render the project or a range and wait for the file |
 | `kadr_transcribe` | local Whisper over a file or a timeline range |
 | `kadr_fragment_create` | scaffold a Remotion composition as a timeline clip |
+| `kadr_neon_wave` | an audio-reactive wave over a range |
+| `kadr_voice_speak` | synthesise text and drop the clip on the timeline |
+| `kadr_voice_check` | run the defect detector over a voice-over |
+| `kadr_voice_mark` · `kadr_voice_verdict` | place your own mark · rule on a finding |
+| `kadr_voice_regenerate` | regenerate the confirmed phrases (only those) |
+| `kadr_voice_learn` | report the labelled corpus, and retrain only on explicit confirmation |
 
 The killer loop: Claude creates a fragment, edits its TSX with normal file
 tools, and vite hot-reloads it into your preview in ~2 seconds — you give
@@ -152,12 +204,32 @@ node scripts/e2e13.mjs                                  # terminal 2 (etc.)
 They cover transitions, glow, presets, proxies, export fidelity
 (fast-vs-fallback PSNR), motion blur, frame blending cadence, the MCP
 bridge, transcription anti-hallucination, fragments and capture mode,
-autosave semantics and auto-captions.
+autosave semantics, auto-captions, the design system (contrast, no emoji,
+focus, the dialog contract), the session log, the storage panel (the
+"wipe the proxies, open it a year later" promise is checked in pixels),
+the detached preview window, voice-over, marking and phrase
+regeneration, and the shape of the training corpus.
+
+Four more checks are pure maths — no app, no network:
+
+```bash
+node scripts/check-envelope.mjs   # loudness envelope (Blender's Bake Sound)
+node scripts/check-ttstext.mjs    # cutting long text at real boundaries
+node scripts/check-proxy.mjs      # which proxy is used, and how Chromium is told
+node scripts/check-voicemap.mjs   # remapping times after a phrase is spliced in
+```
 
 ## Documentation
 
 - [FEATURES.md](FEATURES.md) — the full feature guide (Russian, 1200+ lines).
 - [CLAUDE.md](CLAUDE.md) — architecture map (also read by Claude Code).
+
+## Authors
+
+- **Black Triangle** — repository owner: direction, acceptance, and all of
+  the editing and audio expertise behind the features.
+- **Claude** (Anthropic) — pair development: implementation, measurements,
+  tests, and this documentation.
 
 ## License
 

@@ -13,13 +13,30 @@ mixes audio and muxes/transcodes per preset.
 - `node scripts/e2eNN.mjs` — CDP smoke tests; first start the app with
   `npx electron-vite dev -- --remote-debugging-port=9777`; generate the
   test media with `scripts/gen-test-media.sh` (the older suites need it;
-  newer suites create their own files in `/tmp/kadr-test`)
+  newer suites create their own files in `/tmp/kadr-test`). The voice-over
+  suites need `KADR_TTS_MOCK=1` in the app's environment, or they would
+  spend real API credits.
+- Pure node checks — no app, no network:
+  `node scripts/check-envelope.mjs` (loudness envelope),
+  `check-ttstext.mjs` (text splitting), `check-proxy.mjs` (proxy choice),
+  `check-voicemap.mjs` (time remapping after a splice); plus
+  `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
+- `node scripts/gen-icons.mjs [dir]` — regenerate `src/components/icons.tsx`
+  from lucide (see the header for the two-line fetch); never hand-edit the
+  paths.
+- `node scripts/hold-viewport.mjs [w] [h]` — force the page's layout
+  viewport while coordinate-driven suites run (a tiling window manager can
+  pin the editor window at a size those suites do not expect).
 
 ## Requirements
 - Node.js ≥ 20, system `ffmpeg`/`ffprobe` in PATH
 - Optional: `python3` + `faster-whisper` (speech-to-text), the `claude`
   CLI (embedded AI assistant), network access for the one-time Remotion
   workspace install
+- Optional for voice-over: an ElevenLabs API key (entered in the app,
+  stored outside the project); for the defect detector, python ≥ 3.11
+  with `torch` — the interpreter is a setting (`KADR_TTSQC_PYTHON`), and
+  the module degrades to plain voice-over when it is missing
 
 ## Architecture
 - `shared/types.ts` — the entire project model (Project/Track/Clip/Anim/
@@ -254,6 +271,115 @@ mixes audio and muxes/transcodes per preset.
   `removeMarker` in the store, flags drawn by `Timeline.tsx`, M key in
   `App.tsx`): project-wide time labels, not bound to a track, and part of
   `kadr_state` so the embedded Claude can read and place them.
+- `electron/tts.ts` + `src/engine/tts.ts` + `shared/ttsText.ts` — ElevenLabs
+  voice-over. THE KEY NEVER REACHES THE RENDERER: the page is scriptable
+  (`kadr_eval`), so the key lives in `<userData>/elevenlabs-key.json`,
+  written 0600 on the `open()` rather than chmod'ed afterwards, and the
+  page can only set it or ask whether one exists. `TtsParams` has no key
+  field. Long text is cut at the strongest available boundary (paragraph →
+  sentence → clause → space) under the model's cap and stitched with
+  previous_text/next_text plus previous_request_ids; the pieces rejoin to
+  the input BYTE FOR BYTE, because the defect detector addresses the
+  script by character offset and one lost space would shift every later
+  index. The optional speed-up rides the same ffmpeg pass as the decode
+  and is stored on the run, never re-read from the current settings — a
+  regenerated phrase must be sped up like the file it goes into. Output is
+  FLAC in the source's own channel layout: forcing stereo duplicated the
+  channel and cost exactly 3.01 dB through ffmpeg's downmix matrix.
+  `KADR_TTS_MOCK=1` synthesises speech-shaped audio locally so tests never
+  spend credits.
+- `shared/proxy.ts` — which proxy the API calls use, and how to spell it
+  for Chromium (`https=host:port;http=host:port`, or a full `socks5://`).
+  `net.fetch` always uses the DEFAULT session, whose proxy Chromium picks
+  by itself and may well settle on HTTP_PROXY when only HTTPS_PROXY can
+  reach the API — the proxy's own error PAGE then arrives where JSON was
+  expected («Unexpected token '<'»). The module owns a partitioned session
+  and sets the proxy explicitly. Node's fetch is not an option: it ignores
+  proxy environment variables entirely. Test: `node scripts/check-proxy.mjs`.
+- `electron/voice.ts` + `python/ttsqc` + `scripts/ttsqc_run.py` — the
+  voice-over defect detector, vendored with its light weights. Findings
+  land in `Project.defects`, runs in `Project.voiceRuns`; TIMES ARE SOURCE
+  SECONDS AND THE RECORD BINDS TO `assetId`, not to a clip — clips are
+  moved, trimmed, split and rippled, so a timeline number would be stale
+  after the first edit, while a source number only goes wrong when the
+  FILE changes, which is exactly what invalidates the finding anyway.
+  Phrase boundaries are computed in `python/kadr_phrases.py` (pure
+  numbers, testable on synthetic audio via `scripts/check-phrases.py`):
+  the cut is the middle of the LONGEST REAL SILENCE in the gap between
+  sentences, found from Silero speech probabilities refined by 5 ms RMS.
+- `src/engine/voiceRegen.ts` + `shared/voiceMap.ts` — regeneration.
+  EVERYTHING CONFIRMED ON ONE VOICE-OVER IS DONE IN ONE PASS: doing them
+  one at a time would mean recomputing every later cut inside an
+  already-shifted file. The patch is synthesised from the exact script
+  substring with surrounding context, sped up by the RUN's factor, matched
+  to the level and edge silence of what it replaces, and spliced with
+  `acrossfade=c1=qsin:c2=qsin` (a linear fade dips 3 dB mid-speech). The
+  new length is MEASURED with probeMedia, never computed, and everything
+  to the right shifts on all unlocked tracks. A clip whose EDGE falls
+  inside a replaced phrase is refused by name instead of being guessed at.
+  `voice:reindex` carries the analysis over the splice, because the index
+  describes the file as it was analysed and every splice rewrites it.
+- `src/engine/voiceLearn.ts` — verdicts go to the run's own corpus in the
+  detector's format. HAND-PLACED MARKS GO IN A SEPARATE FILE: a verdict
+  row matching no candidate lowers the match count, and once such rows are
+  more than half the file the WHOLE file is discarded, real labels
+  included. Retraining is never automatic — it rebuilds from scratch, so
+  the previous model is copied aside first, cross-validation numbers are
+  printed, and it refuses below 30 examples across ≥2 files.
+- `src/styles.css` — THE design system, and the only place a colour, a
+  size, a radius or a duration may be born: `:root` holds the neutral ramp
+  and accent, the same colours as channels for washes, and the editing
+  colours that are part of the model rather than decoration. Nothing below
+  `:root` carries a literal colour — a grep for `#` outside the token
+  block must come back empty. Contrast is MEASURED against WCAG 2.2 AA.
+  SCROLLBARS are a trap: Chromium's standard properties and the
+  `::-webkit-scrollbar` pseudo-elements are mutually exclusive — set
+  `scrollbar-width` to anything but `auto` and every pseudo-element rule
+  is dropped silently, and only the pseudo-element path can set a MINIMUM
+  thumb size, which the timeline needs (its thumb is proportional to the
+  zoom and degenerates to under a pixel at high zoom).
+- `src/components/icons.tsx` — the icon set: lucide (ISC) inlined as SVG,
+  no dependency and no network. GENERATED by `scripts/gen-icons.mjs`; add
+  a glyph by adding a line to its MAP, never by hand-editing the paths.
+  Emoji used to do this job and are banned from the interface: their
+  shape, weight and colour come from whatever font the OS ships.
+- `src/components/Modal.tsx` — the one shell all dialogs use: titled head,
+  scrolling body, fixed footer, `role="dialog"`, Escape, a real focus trap
+  and focus restored. It also exports `modalsOpen()`, which App.tsx checks
+  before acting on a global shortcut — Space on a focused dialog button
+  used to press the button AND start playback behind it.
+- `src/engine/log.ts` + `src/components/DebugPanel.tsx` — the session log.
+  Twenty places reported failures with `console.warn` and nothing else, so
+  a snapshot that did not happen and an import that brought nothing in
+  both looked like "I clicked and nothing happened". IN MEMORY ONLY: a
+  ring of 500 entries that dies with the window. The button is silent
+  until something fails; INFO never raises it, and benign browser notices
+  (`ResizeObserver loop …`) are recorded as INFO rather than as failures.
+- `electron/storage.ts` + `electron/cacheKeys.ts` + `StoragePanel.tsx` —
+  what the editor has left on disk. The split that governs everything is
+  REBUILDABLE vs REFERENCED: a proxy, a decoded intermediate and a
+  fragment render are named after their source (a hash of path+size+mtime),
+  so deleting one costs time and nothing else; a reversed clip, a download
+  and a voice-over run are stored BY PATH in the project and cannot be
+  derived again. The key formula lives in its own file because a second
+  copy would drift, and a drifted formula aims a delete button at the
+  wrong file. Projects are keyed BY PATH, never by name. `storage:prune`
+  FAILS CLOSED: without an explicit `confirm: true` it only counts, so a
+  caller newer than the handler errs towards keeping the files.
+- `src/engine/popout.ts` — the preview in an OS window of its own. NOTHING
+  IS REBUILT ON THE WAY OVER: the preview always lives in ONE host div
+  that a React portal renders into, and popping out only moves that div
+  into the popup's document — re-creating it would mean a fresh GL context
+  every toggle (Chromium keeps 16 per renderer and force-loses the oldest)
+  and a reload of every fragment iframe. The popup is `about:blank` opened
+  with `window.open`: same origin and same renderer process, which is the
+  only reason the live canvas can be adopted. THE CLOCK AND THE OBSERVERS
+  FOLLOW THE CANVAS, not the window they were born in — the rAF loop
+  re-reads `canvas.ownerDocument.defaultView` every frame, and the
+  ResizeObservers in the moved subtree are rebuilt in the new window (an
+  observer belongs to the document it was created in and delivers NOTHING
+  for an element in another one). Rule of thumb for anything added inside
+  the preview: if it says `window.`, ask which window.
 - `window.kadrEditor` (set in `src/main.tsx`) — scripting surface for
   automation / AI / MCP integration.
 
@@ -262,6 +388,11 @@ mixes audio and muxes/transcodes per preset.
 globals and poll (`awaitPromise` is flaky under GC). Tests autosave any
 non-empty live project before reloading the page, and back up/restore
 `claude-env.json` when they override the Claude command.
+
+A suite that touches a user store MUST snapshot and restore it: the
+preset stores, the Claude command override, the voice-over settings and
+the ElevenLabs key are all real user data shared with real sessions, and
+each of them has been destroyed by a test at least once.
 
 ## Conventions
 - All timeline math in seconds; keyframe times are clip-local.

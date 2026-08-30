@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useEditor } from '@/state/store'
 import { evalAnim } from '@/engine/anim'
+import { usePopout } from '@/engine/popout'
 
 /**
  * Mouse control for the selected remotion clip in the preview: drag the
@@ -9,6 +10,8 @@ import { evalAnim } from '@/engine/anim'
  * and the pixel-capture mode, and matches the final render exactly.
  */
 export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasElement> }) {
+  // the preview may be detached into a window of its own — see the observer below
+  const popped = usePopout((s) => s.win)
   const selId = useEditor((s) => s.selection[0])
   const project = useEditor((s) => s.project)
   const playhead = useEditor((s) => s.playhead)
@@ -42,10 +45,20 @@ export function FragmentGizmo({ canvas }: { canvas: React.RefObject<HTMLCanvasEl
       setRect({ left: c.left - p.left, top: c.top - p.top, w: c.width, h: c.height })
     }
     measure()
-    const ro = new ResizeObserver(measure)
+    // created in the window the canvas is in, and rebuilt when the preview
+    // moves to another one — see the same note in FragmentOverlays
+    const win = el.ownerDocument.defaultView ?? window
+    let raf = 0
+    const ro = new win.ResizeObserver(() => {
+      win.cancelAnimationFrame(raf)
+      raf = win.requestAnimationFrame(measure)
+    })
     ro.observe(el)
-    return () => ro.disconnect()
-  }, [canvas, active])
+    return () => {
+      try { win.cancelAnimationFrame(raf) } catch { /* window gone */ }
+      ro.disconnect()
+    }
+  }, [canvas, active, popped])
 
   if (!found || !active || !rect) return null
   const clip = found

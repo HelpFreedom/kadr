@@ -185,7 +185,7 @@ try {
   // --- 5. toolbar button follows the range
   const btn = await evalJs(`(async () => {
     const st = window.kadrEditor.useEditor.getState
-    const find = () => [...document.querySelectorAll('.tl-toolbar button')].find((b) => b.textContent.includes('🌊'))
+    const find = () => document.querySelector('.tl-toolbar button[data-act="neon-wave"]')
     st().setRange(null); await new Promise((r) => setTimeout(r, 150))
     const without = find()?.disabled
     st().setRange({ start: 1, end: 2 }); await new Promise((r) => setTimeout(r, 150))
@@ -193,7 +193,7 @@ try {
     st().setRange(null)
     return { without, withRange }
   })()`)
-  check('🌊 button disabled without a range, enabled with one', btn.without === true && btn.withRange === false, JSON.stringify(btn))
+  check('the wave button is disabled without a range, enabled with one', btn.without === true && btn.withRange === false, JSON.stringify(btn))
 } finally {
   // deleteFragment also removes the referencing clips (a bare fragmentDelete leaves zombies)
   await evalJs(`(async () => { for (const id of ${JSON.stringify(created)}) await window.kadrEditor.deleteFragment(id).catch(() => {}); return 1 })()`).catch(() => {})

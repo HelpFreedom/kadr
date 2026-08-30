@@ -7,6 +7,8 @@ import { useEditor } from '@/state/store'
 import { neonWave, NEON_WAVE_DEFAULTS, type NeonWaveStyle } from '@/engine/neonWave'
 import { audibleTracksInRange } from '@/engine/subtitles'
 import { useT } from '@/i18n'
+import { Icon } from './icons'
+import { Modal } from './Modal'
 
 export const useNeonWaveUi = create<{ open: boolean; setOpen(v: boolean): void }>((set) => ({
   open: false,
@@ -64,82 +66,90 @@ export function NeonWaveDialog() {
   }
 
   return (
-    <div className="modal-back" onClick={close}>
-      <div className="modal captions-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('nwTitle')}</h2>
-        {!range ? (
-          <div className="tr-error">{t('nwNeedRange')}</div>
-        ) : (
-          <>
-            <div className="insp-field">
-              <span>{t('capTarget')}</span>
-              <span>
-                {t('trSourceRange')}: {range.start.toFixed(1)}–{range.end.toFixed(1)} c
-              </span>
-            </div>
-            <div className="insp-field">
-              <span>{t('nwSource')}</span>
-              <div className="nw-sources">
-                <label>
+    <Modal
+      title={t('nwTitle')}
+      onClose={close}
+      titleIcon={<Icon name="wave" size={17} />}
+      closeDisabled={running}
+      actions={
+        <>
+        <button onClick={close} disabled={running}>{t('cancel')}</button>
+        {range && (
+          <button className="primary" onClick={run} disabled={running}>{t('nwRun')}</button>
+        )}
+        </>
+      }
+    >
+      {!range ? (
+        <div className="tr-error">
+          <Icon name="alert" size={15} /><span>{t('nwNeedRange')}</span>
+        </div>
+      ) : (
+        <>
+          <div className="insp-field">
+            <span>{t('capTarget')}</span>
+            <span>
+              {t('trSourceRange')}: {range.start.toFixed(1)}–{range.end.toFixed(1)} c
+            </span>
+          </div>
+          <div className="insp-field">
+            <span>{t('nwSource')}</span>
+            <div className="nw-sources">
+              <label>
+                <input
+                  type="radio"
+                  name="nw-source"
+                  checked={trackSource === 'mix'}
+                  disabled={running}
+                  onChange={() => setSource('mix')}
+                />{' '}
+                {t('nwMix')}
+              </label>
+              {tracks.map((tr) => (
+                <label key={tr.id}>
                   <input
                     type="radio"
                     name="nw-source"
-                    checked={trackSource === 'mix'}
+                    checked={trackSource === tr.id}
                     disabled={running}
-                    onChange={() => setSource('mix')}
+                    onChange={() => setSource(tr.id)}
                   />{' '}
-                  {t('nwMix')}
+                  {t('nwTrack')} · {tr.name}
                 </label>
-                {tracks.map((tr) => (
-                  <label key={tr.id}>
-                    <input
-                      type="radio"
-                      name="nw-source"
-                      checked={trackSource === tr.id}
-                      disabled={running}
-                      onChange={() => setSource(tr.id)}
-                    />{' '}
-                    {t('nwTrack')} · {tr.name}
-                  </label>
-                ))}
-                {!tracks.length && <div className="dim">{t('nwNoAudio')}</div>}
-              </div>
+              ))}
+              {!tracks.length && <div className="dim">{t('nwNoAudio')}</div>}
             </div>
-            <label className="insp-field">
-              <span>{t('nwAmp')}</span>
-              <input type="range" min={0.25} max={3} step={0.05} value={amp} disabled={running}
-                onChange={(e) => setAmp(Number(e.target.value))} />
-              <span className="fx-val">{amp.toFixed(2)}×</span>
-            </label>
-            <label className="insp-field">
-              <span>{t('nwGlow')}</span>
-              <input type="range" min={0} max={2} step={0.05} value={glow} disabled={running}
-                onChange={(e) => setGlow(Number(e.target.value))} />
-              <span className="fx-val">{glow.toFixed(2)}×</span>
-            </label>
-            <label className="insp-field">
-              <span>{t('nwSpeed')}</span>
-              <input type="range" min={0.1} max={3} step={0.05} value={speed} disabled={running}
-                onChange={(e) => setSpeed(Number(e.target.value))} />
-              <span className="fx-val">{speed.toFixed(2)}×</span>
-            </label>
-            <div className="dim">{t('nwHint')}</div>
-          </>
-        )}
-        {running && (
-          <div className="export-progress">
-            <progress />
-            <div className="dim tr-live">{t('nwWorking')}</div>
           </div>
-        )}
-        {error && <div className="tr-error">{error}</div>}
-        <div className="modal-actions">
-          <button onClick={close} disabled={running}>{t('cancel')}</button>
-          {range && (
-            <button className="primary" onClick={run} disabled={running}>{t('nwRun')}</button>
-          )}
+          <label className="insp-field">
+            <span>{t('nwAmp')}</span>
+            <input type="range" min={0.25} max={3} step={0.05} value={amp} disabled={running}
+              onChange={(e) => setAmp(Number(e.target.value))} />
+            <span className="fx-val">{amp.toFixed(2)}×</span>
+          </label>
+          <label className="insp-field">
+            <span>{t('nwGlow')}</span>
+            <input type="range" min={0} max={2} step={0.05} value={glow} disabled={running}
+              onChange={(e) => setGlow(Number(e.target.value))} />
+            <span className="fx-val">{glow.toFixed(2)}×</span>
+          </label>
+          <label className="insp-field">
+            <span>{t('nwSpeed')}</span>
+            <input type="range" min={0.1} max={3} step={0.05} value={speed} disabled={running}
+              onChange={(e) => setSpeed(Number(e.target.value))} />
+            <span className="fx-val">{speed.toFixed(2)}×</span>
+          </label>
+          <div className="dim">{t('nwHint')}</div>
+        </>
+      )}
+      {running && (
+        <div className="export-progress">
+          <progress />
+          <div className="dim tr-live">{t('nwWorking')}</div>
         </div>
-      </div>
-    </div>
+      )}
+      {error && (
+        <div className="tr-error"><Icon name="alert" size={15} /><span>{error}</span></div>
+      )}
+    </Modal>
   )
 }

@@ -234,7 +234,7 @@ check('track motion scale keyframes shrink the whole track over time',
 await evalJs(`(() => {
   const head = [...document.querySelectorAll('.track-head')]
     .find(h => h.querySelector('.track-name')?.textContent === 'V1')
-  const btn = [...head.querySelectorAll('button')].find(b => b.textContent === '✥')
+  const btn = head.querySelector('button[data-act="track-motion"]')
   btn.click()
   return 1
 })()`)

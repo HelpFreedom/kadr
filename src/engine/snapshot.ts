@@ -12,6 +12,7 @@ import {
 } from './fragmentCapture'
 import { ensureFragmentServer } from './fragments'
 import { importFiles } from './mediaImport'
+import { logWarn } from './log'
 
 let previewCanvas: HTMLCanvasElement | null = null
 let previewPlayer: { setSourceQuality(on: boolean): void; drawNow(): void } | null = null
@@ -134,7 +135,7 @@ export async function snapshotFrame(opts: {
           got: await window.kadr.fragmentCaptureQuery(x.fragmentId),
           v0: v0.get(x.fragmentId), v: captureVersion(x.fragmentId)
         })))
-        console.warn('[kadr] snapshot fragment wait TIMED OUT', JSON.stringify(dbg))
+        logWarn('снимок', 'фрагменты не успели показать нужный кадр', dbg)
       }
     }
     await sleep(600)

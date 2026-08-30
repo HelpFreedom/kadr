@@ -6,6 +6,7 @@ import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
 import { getTextLayer } from './text'
 import { attachAudio, setElementGain, isRouted, resumeAudio } from './audio'
+import { logError } from './log'
 
 export interface ActiveLayer {
   clip: Clip
@@ -550,6 +551,9 @@ export class Player {
   private onRestored: (() => void) | null = null
   private pool = new MediaPool({ audio: true, proxy: true })
   private raf = 0
+  /** the window whose rAF drives the loop — see schedule() */
+  private view: Window = window
+  private schedule: (() => void) | null = null
   private gcCounter = 0
   private wasLoading = false
   private lastDrawnProject: Project | null = null
@@ -610,7 +614,7 @@ export class Player {
         this.comp = new Compositor(canvas)
         this.hooks.setGpuLost(false)
       } catch (err) {
-        console.error('preview: GL context restored but the compositor failed to rebuild:', err)
+        logError('превью', 'контекст GPU вернулся, но композитор не пересобрался', err)
       }
     }
     canvas.addEventListener('webglcontextlost', this.onLost)
@@ -625,16 +629,36 @@ export class Player {
       } catch (err) {
         if (ts - lastErrLog > 2000) {
           lastErrLog = ts
-          console.error('player tick failed:', err)
+          logError('превью', 'кадр не отрисовался', err)
         }
       }
-      this.raf = requestAnimationFrame(loop)
+      schedule()
     }
-    this.raf = requestAnimationFrame(loop)
+    // The clock follows the canvas, not the window it was born in: once the
+    // preview is detached into its own OS window (engine/popout.ts) the
+    // editor's window may be minimised, and a minimised window's rAF is
+    // throttled to a crawl — playback would stall in the very window the
+    // user is watching. Re-read every frame, so a move needs no notification.
+    const schedule = () => {
+      const v = this.canvas?.ownerDocument.defaultView
+      this.view = v && !v.closed ? v : window
+      this.raf = this.view.requestAnimationFrame(loop)
+    }
+    this.schedule = schedule
+    schedule()
+  }
+
+  /** Re-aim the loop after the canvas changed windows (or its window died). */
+  kick() {
+    if (!this.schedule) return
+    try { this.view.cancelAnimationFrame(this.raf) } catch { /* window gone */ }
+    this.schedule()
   }
 
   detach() {
-    cancelAnimationFrame(this.raf)
+    try { this.view.cancelAnimationFrame(this.raf) } catch { /* window gone */ }
+    this.schedule = null
+    this.view = window
     if (this.canvas && this.onLost) this.canvas.removeEventListener('webglcontextlost', this.onLost)
     if (this.canvas && this.onRestored) this.canvas.removeEventListener('webglcontextrestored', this.onRestored)
     this.canvas = null

@@ -158,7 +158,16 @@ export function sanitizeProject(p: Project): Project {
       if (!Number.isFinite(c.speed) || c.speed <= 0) c.speed = 1
       c.transform = { ...newClipDefaults().transform, ...(c.transform ?? {}) }
       c.gain = anim(c.gain, 1)
-      c.effects ??= []
+      // same invariant updateClip enforces on a live patch: a hand-edited or
+      // foreign project file can carry an effect with no params, and every
+      // reader (BlurControls, GlowControls, …) reads fx.params directly
+      c.effects = (c.effects ?? [])
+        .filter((e) => e && typeof e.id === 'string' && typeof e.type === 'string')
+        .map((e) => ({
+          ...e,
+          enabled: typeof e.enabled === 'boolean' ? e.enabled : true,
+          params: e.params && typeof e.params === 'object' ? e.params : {}
+        }))
       forEachAnim(c, (a) => anim(a, Number.isFinite((a as Anim)?.value) ? (a as Anim).value : 0))
     }
   }
@@ -1178,7 +1187,22 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((s) => {
       const p = clone(s.project)
       const f = findClip(p, clipId)
-      if (f) Object.assign(f.clip, patch)
+      if (f) {
+        Object.assign(f.clip, patch)
+        // a patch built outside the effects UI (kadr_eval, foreign project
+        // data) can hand an effect with no params — every reader downstream
+        // (BlurControls, GlowControls, and any future consumer) assumes the
+        // Effect shape and reads fx.params directly, so an id/type-less or
+        // params-less entry here becomes an uncaught render crash the moment
+        // the clip is selected, not a contained failure
+        f.clip.effects = (f.clip.effects ?? [])
+          .filter((e) => e && typeof e.id === 'string' && typeof e.type === 'string')
+          .map((e) => ({
+            ...e,
+            enabled: typeof e.enabled === 'boolean' ? e.enabled : true,
+            params: e.params && typeof e.params === 'object' ? e.params : {}
+          }))
+      }
       return { project: p }
     }),
 

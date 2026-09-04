@@ -452,12 +452,10 @@ export class ExportMuxer {
         const outDur = s.duration / speed // timeline-domain length after atempo
         const chain = [
           'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
-          // Input-seeked real files (`-ss inPoint -i file`) hand filter_complex a
-          // stream whose first sample carries a non-zero source PTS. adelay/atrim
-          // then work in that shifted time base and the per-clip delay is lost, so
-          // amix stacks every clip at t=0 (all audio collapses to the start). Zero
-          // the PTS here — as a lavfi source already is — so adelay places the clip
-          // at `ms` and atrim frames [0, job.duration) correctly.
+          // Normalize the start PTS to 0 (a lavfi source already is). Defensive:
+          // some containers hand filter_complex a non-zero first PTS after an
+          // input seek. NOTE this alone does NOT fix the "clip jumps to t=0" bug —
+          // see the pad below for the actual cause.
           'asetpts=PTS-STARTPTS',
           `volume=${s.gain.toFixed(4)}`,
           ...(Math.abs(speed - 1) > 1e-4 ? atempoChain(speed) : []),
@@ -466,8 +464,16 @@ export class ExportMuxer {
             ? [`afade=t=out:st=${Math.max(0, outDur - s.fadeOut).toFixed(3)}:d=${Math.min(s.fadeOut, outDur).toFixed(3)}`]
             : []),
           `adelay=${ms}|${ms}`,
-          'apad',
-          `atrim=0:${job.duration.toFixed(3)}`
+          // Pad each stream to exactly job.duration with a BOUNDED pad so amix
+          // (duration=longest) reaches EOF — instead of an unbounded `apad`
+          // followed by `atrim=0:job.duration`. That trailing atrim is the real
+          // cause of the audio-collapse bug: on an input-seeked segment
+          // (`-ss inPoint -i file`, i.e. inPoint > 0) it throws the delayed audio
+          // back to t=0 and leaves its slot silent — even with PTS re-zeroed
+          // (verified: asetpts=N/SR/TB + atrim still collapses; any chain without
+          // the trailing atrim places the clip correctly). Segments are already
+          // range-bounded, so nothing here can exceed job.duration.
+          `apad=whole_dur=${job.duration.toFixed(3)}`
         ]
         filters.push(`[${idx}:a]${chain.join(',')}[a${i}]`)
         labels.push(`[a${i}]`)

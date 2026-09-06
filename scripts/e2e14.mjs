@@ -241,8 +241,14 @@ const clamp = await evalJs(`(() => {
   const r = m.getBoundingClientRect()
   return { open: true, top: Math.round(r.top), bottom: Math.round(r.bottom), h: Math.round(r.height) }
 })()`)
+// NB the scenario is established by `badge.y + clamp.h > badge.vh` — the menu
+// WOULD have overflowed from where it was opened. An earlier version also
+// demanded the badge itself sit below vh-300, which is a claim about the
+// LAYOUT, not about the menu: the timeline height and the track height are
+// user settings that persist, and with a taller timeline the badge legitimately
+// sits higher while the menu still overflows and still has to be clamped.
 check('menu opened at the bottom edge is clamped into the viewport',
-  clamp.open && badge.y > badge.vh - 300 && clamp.top >= 0 && clamp.bottom <= badge.vh &&
+  clamp.open && clamp.top >= 0 && clamp.bottom <= badge.vh &&
   badge.y + clamp.h > badge.vh,
   JSON.stringify({ badge: { y: Math.round(badge.y), vh: badge.vh }, clamp }))
 

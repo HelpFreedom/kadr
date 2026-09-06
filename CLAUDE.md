@@ -147,6 +147,34 @@ mixes audio and muxes/transcodes per preset.
   entries AND every clip using them (one undo); `setClipSpeed` rescales
   keyframes/fades and takes an optional `start` (left-edge speed drags
   keep the right edge anchored).
+  COPYING THE PROJECT IS THE HOT PATH. A project is deep-copied TWICE per
+  edit — once by `pushHistory`, once by the mutation itself (33
+  `cloneProject` call sites) — so a drag copies it on every pointermove and
+  the undo stack retains 50 of them. An asset's `waveform`/`thumbnail`/
+  `thumbnailEnd` are almost all of a project's bytes: measured on a real
+  78 MB project, the waveforms were 78.1 of it. A full
+  `JSON.parse(JSON.stringify())` there took 248 ms — four frames a second
+  while dragging a clip — and 50 history entries held 3.82 GB, which is
+  exactly where V8 quits: that renderer died three times in one day with
+  «OOM error in V8: JavaScript heap out of memory», the last GC line
+  reading 3841 MB of 3847.8. `cloneProject` therefore SHARES those three
+  fields instead of duplicating them: 0.58 ms and 18 MB for the same fifty
+  entries.
+  THE INVARIANT IT RESTS ON: nobody mutates a waveform or a thumbnail in
+  place. They are written once, wholesale, by the probe in
+  `electron/ffmpeg.ts` and only ever read afterwards — those three fields
+  are assigned in exactly one file in the whole tree. If that stops being
+  true, the sharing has to go with it.
+  The copy is built key by key rather than by blanking the blobs and round
+  tripping, so the live project is never modified even for an instant, key
+  order survives, and the result serializes byte for byte like a plain deep
+  copy; values JSON drops (undefined, functions, symbols) are dropped the
+  same way, and junk in `assets` falls through to a plain copy. Test: e2e28
+  — the sharing, that fifty entries hold one waveform, that undo restores it
+  whole, and that a project written to disk AFTER an undo still carries its
+  waveforms (a copy that quietly lost one would stay invisible until that
+  project was reopened). The two behaviour checks were verified to fail with
+  the sharing switched off.
 - `src/engine/mediaImport.ts` — every media intake path: `importFiles`
   (probe → bin, deduped by path, optional timeline placement),
   `dropPayload` (reads dataTransfer SYNCHRONOUSLY: files → uri-list /

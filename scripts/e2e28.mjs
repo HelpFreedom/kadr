@@ -3,7 +3,7 @@
 // dot; the flash disappears on its own; a new edit brings the dot back.
 import WebSocket from 'ws'
 import { execFileSync } from 'child_process'
-import { statSync } from 'fs'
+import { statSync, readFileSync } from 'fs'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
 
@@ -137,6 +137,141 @@ const again = await evalJs(`(async () => {
   return !!document.querySelector('.dirty-dot')
 })()`)
 check('the next edit brings the dot back', again === true)
+
+// ---------------------------------------------------------------- history size
+//
+// A project is deep-copied twice per edit — by the mutation and by the history
+// entry — and an asset's waveform and thumbnails are almost all of its bytes.
+// On a real 78 MB project a full copy took 248 ms (four frames per second while
+// dragging a clip) and fifty history entries held 3.82 GB, which is exactly
+// where V8 quits: "JavaScript heap out of memory", three times in one working
+// day. So cloneProject() SHARES those derived blobs instead of duplicating
+// them, and the checks below hold that in place from both sides — the copy must
+// still be a genuine deep copy of everything else, and the blobs must still
+// reach the file on disk.
+
+const BLOB = 'W'.repeat(4096)          // stands in for a waveform's base64
+const PROJ = '/tmp/kadr-test/save/blob.kadr'
+
+const hist = await evalJs(`(async () => {
+  const E = window.kadrEditor, st = () => E.useEditor.getState()
+  st().setProject({
+    ...st().project, name: 'blob-test', assets: [], tracks: [],
+    texts: [], markers: [], defects: [], voiceRuns: []
+  }, ${JSON.stringify(PROJ)})
+  st().addTrack('video')
+  st().addAsset({ id: 'A1', path: '/tmp/kadr-test/none.mp4', name: 'none.mp4',
+                  kind: 'video', duration: 5, width: 16, height: 9, fps: 30,
+                  hasAudio: true,
+                  waveform: { rate: 1000, max: ${JSON.stringify(BLOB)}, rms: ${JSON.stringify(BLOB)} },
+                  thumbnail: ${JSON.stringify(BLOB)} })
+  st().insertTextClip(0)
+  await new Promise((r) => setTimeout(r, 100))
+
+  const liveBefore = st().project
+  const clipId = st().project.tracks.flatMap((t) => t.clips)[0].id
+  const wasName = st().project.name
+
+  st().pushHistory('hRename')
+  st().updateClip(clipId, { start: 3.25 })
+  await new Promise((r) => setTimeout(r, 100))
+
+  const snap = st().past[st().past.length - 1].project
+  const live = st().project
+  const clipIn = (p) => p.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId)
+
+  return {
+    // the snapshot is a real deep copy: the edit did not reach it
+    snapshotUntouched: clipIn(snap).start !== 3.25 && clipIn(live).start === 3.25,
+    freshObjects: snap !== live && snap.tracks !== live.tracks &&
+                  clipIn(snap) !== clipIn(live) && snap.assets[0] !== live.assets[0],
+    // ...but the blobs inside it are the very same objects. Only the waveform
+    // can prove it: a thumbnail is a string, and === compares strings by value,
+    // so a duplicated one looks identical. The waveform is an object, so this
+    // is a true identity test — and it is the big one anyway.
+    waveShared: snap.assets[0].waveform === live.assets[0].waveform,
+    thumbEqual: snap.assets[0].thumbnail === live.assets[0].thumbnail,
+    // and they are whole
+    waveWhole: snap.assets[0].waveform.max.length === ${BLOB.length} &&
+               snap.assets[0].waveform.rate === 1000,
+    // a snapshot serializes exactly like a plain deep copy of the same project
+    serializesSame: JSON.stringify(snap) ===
+                    JSON.stringify(JSON.parse(JSON.stringify(snap))),
+    wasName, liveIsNew: live !== liveBefore
+  }
+})()`, { timeout: 30000 })
+check('a history snapshot is a real deep copy', hist.snapshotUntouched === true && hist.freshObjects === true,
+  JSON.stringify(hist))
+check('but the waveform object is shared, not duplicated', hist.waveShared === true)
+check('and the thumbnail comes through unchanged', hist.thumbEqual === true)
+check('and they arrive in the snapshot whole', hist.waveWhole === true)
+check('a snapshot still serializes like a plain deep copy', hist.serializesSame === true)
+
+// fifty entries must not hold fifty waveforms
+const deep = await evalJs(`(async () => {
+  const st = () => window.kadrEditor.useEditor.getState()
+  const clipId = st().project.tracks.flatMap((t) => t.clips)[0].id
+  for (let i = 0; i < 50; i++) {
+    st().pushHistory('hMove')
+    st().updateClip(clipId, { start: 1 + i / 100 })
+  }
+  await new Promise((r) => setTimeout(r, 200))
+  const s = st()
+  const w = s.project.assets[0].waveform
+  return {
+    depth: s.past.length,
+    allShared: s.past.every((e) => e.project.assets[0].waveform === w),
+    distinctClips: new Set(s.past.map((e) =>
+      e.project.tracks.flatMap((t) => t.clips)[0])).size
+  }
+})()`, { timeout: 60000 })
+check('fifty history entries hold ONE waveform between them',
+  deep.allShared === true && deep.depth === 50, JSON.stringify(deep))
+check('while each entry still has its own clip objects', deep.distinctClips === 50, String(deep.distinctClips))
+
+// undo brings the value back with the blob intact
+const undone = await evalJs(`(async () => {
+  const st = () => window.kadrEditor.useEditor.getState()
+  const clipId = st().project.tracks.flatMap((t) => t.clips)[0].id
+  const before = st().project.tracks.flatMap((t) => t.clips)[0].start
+  st().undo()
+  await new Promise((r) => setTimeout(r, 150))
+  const a = st().project.assets[0]
+  return {
+    moved: st().project.tracks.flatMap((t) => t.clips)[0].start !== before,
+    waveWhole: a.waveform?.max?.length === ${BLOB.length} && a.waveform?.rms?.length === ${BLOB.length},
+    thumbWhole: a.thumbnail?.length === ${BLOB.length},
+    noPlaceholder: a.waveform !== 0 && a.thumbnail !== 0
+  }
+})()`, { timeout: 30000 })
+check('undo restores the value', undone.moved === true, JSON.stringify(undone))
+check('and the blobs survive undo whole', undone.waveWhole === true && undone.thumbWhole === true &&
+  undone.noPlaceholder === true)
+
+// THE ONE THAT MATTERS: a project restored from history is written to disk with
+// its waveforms. A copy that quietly lost one would stay invisible until the
+// day that project was reopened.
+await evalJs(`(async () => {
+  const st = window.kadrEditor.useEditor.getState()
+  await window.kadr.writeProject(${JSON.stringify(PROJ)}, st.project)
+  return 1
+})()`, { timeout: 30000 })
+let onDiskBlob = { ok: false }
+try {
+  const j = JSON.parse(readFileSync(PROJ, 'utf8'))
+  const a = j.assets?.[0] ?? {}
+  onDiskBlob = {
+    ok: true,
+    wave: a.waveform?.max?.length ?? null,
+    rms: a.waveform?.rms?.length ?? null,
+    rate: a.waveform?.rate ?? null,
+    thumb: a.thumbnail?.length ?? null
+  }
+} catch (e) { onDiskBlob = { ok: false, err: String(e.message || e) } }
+check('the file written after an undo still carries the waveform',
+  onDiskBlob.wave === BLOB.length && onDiskBlob.rms === BLOB.length && onDiskBlob.rate === 1000,
+  JSON.stringify(onDiskBlob))
+check('and the thumbnail', onDiskBlob.thumb === BLOB.length)
 
 ws.close()
 console.log('e2e28 finished')

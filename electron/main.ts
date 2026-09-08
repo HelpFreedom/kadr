@@ -650,11 +650,18 @@ function registerIpc() {
     // drop any --ozone-platform=x11 the NVIDIA path added, so a switch back to
     // Intel runs native Wayland; the new process re-adds x11 only if it picks NVIDIA
     const relaunchArgs = process.argv.slice(1).filter((a) => !a.startsWith('--ozone-platform'))
+    // KNOWN, dev-only: a relaunch loses --remote-debugging-port. Chromium's
+    // DevTools listening socket has no CLOEXEC, so the child inherits the fd;
+    // its own bind then fails with EADDRINUSE against itself, no DevTools
+    // server starts (DevToolsActivePort is never rewritten), and the socket
+    // sits in LISTEN with nobody accepting — Recv-Q climbs to the backlog and
+    // every CDP client hangs. Measured: the socket inode is IDENTICAL either
+    // side of a switch, so it is the same socket, not a re-bind. Waiting for
+    // this process to exit first does NOT help — the fd is duplicated at spawn,
+    // long before any wait. Only affects runs started with a debugging port
+    // (e2e, automation); relaunch from the terminal to get one back.
     spawn(process.execPath, relaunchArgs, {
-      // KADR_WAIT_PID holds the successor at the top of runtime-env until this
-      // process is gone — otherwise the two overlap and the new one inherits a
-      // half-released --remote-debugging-port it can bind but never accept on
-      env: { ...cleanRelaunchEnv(), KADR_WAIT_PID: String(process.pid) },
+      env: cleanRelaunchEnv(),
       detached: true,
       stdio: 'ignore'
     }).unref()

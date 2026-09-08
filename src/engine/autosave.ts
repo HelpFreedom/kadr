@@ -4,10 +4,13 @@
 // must never compete for the disk or snapshot a mid-mutation project.
 import type { Project } from '@shared/types'
 import { useEditor } from '@/state/store'
+import { logWarn } from './log'
 
 /** Heavy activities flip these; autosave skips its tick while any is set. */
 export const activity = {
   exporting: false,
+  /** the defect detector holds the GPU for minutes */
+  voiceCheck: false,
   claude: false
 }
 
@@ -16,7 +19,7 @@ const INTERVAL_MS = 5 * 60 * 1000
 let lastSnapshot: Project | null = null
 
 async function tick() {
-  if (activity.exporting || activity.claude) return
+  if (activity.exporting || activity.claude || activity.voiceCheck) return
   const s = useEditor.getState()
   if (s.project === lastSnapshot) return // nothing changed since the last write
   const clips = s.project.tracks.reduce((n, t) => n + t.clips.length, 0)
@@ -26,7 +29,7 @@ async function tick() {
     await window.kadr.autosaveProject(snapshot, s.projectPath)
     lastSnapshot = snapshot
   } catch (err) {
-    console.warn('[kadr] autosave failed (will retry):', err)
+    logWarn('автосохранение', 'не удалось записать, повторю через 5 минут', err)
   }
 }
 

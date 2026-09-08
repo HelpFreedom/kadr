@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
-  Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec
+  Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec,
+  VoiceRun, AudioDefect, DefectState
 } from '@shared/types'
 
 export const uid = () => Math.random().toString(36).slice(2, 10)
@@ -105,6 +106,58 @@ export function sanitizeProject(p: Project): Project {
   if (!Number.isFinite(p.height) || p.height <= 0) p.height = 1080
   if (!Number.isFinite(p.fps) || p.fps <= 0) p.fps = 30
   p.assets ??= []
+  p.markers = (p.markers ?? []).filter(
+    (m) => m && typeof m.id === 'string' && Number.isFinite(m.time)
+  )
+  for (const m of p.markers) {
+    if (typeof m.label !== 'string' || !m.label) m.label = '•'
+    if (m.time < 0) m.time = 0
+  }
+  // a voice-over is meaningless without its asset and its script; tempo must be
+  // a real factor or a regenerated phrase would be stretched by NaN
+  p.voiceRuns = (p.voiceRuns ?? []).filter(
+    (r) => r && typeof r.id === 'string' && typeof r.assetId === 'string' &&
+      typeof r.scriptPath === 'string' && p.assets.some((a) => a.id === r.assetId)
+  )
+  for (const r of p.voiceRuns) {
+    if (!Number.isFinite(r.tempo) || r.tempo <= 0) r.tempo = 1
+    if (!Number.isFinite(r.duration) || r.duration < 0) r.duration = 0
+    if (typeof r.scriptHash !== 'string') r.scriptHash = ''
+  }
+  // Дефекты держатся на ассете и на прогоне: без любого из них они бессмысленны.
+  // Инвариант «дефект лежит внутри своей фразы» чинится, а не обсуждается — на
+  // нём стоит вся перегенерация.
+  const runIds = new Set(p.voiceRuns.map((r) => r.id))
+  const assetIds = new Set(p.assets.map((a) => a.id))
+  const DEFECT_STATES = ['proposed', 'confirmed', 'rejected', 'done', 'failed']
+  p.defects = (p.defects ?? []).filter(
+    (d) => d && typeof d.id === 'string' && assetIds.has(d.assetId) && runIds.has(d.runId) &&
+      Array.isArray(d.src) && d.src.length === 2 &&
+      Number.isFinite(d.src[0]) && Number.isFinite(d.src[1]) && d.src[1] > d.src[0]
+  )
+  for (const d of p.defects) {
+    if (!DEFECT_STATES.includes(d.state)) d.state = 'proposed'
+    if (d.origin !== 'user') d.origin = 'detector'
+    if (d.src[0] < 0) d.src[0] = 0
+    if (!Number.isFinite(d.confidence as number)) delete d.confidence
+    if (d.words && !(Number.isInteger(d.words[0]) && Number.isInteger(d.words[1]) &&
+        d.words[1] >= d.words[0])) delete d.words
+    const ph = d.phrase
+    if (!ph || !Number.isFinite(ph.t0) || !Number.isFinite(ph.t1) || ph.t1 <= ph.t0) {
+      // фраза потеряна: вырождаем её в сам дефект и честно помечаем, что резать
+      // по ней нельзя, пока разбор не пересчитан
+      d.phrase = {
+        t0: d.src[0], t1: d.src[1], sentFrom: -1, sentTo: -1,
+        wordFrom: -1, wordTo: -1, charFrom: -1, charTo: -1, text: '',
+        cut: ['fallback', 'fallback']
+      }
+      d.note = 'границы фразы потеряны — пересчитайте разбор'
+    } else {
+      if (!Array.isArray(ph.cut) || ph.cut.length !== 2) ph.cut = ['fallback', 'fallback']
+      if (ph.t0 > d.src[0]) ph.t0 = d.src[0]
+      if (ph.t1 < d.src[1]) ph.t1 = d.src[1]
+    }
+  }
   for (const track of p.tracks) {
     if (!Number.isFinite(track.gain)) track.gain = 1
     for (const c of track.clips) {
@@ -385,6 +438,8 @@ interface EditorState {
   playhead: number
   playing: boolean
   previewLoading: boolean
+  /** the preview's GL context died (GPU reset); nothing can be drawn until it is back */
+  previewGpuLost: boolean
   /** timeline pixels per second */
   zoom: number
   exportOpen: boolean
@@ -415,6 +470,36 @@ interface EditorState {
   removeAssets(assetIds: string[]): void
   /** register transcript/text docs in the sources (one undo entry) */
   addTexts(docs: TextDoc[]): void
+  /** Land a finished voice-over — asset, script docs, run record and clip — as
+      one undoable step. */
+  /** Land a spliced voice-over: new audio, remapped clips, rippled timeline —
+      one undo entry. Returns null with a reason when it cannot be done safely. */
+  applyVoiceSplice(v: {
+    runId: string
+    oldAssetId: string
+    newAsset: MediaAsset
+    /** каждая заменённая фраза и дефекты, которые ею закрыты */
+    units: Array<{ cut0: number; cut1: number; patchDur: number; ids: string[] }>
+    newDuration: number
+    ripple: boolean
+    rippleAllTracks: boolean
+  }): { delta: number; warnings: string[] } | { error: string }
+  /** Detector pass: run metadata + its findings, one undo entry. */
+  applyCheckResult(runId: string, runPatch: Partial<VoiceRun>, defects: AudioDefect[]): void
+  /** A defect the user spotted themselves. */
+  addUserDefect(d: AudioDefect): void
+  /** The user's verdict on one or many defects. */
+  setDefectState(ids: string | string[], state: DefectState, patch?: Partial<AudioDefect>): void
+  /** Edge drag and other live edits — the CALLER pushes history once. */
+  updateDefect(id: string, patch: Partial<AudioDefect>): void
+  removeDefects(ids: string | string[]): void
+  addVoiceOver(v: {
+    asset: MediaAsset
+    run: VoiceRun
+    texts?: TextDoc[]
+    trackId?: string | null
+    at: number
+  }): { clipId: string; trackId: string } | null
   removeText(id: string): void
   /** place a remotion fragment clip on the topmost free video track */
   insertFragmentClip(fragmentId: string, meta: FragmentSpec, start: number, duration: number): string
@@ -433,6 +518,10 @@ interface EditorState {
       audio assets go to an audio track regardless of the drop lane. */
   insertClipsFromAssets(assetIds: string[], trackId: string | null, at: number): void
   insertTextClip(at: number): void
+  /** Add a track-independent timeline marker (auto-numbered); returns id. */
+  addMarker(time: number): string
+  moveMarker(id: string, time: number): void
+  removeMarker(id: string): void
   updateClip(clipId: string, patch: Partial<Clip>): void
   /** Change speed/duration, rescaling keyframes and fades to stay on content.
       Optional `start` moves the clip too (a speed drag from the LEFT edge
@@ -469,6 +558,7 @@ interface EditorState {
   setPlayhead(t: number): void
   setPlaying(p: boolean): void
   setPreviewLoading(l: boolean): void
+  setPreviewGpuLost(lost: boolean): void
   setZoom(z: number): void
   setExportOpen(open: boolean): void
   setSettingsOpen(open: boolean): void
@@ -477,6 +567,60 @@ interface EditorState {
 
 const clone = <T,>(o: T): T => JSON.parse(JSON.stringify(o))
 
+/** Asset fields DERIVED from the media file: the probe in the main process
+    (electron/ffmpeg.ts) assigns them once, wholesale, and from then on nothing
+    anywhere writes them — the timeline and the media bin only read. That is the
+    invariant cloneProject() rests on; e2e28 fails if a copy stops sharing them. */
+const ASSET_BLOBS = new Set(['waveform', 'thumbnail', 'thumbnailEnd'])
+
+/** JSON.stringify silently drops these, so a faithful copy must drop them too. */
+const dropped = (v: unknown) =>
+  v === undefined || typeof v === 'function' || typeof v === 'symbol'
+
+const cloneAsset = (a: MediaAsset): MediaAsset => {
+  // a script-written project can hold junk in the list (kadr_eval writes
+  // straight into the store); copy it exactly as a plain deep copy would
+  if (!a || typeof a !== 'object') return clone(a)
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(a)) {
+    const v = (a as unknown as Record<string, unknown>)[key]
+    if (dropped(v)) continue
+    // the blob object itself travels into the copy — not a duplicate of it
+    out[key] = ASSET_BLOBS.has(key) ? v : clone(v)
+  }
+  return out as unknown as MediaAsset
+}
+
+/**
+ * Deep copy of a project. Every mutation makes one and so does every history
+ * entry, i.e. twice per edit, so its cost is felt directly in the hand holding
+ * the mouse — and its size is what the undo stack retains.
+ *
+ * Everything is copied except the assets' derived blobs, which are shared.
+ * They are almost the whole project: on a real 78 MB project the waveforms are
+ * 78.1 of it, and the numbers that follow are why this function exists —
+ * a full copy took 248 ms and 50 history entries held 3.82 GB, which is
+ * exactly where V8 gives up ("JavaScript heap out of memory", measured three
+ * times in one working day). Sharing the blobs: 0.8 ms and 5.9 MB.
+ *
+ * The copy is built key by key rather than by blanking the blobs and round
+ * tripping, so the live project is never modified even for an instant, key
+ * order is preserved, and the result serializes byte for byte like a plain
+ * deep copy — which e2e28 checks, on the project AND on the file written from
+ * a restored one, because a copy that quietly lost a waveform would be
+ * invisible until the day someone reopened that project.
+ */
+const cloneProject = (p: Project): Project => {
+  if (!p || typeof p !== 'object' || !Array.isArray(p.assets)) return clone(p)
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(p)) {
+    const v = (p as unknown as Record<string, unknown>)[key]
+    if (dropped(v)) continue
+    out[key] = key === 'assets' ? (v as MediaAsset[]).map(cloneAsset) : clone(v)
+  }
+  return out as unknown as Project
+}
+
 export const useEditor = create<EditorState>((set, get) => ({
   project: newProject(),
   projectPath: null,
@@ -484,6 +628,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   playhead: 0,
   playing: false,
   previewLoading: false,
+  previewGpuLost: false,
   zoom: 60,
   exportOpen: false,
   settingsOpen: false,
@@ -504,7 +649,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   pushHistory: (label) =>
     set((s) => ({
-      past: [...s.past.slice(-49), { project: clone(s.project), label }],
+      past: [...s.past.slice(-49), { project: cloneProject(s.project), label }],
       future: []
     })),
   undo: () =>
@@ -515,7 +660,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       return {
         past,
         project: entry.project,
-        future: [{ project: clone(s.project), label: entry.label }, ...s.future],
+        future: [{ project: cloneProject(s.project), label: entry.label }, ...s.future],
         selection: []
       }
     }),
@@ -526,7 +671,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       return {
         future,
         project: entry.project,
-        past: [...s.past, { project: clone(s.project), label: entry.label }],
+        past: [...s.past, { project: cloneProject(s.project), label: entry.label }],
         selection: []
       }
     }),
@@ -540,8 +685,12 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!s.project.assets.some((a) => ids.has(a.id))) return
     s.pushHistory('hDeleteMedia')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       p.assets = p.assets.filter((a) => !ids.has(a.id))
+      // озвучка и её дефекты держатся на ассете: без него они мусор, и
+      // sanitizeProject всё равно выбросил бы их при следующей загрузке
+      p.voiceRuns = (p.voiceRuns ?? []).filter((r) => !ids.has(r.assetId))
+      p.defects = (p.defects ?? []).filter((d) => !ids.has(d.assetId))
       const dead = new Set<string>()
       // clips lose their source — drop them everywhere, locked tracks included
       for (const tr of p.tracks) {
@@ -557,6 +706,237 @@ export const useEditor = create<EditorState>((set, get) => ({
         animClipId: st.animClipId && dead.has(st.animClipId) ? null : st.animClipId
       }
     })
+  },
+
+  applyVoiceSplice: ({ runId, oldAssetId, newAsset, units, newDuration,
+                       ripple, rippleAllTracks }) => {
+    const s = get()
+    const sorted = [...units].sort((a, b) => a.cut0 - b.cut0)
+    const total = sorted.reduce((n, u) => n + (u.patchDur - (u.cut1 - u.cut0)), 0)
+
+    /** Source second before the splice → after it. null inside a replaced
+        phrase: that audio no longer exists, so nothing may be mapped onto it. */
+    const remap = (t: number): number | null => {
+      let d = 0
+      for (const u of sorted) {
+        if (t > u.cut0 + 1e-6 && t < u.cut1 - 1e-6) return null
+        if (t >= u.cut1 - 1e-6) d += u.patchDur - (u.cut1 - u.cut0)
+      }
+      return t + d
+    }
+
+    const affected: Array<{ clip: Clip; track: Track; oldStart: number; oldEnd: number
+                            inPoint: number; duration: number }> = []
+    for (const track of s.project.tracks) {
+      for (const clip of track.clips) {
+        if (clip.assetId !== oldAssetId) continue
+        const speed = clip.speed || 1
+        const a = remap(clip.inPoint)
+        const b = remap(clip.inPoint + clip.duration * speed)
+        if (a === null || b === null || b <= a) {
+          // a clip edge sits inside the phrase being replaced: there is no
+          // honest answer for where it should land, so we refuse instead of
+          // silently mangling the cut the user made
+          return { error: `клип «${clip.label}» разрезан внутри заменяемой фразы — ` +
+            'автоматически починить нельзя. Сведите озвучку в один клип или снимите разрез.' }
+        }
+        affected.push({ clip, track, oldStart: clip.start, oldEnd: clip.start + clip.duration,
+                        inPoint: a, duration: (b - a) / speed })
+      }
+    }
+    if (!affected.length) return { error: 'на таймлайне нет клипов этой озвучки' }
+
+    // Куда переехала каждая заменённая фраза: её начало на месте (remap не
+    // двигает то, что до реза), а конец задаётся длиной вставки. Без этого
+    // повторная перегенерация той же фразы резала бы по старым координатам.
+    const unitOf = new Map<string, { from: number; to: number }>()
+    for (const u of sorted) {
+      const from = remap(u.cut0) ?? u.cut0
+      for (const id of u.ids) unitOf.set(id, { from, to: from + u.patchDur })
+    }
+
+    const warnings: string[] = []
+    let dropped = 0
+    get().pushHistory('hVoiceFix')
+    set((st) => {
+      const p = cloneProject(st.project)
+      p.assets = [...p.assets, newAsset]
+
+      // shift events: after this clip ended, everything moves by d
+      const events = affected.map((a) => ({ at: a.oldEnd, d: a.duration - (a.oldEnd - a.oldStart) }))
+        .sort((x, y) => x.at - y.at)
+      const shiftFor = (start: number) =>
+        ripple ? events.reduce((n, e) => (e.at <= start + 1e-6 ? n + e.d : n), 0) : 0
+      const tracksToRipple = new Set(
+        rippleAllTracks ? p.tracks.filter((t) => !t.locked).map((t) => t.id)
+                        : affected.map((a) => a.track.id))
+
+      for (const track of p.tracks) {
+        for (const c of track.clips) {
+          const mine = affected.find((a) => a.clip.id === c.id)
+          if (mine) {
+            c.assetId = newAsset.id
+            c.inPoint = mine.inPoint
+            c.duration = mine.duration
+            c.start = mine.oldStart + shiftFor(mine.oldStart)
+            continue
+          }
+          if (!ripple || !tracksToRipple.has(track.id)) continue
+          // a clip that STRADDLES the splice cannot be fixed by shifting: it
+          // would have to stretch. Say so rather than pretend.
+          const spans = events.some((e) => c.start < e.at - 1e-6 && c.start + c.duration > e.at + 1e-6)
+          if (spans) {
+            if (!warnings.length || !warnings.some((w) => w.includes('накрывает место склейки'))) {
+              warnings.push('часть клипов накрывает место склейки — их длину сдвиг не исправит')
+            }
+            continue
+          }
+          c.start += shiftFor(c.start)
+        }
+      }
+      if (!ripple) warnings.push('сдвиг выключен: клипы правее могут наехать друг на друга')
+
+      p.voiceRuns = (p.voiceRuns ?? []).map((r) =>
+        r.id === runId ? { ...r, assetId: newAsset.id, duration: newDuration } : r)
+
+      const kept: AudioDefect[] = []
+      for (const d of p.defects ?? []) {
+        if (d.assetId !== oldAssetId) { kept.push(d); continue }
+        const mine = unitOf.get(d.id)
+        if (mine) {
+          // ГРАНИЦЫ ОБЯЗАНЫ ПЕРЕЕХАТЬ. Раньше здесь менялись только ассет и
+          // состояние, а фраза оставалась в координатах ДО склейки — и вторая
+          // перегенерация той же фразы резала уже не там, третья ещё дальше, и
+          // дорожка портилась. Теперь фраза — это ровно то, что сейчас вставлено.
+          kept.push({
+            ...d, assetId: newAsset.id, state: 'done', resultAssetId: newAsset.id,
+            attempts: (d.attempts ?? 0) + 1,
+            src: [mine.from, mine.to],
+            phrase: { ...d.phrase, t0: mine.from, t1: mine.to }
+          })
+          continue
+        }
+        const a = remap(d.src[0])
+        const b = remap(d.src[1])
+        if (a === null || b === null) {
+          // Звук этой находки заменён. Раньше она превращалась в отметку на всю
+          // новую фразу — и свежая, ещё не разобранная запись оказывалась
+          // целиком помечена дефектом. Правильно её просто убрать: решение по
+          // ней уже выгружено в корпус (это делается ДО склейки), а что теперь
+          // в этом месте звучит — знает только новый разбор.
+          dropped++
+          continue
+        }
+        const ph0 = remap(d.phrase.t0)
+        const ph1 = remap(d.phrase.t1)
+        kept.push({ ...d, assetId: newAsset.id, src: [a, b],
+                    phrase: { ...d.phrase, t0: ph0 ?? a, t1: ph1 ?? b } })
+      }
+      p.defects = kept
+      return { project: p }
+    })
+    if (dropped) {
+      const n = dropped % 100
+      const word = n >= 11 && n <= 14 ? 'отметок'
+        : n % 10 === 1 ? 'отметка'
+        : n % 10 >= 2 && n % 10 <= 4 ? 'отметки'
+        : 'отметок'
+      const verb = n % 10 === 1 && n !== 11 ? 'снята' : 'сняты'
+      warnings.push(`внутри заменённых фраз ${verb} ещё ${dropped} ${word}: ` +
+        'этого звука больше нет, переспросите детектор')
+    }
+    return { delta: total, warnings }
+  },
+
+  applyCheckResult: (runId, runPatch, defects) => {
+    get().pushHistory('hDefects')
+    set((s) => {
+      const p = cloneProject(s.project)
+      p.voiceRuns = (p.voiceRuns ?? []).map((r) => (r.id === runId ? { ...r, ...runPatch } : r))
+      // прежние находки ЭТОГО прогона заменяем: повторный разбор — это новая
+      // правда о файле, а не добавка к старой. Вердикты пользователя по другим
+      // прогонам не трогаем.
+      // ВАЖНО для этапа обучения: решения по заменяемым находкам должны быть
+      // выгружены в корпус ДО этого вызова — здесь они перестают существовать.
+      const keep = (p.defects ?? []).filter((d) => d.runId !== runId || d.origin === 'user')
+      p.defects = [...keep, ...defects]
+      return { project: p }
+    })
+  },
+
+  addUserDefect: (d) => {
+    get().pushHistory('hDefectUser')
+    set((s) => ({ project: { ...s.project, defects: [...(s.project.defects ?? []), d] } }))
+  },
+
+  setDefectState: (ids, state, patch) => {
+    const list = Array.isArray(ids) ? ids : [ids]
+    if (!list.length) return
+    get().pushHistory('hDefectVerdict')
+    const now = Date.now()
+    set((s) => ({
+      project: {
+        ...s.project,
+        defects: (s.project.defects ?? []).map(
+          (d) => (list.includes(d.id) ? { ...d, ...patch, state, judgedAt: now } : d))
+      }
+    }))
+  },
+
+  updateDefect: (id, patch) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        defects: (s.project.defects ?? []).map((d) => (d.id === id ? { ...d, ...patch } : d))
+      }
+    })),
+
+  removeDefects: (ids) => {
+    const list = Array.isArray(ids) ? ids : [ids]
+    if (!list.length) return
+    get().pushHistory('hDefectDelete')
+    set((s) => ({
+      project: {
+        ...s.project,
+        defects: (s.project.defects ?? []).filter((d) => !list.includes(d.id))
+      }
+    }))
+  },
+
+  addVoiceOver: ({ asset, run, texts, trackId, at }) => {
+    // one history entry for the whole landing: the asset, its script docs, the
+    // run record and the clip belong together — undoing half of it would leave
+    // a voice-over whose audio or whose script is gone
+    get().pushHistory('hSpeak')
+    let result: { clipId: string; trackId: string } | null = null
+    set((s) => {
+      const p = cloneProject(s.project)
+      p.assets = [...p.assets, asset]
+      if (texts?.length) p.texts = [...(p.texts ?? []), ...texts]
+      p.voiceRuns = [...(p.voiceRuns ?? []), run]
+      let track = trackId ? p.tracks.find((t) => t.id === trackId && !t.locked) : undefined
+      if (!track || track.kind !== 'audio') track = p.tracks.find((t) => t.kind === 'audio' && !t.locked)
+      if (!track) {
+        // insertClipsFromAssets would silently drop the clip here; a voice-over
+        // that produced no sound on the timeline is a failure, not a no-op
+        track = makeTrack(p, 'audio')
+        p.tracks.push(track)
+      }
+      const clip: Clip = {
+        id: uid(),
+        assetId: asset.id,
+        kind: 'media',
+        start: Math.max(0, at),
+        duration: asset.duration,
+        inPoint: 0,
+        label: asset.name,
+        ...newClipDefaults()
+      }
+      track.clips.push(clip)
+      result = { clipId: clip.id, trackId: track.id }
+      return { project: p, selection: [clip.id] }
+    })
+    return result
   },
 
   addTexts: (docs) => {
@@ -577,7 +957,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const clipId = uid()
     get().pushHistory('hInsert')
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       const end = start + duration
       // topmost unlocked video track with the slot free, else a fresh one
       let track = p.tracks.find((t) =>
@@ -607,7 +987,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   updateAsset: (assetId, patch) =>
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       const a = p.assets.find((x) => x.id === assetId)
       if (!a) return s
       Object.assign(a, patch)
@@ -617,11 +997,42 @@ export const useEditor = create<EditorState>((set, get) => ({
   addTrack: (kind, at) => {
     get().pushHistory('hTrack')
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       const idx = at == null
         ? (kind === 'video' ? 0 : p.tracks.length) // default: video top, audio bottom
         : Math.max(0, Math.min(p.tracks.length, Math.round(at)))
       p.tracks.splice(idx, 0, makeTrack(p, kind))
+      return { project: p }
+    })
+  },
+
+  addMarker: (time) => {
+    get().pushHistory('hMarker')
+    const id = uid()
+    set((s) => {
+      const p = cloneProject(s.project)
+      p.markers ??= []
+      const n = p.markers.reduce((m, x) => Math.max(m, parseInt(x.label, 10) || 0), 0) + 1
+      p.markers.push({ id, time: Math.max(0, time), label: String(n) })
+      return { project: p }
+    })
+    return id
+  },
+
+  moveMarker: (id, time) =>
+    set((s) => {
+      const m0 = s.project.markers?.find((x) => x.id === id)
+      if (!m0) return {}
+      const p = cloneProject(s.project)
+      p.markers!.find((x) => x.id === id)!.time = Math.max(0, time)
+      return { project: p }
+    }),
+
+  removeMarker: (id) => {
+    get().pushHistory('hMarkerDelete')
+    set((s) => {
+      const p = cloneProject(s.project)
+      p.markers = (p.markers ?? []).filter((x) => x.id !== id)
       return { project: p }
     })
   },
@@ -633,7 +1044,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const kind = s.project.tracks[idx].kind
     s.pushHistory('hTrack')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       // video stacks above the clicked track, audio below it
       p.tracks.splice(kind === 'video' ? idx : idx + 1, 0, makeTrack(p, kind))
       return { project: p }
@@ -645,7 +1056,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!s.project.tracks.some((t) => t.id === trackId)) return
     s.pushHistory('hTrack')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       p.tracks = p.tracks.filter((t) => t.id !== trackId)
       return { project: p, selection: [] }
     })
@@ -653,7 +1064,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   moveTrack: (trackId, toIndex) =>
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       const from = p.tracks.findIndex((t) => t.id === trackId)
       if (from < 0 || toIndex < 0 || toIndex >= p.tracks.length || from === toIndex) return s
       const [tr] = p.tracks.splice(from, 1)
@@ -663,7 +1074,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   updateTrack: (trackId, patch) =>
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       const t = p.tracks.find((t) => t.id === trackId)
       if (t) Object.assign(t, patch)
       return { project: p }
@@ -680,7 +1091,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!found.length) return
     s.pushHistory('hInsert')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       let cursor = Math.max(0, at)
       const ids: string[] = []
       for (const asset of found) {
@@ -729,7 +1140,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   setClipSpeed: (clipId, speed, duration, start) =>
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       // linked partners change tempo together
       for (const f of withLinked(p, [clipId])
         .map((id) => findClip(p, id))
@@ -746,7 +1157,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   setClipDuration: (clipId, duration) =>
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       for (const f of withLinked(p, [clipId])
         .map((id) => findClip(p, id))
         .filter((x): x is NonNullable<typeof x> => !!x && !x.track.locked)) {
@@ -758,7 +1169,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setTransition: (clipId, type) => {
     get().pushHistory('hTransition')
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       const f = findClip(p, clipId)
       // duration is implicit: the transition spans the clip overlap
       if (f) f.clip.transitionIn = type ? { type, duration: 0 } : undefined
@@ -769,7 +1180,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setEdgeTransitions: (entries) => {
     get().pushHistory('hTransition')
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       for (const e of entries) {
         const f = findClip(p, e.clipId)
         if (!f || f.track.locked) continue
@@ -795,7 +1206,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const anyLinked = clips.some((f) => f.clip.linkId)
     s.pushHistory('hLink')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       if (anyLinked) {
         const links = new Set(clips.map((f) => f.clip.linkId).filter(Boolean) as string[])
         for (const t of p.tracks) {
@@ -816,7 +1227,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const s = get()
     s.pushHistory('hInsert')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       const track = p.tracks.find((t) => t.kind === 'video' && !t.locked)
       if (!track) return st
       const clip: Clip = {
@@ -837,7 +1248,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   updateClip: (clipId, patch) =>
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       const f = findClip(p, clipId)
       if (f) Object.assign(f.clip, patch)
       return { project: p }
@@ -845,7 +1256,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   setClipStarts: (entries) =>
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       for (const e of entries) {
         const f = findClip(p, e.id)
         if (!f || f.track.locked) continue
@@ -863,7 +1274,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   moveClip: (clipId, trackId, start) =>
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       const f = findClip(p, clipId)
       const dst = p.tracks.find((t) => t.id === trackId)
       if (!f || !dst || dst.locked) return s
@@ -876,7 +1287,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   trimClip: (clipId, edge, time) =>
     set((s) => {
-      const p = clone(s.project)
+      const p = cloneProject(s.project)
       const first = findClip(p, clipId)
       if (!first || first.track.locked) return s
       // linked partners trim together
@@ -926,7 +1337,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!targets.length) return
     s.pushHistory('hSplit')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       const newIds: string[] = []
       // halves of a linked pair stay linked pairwise
       const rightLinks = new Map<string, string>()
@@ -964,7 +1375,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!s.selection.length) return
     s.pushHistory('hDelete')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       for (const tr of p.tracks) {
         if (tr.locked) continue
         tr.clips = tr.clips.filter((c) => !st.selection.includes(c.id))
@@ -988,7 +1399,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const shift = nextStart - prevEnd
     s.pushHistory('hCloseGap')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       const tr = p.tracks.find((t) => t.id === trackId)!
       for (const c of tr.clips) {
         if (c.start >= nextStart - 1e-6) c.start -= shift
@@ -1030,7 +1441,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!r) return
     s.pushHistory('hDeleteRange')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       for (const tr of p.tracks) {
         if (tr.locked) continue
         const out: Clip[] = []
@@ -1079,7 +1490,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!s.clipboard.length) return
     s.pushHistory('hPaste')
     set((st) => {
-      const p = clone(st.project)
+      const p = cloneProject(st.project)
       const base = Math.min(...st.clipboard.map((i) => i.clip.start))
       const ids: string[] = []
       const linkMap = new Map<string, string>() // fresh linkIds for pasted pairs
@@ -1121,6 +1532,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setPlayhead: (t) => set({ playhead: Math.max(0, t) }),
   setPlaying: (playing) => set({ playing }),
   setPreviewLoading: (previewLoading) => set({ previewLoading }),
+  setPreviewGpuLost: (previewGpuLost) => set({ previewGpuLost }),
   setZoom: (zoom) => set({ zoom: Math.min(MAX_ZOOM, Math.max(4, zoom)) }),
   setExportOpen: (exportOpen) => set({ exportOpen }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),

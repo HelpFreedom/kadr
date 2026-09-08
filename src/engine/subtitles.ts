@@ -1,7 +1,7 @@
 // Subtitle utilities: SRT parse/serialize and the transcription flow shared
 // by the UI dialog and the kadr MCP tool (window.kadrEditor.transcribe).
 import type {
-  Project, SubCue, TextDoc, TranscribeResult, TranscribeSegment, AudioSegment
+  Project, Track, SubCue, TextDoc, TranscribeResult, TranscribeSegment, AudioSegment
 } from '@shared/types'
 import { useEditor, uid } from '@/state/store'
 import { dirOf, baseOf } from '@shared/paths'
@@ -172,10 +172,21 @@ export function cuesToTxt(cues: SubCue[]): string {
  * Everything audible in [start, end), as ffmpeg mix segments shifted so the
  * mixdown starts at 0 — the same flattening exports use.
  */
-export function collectRangeAudio(project: Project, start: number, end: number): AudioSegment[] {
+export interface RangeAudioFilter {
+  /** only these tracks contribute (the neon-wave "one track" mode) */
+  trackIds?: string[]
+}
+
+export function collectRangeAudio(
+  project: Project,
+  start: number,
+  end: number,
+  filter?: RangeAudioFilter
+): AudioSegment[] {
   const segs: AudioSegment[] = []
   for (const track of project.tracks) {
     if (track.muted) continue
+    if (filter?.trackIds && !filter.trackIds.includes(track.id)) continue
     for (const clip of track.clips) {
       if (clip.kind !== 'media' || clip.muted) continue
       const asset = project.assets.find((a) => a.id === clip.assetId)
@@ -211,6 +222,13 @@ export function collectRangeAudio(project: Project, start: number, end: number):
     }
   }
   return segs
+}
+
+/** Tracks that contribute at least one audible segment to [start, end). */
+export function audibleTracksInRange(project: Project, start: number, end: number): Track[] {
+  return project.tracks.filter(
+    (t) => collectRangeAudio(project, start, end, { trackIds: [t.id] }).length > 0
+  )
 }
 
 // --------------------------------------------------------------- the flow

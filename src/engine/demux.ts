@@ -9,6 +9,9 @@ import type { MediaAsset } from '@shared/types'
 
 /** non-faststart files keep moov at the end — give up early and fall back */
 const HEAD_LIMIT = 16 * 1024 * 1024
+// how much of the file's tail to fetch when the sample table isn't in the
+// head — a moov box is tiny next to the mdat it describes
+const TAIL_LIMIT = 12 * 1024 * 1024
 
 /** watchdog for a decode that emits neither an output frame nor an error
  * (wedged hardware decoder) — after this, give up and fall back to element-seek */
@@ -49,6 +52,8 @@ export class Mp4FrameSource {
   private fileOffset = 0
   private ready = false
   private moovFound = false
+  private fileSize = 0
+  private triedTail = false
   /** moof/mdat stream (moov has no sample table) — jumps re-pump from 0 */
   private fragmented = false
   /** active fragmented jump: drop demuxed chunks before the target GOP */
@@ -60,8 +65,15 @@ export class Mp4FrameSource {
   private sampleScale = 0
   private scratch: Uint8Array | null = null
 
-  static async open(asset: MediaAsset): Promise<Mp4FrameSource | null> {
+  /** 0.5 for colour-over-matte intermediates — see normalizeColor. */
+  private heightScale = 1
+
+  static async open(
+    asset: MediaAsset,
+    opts?: { alphaPacked?: boolean }
+  ): Promise<Mp4FrameSource | null> {
     const src = new Mp4FrameSource(asset)
+    if (opts?.alphaPacked) src.heightScale = 0.5
     try {
       // init pulls the moov and configures the decoder; on a wedged GPU/decoder
       // it can hang with neither an output nor an error. Bound it so the export
@@ -261,6 +273,38 @@ export class Mp4FrameSource {
 
   private headReject: ((e: Error) => void) | null = null
 
+  /**
+   * Fetch the last TAIL_LIMIT bytes and hand them to mp4box with their real
+   * fileStart, so a moov sitting at the end of the file still parses. Sample
+   * DATA is not there, but init()'s `jump(0)` re-pumps the file from the
+   * first sample once the table is known.
+   */
+  private async pumpTail() {
+    const start = Math.max(0, this.fileSize - TAIL_LIMIT)
+    const ac = new AbortController()
+    this.fetchAbort = ac
+    try {
+      const res = await fetch(this.url, {
+        signal: ac.signal,
+        headers: { Range: `bytes=${start}-` }
+      })
+      const buf = new Uint8Array(await res.arrayBuffer())
+      if (ac.signal.aborted) return
+      const ab = buf.buffer.slice(
+        buf.byteOffset, buf.byteOffset + buf.byteLength
+      ) as ArrayBuffer & { fileStart: number }
+      ab.fileStart = start
+      this.file.appendBuffer(ab)
+      if (!this.moovFound) throw new Error('moov not found in the head or the tail')
+    } catch (err) {
+      if (!ac.signal.aborted) {
+        if (!this.ready) this.headReject?.(err as Error)
+        else this.fatal = true
+        this.kick()
+      }
+    }
+  }
+
   private async pump(offset: number) {
     this.fetchAbort?.abort()
     const ac = new AbortController()
@@ -271,6 +315,11 @@ export class Mp4FrameSource {
         signal: ac.signal,
         headers: offset > 0 ? { Range: `bytes=${offset}-` } : undefined
       })
+      if (!this.fileSize) {
+        const len = Number(res.headers.get('content-length') || 0)
+        const cr = res.headers.get('content-range')?.match(/\/(\d+)$/)
+        this.fileSize = cr ? Number(cr[1]) : offset + len
+      }
       const reader = res.body!.getReader()
       for (;;) {
         if (ac.signal.aborted) return
@@ -290,7 +339,17 @@ export class Mp4FrameSource {
         this.fileOffset += value.byteLength
         this.file.appendBuffer(ab)
         if (!this.moovFound && this.fileOffset > HEAD_LIMIT) {
-          throw new Error('moov not found in the head — likely not faststart')
+          // Not a faststart file: plenty of recorders and editors leave the
+          // sample table at the END. Grab the tail instead of giving up —
+          // the alternative is the element-seek fallback at ~0.2 s per frame
+          // (one such 113 s clip alone added ~25 min to a real export).
+          if (!this.triedTail && this.fileSize > HEAD_LIMIT) {
+            this.triedTail = true
+            ac.abort()
+            void this.pumpTail()
+            return
+          }
+          throw new Error('moov not found in the head or the tail')
         }
       }
       if (!ac.signal.aborted) {
@@ -475,7 +534,12 @@ export class Mp4FrameSource {
       if (!this.scratch || this.scratch.byteLength < size) this.scratch = new Uint8Array(size)
       const buf = this.scratch.subarray(0, size)
       const layout = await f.copyTo(buf)
-      const hd = (f.codedHeight ?? 0) >= 720
+      // Packed alpha intermediates always carry a BT.709 picture (the packer
+      // converts anything else) — and they must be re-wrapped here rather
+      // than tagged in the file, because a tagged frame goes through
+      // Chromium's colour-managed upload and comes out with lifted
+      // mid-tones, which would corrupt the alpha matte in the bottom half.
+      const hd = this.heightScale !== 1 || (f.codedHeight ?? 0) >= 720
       const nf = new VideoFrame(buf, {
         format: f.format,
         codedWidth: f.codedWidth,

@@ -6,6 +6,8 @@ import { useEditor } from '@/state/store'
 import { dirOf } from '@shared/paths'
 import { activity } from '@/engine/autosave'
 import { useT } from '@/i18n'
+import { token } from '@/theme'
+import { Icon } from './icons'
 
 // panel position/size, persisted across launches; null = the default CSS
 // placement (docked to the right edge)
@@ -101,9 +103,9 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       cursorBlink: true,
       convertEol: false,
       theme: {
-        background: '#101218',
-        foreground: '#d8dce6',
-        cursor: '#7fc4ff'
+        background: token('--c-term-bg', '#0a0c11'),
+        foreground: token('--c-term-fg', '#e6e9ef'),
+        cursor: token('--c-term-cursor', '#6a8cff')
       }
     })
     const fit = new FitAddon()
@@ -158,9 +160,16 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
         : undefined}
     >
       <div className="claude-head" onPointerDown={startMove}>
-        <span>🤖 Claude Code</span>
+        <span><Icon name="bot" size={15} /> Claude Code</span>
         <span className="dim claude-hint">{t('claudeHint')}</span>
-        <button className="claude-close" title={t('claudeClose')} onClick={onClose}>✕</button>
+        <button
+          className="claude-close"
+          title={t('claudeClose')}
+          aria-label={t('claudeClose')}
+          onClick={onClose}
+        >
+          <Icon name="close" size={15} />
+        </button>
       </div>
       <div className="claude-term" ref={holder} />
       <div className="claude-rs l" onPointerDown={startResize({ l: true })} />

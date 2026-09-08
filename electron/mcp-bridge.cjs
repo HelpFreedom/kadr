@@ -9,8 +9,12 @@ const { z } = require('zod')
 const http = require('http')
 
 const PORT = Number(process.argv[2])
+// Per-session secret for /eval. The editor generates it and passes it here
+// through the generated --mcp-config, so it never touches disk in a
+// world-readable place beyond that file; without it the bridge answers 403.
+const TOKEN = process.argv[3] || ''
 if (!PORT) {
-  console.error('usage: mcp-bridge.cjs <editor-bridge-port>')
+  console.error('usage: mcp-bridge.cjs <editor-bridge-port> <token>')
   process.exit(1)
 }
 
@@ -36,11 +40,20 @@ function editorEval(code) {
     const body = JSON.stringify({ code })
     const req = http.request(
       { host: '127.0.0.1', port: PORT, path: '/eval', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          'x-kadr-token': TOKEN
+        } },
       (res) => {
         let data = ''
         res.on('data', (c) => { data += c })
         res.on('end', () => {
+          if (res.statusCode === 403) {
+            reject(new Error('editor bridge rejected this session (stale token) — ' +
+              'reopen the Kadr terminal panel'))
+            return
+          }
           try {
             const r = JSON.parse(data)
             if (r.error) reject(new Error(r.error))
@@ -80,8 +93,16 @@ server.registerTool('kadr_state', {
     'playhead, and available export presets. All times are in seconds. tracks[0] is the topmost ' +
     'video track (drawn last). Clip: {id, kind: media|text, assetId, start, duration, inPoint, ' +
     'speed, gain, muted, transform, mask?, maskShapes?, effects[], transitionIn/Out?, fadeIn/Out?}. ' +
+    'project.markers are the user\'s free-floating timeline markers ({id, time, label}) — use ' +
+    'them as anchors the user set for you (\u00abfrom marker 2 to marker 3\u00bb). ' +
     'project.texts lists transcript/subtitle documents (TextDoc {id, name, path, format: srt|txt, ' +
     'assetId?, offset?}) — path is a real file you can Read/Edit; see kadr_transcribe to create them. ' +
+    'project.voiceRuns are ElevenLabs voice-overs ({id, assetId, scriptPath, scriptHash, tempo, runDir?}) ' +
+    'and project.defects their suspected defects. THESE ARE NOT MARKERS AND NOT THE RANGE: a defect ' +
+    'belongs to one audio clip, its src/phrase times are SOURCE seconds of that clip\'s asset, and ' +
+    'only the USER turns proposed into confirmed/rejected. voiceDefects[] in this result is the same ' +
+    'list with timeline seconds already worked out — seek with those, never compute them yourself ' +
+    '(clip speed and inPoint are in it). ' +
     'Asset waveform/thumbnail blobs are omitted (hasWaveform/hasThumbnail flags remain).',
   inputSchema: {}
 }, async () => {
@@ -101,6 +122,18 @@ server.registerTool('kadr_state', {
         playhead: s.playhead,
         exportPresets: window.kadrEditor.PRESETS.map(p => ({
           id: p.id, name: p.name, container: p.container, audioOnly: !!p.audioOnly
+        })),
+        // source seconds mapped to the timeline here, once: doing it in the
+        // model means getting speed/inPoint wrong sooner or later
+        voiceDefects: window.kadrEditor.placeDefects(s.project).map(pl => ({
+          id: pl.defect.id, runId: pl.defect.runId, clipId: pl.clipId,
+          origin: pl.defect.origin, class: pl.defect.cls, tier: pl.defect.tier,
+          confidence: pl.defect.confidence, state: pl.defect.state,
+          words: pl.defect.words, src: pl.defect.src,
+          phrase: [pl.defect.phrase.t0, pl.defect.phrase.t1],
+          timeline: [pl.src.start, pl.src.end],
+          phraseTimeline: pl.phrase ? [pl.phrase.start, pl.phrase.end] : null,
+          text: (pl.defect.phrase.text || '').slice(0, 160)
         }))
       }`))
   } catch (e) { return asError(e) }
@@ -119,6 +152,7 @@ server.registerTool('kadr_eval', {
     'clip using them, one undo), setClipDuration(clipId, sec), setClipSpeed(clipId, speed, duration) ' +
     '(speed 0.02–100), addAsset(asset), ' +
     'addTrack(kind), select([ids]), setPlayhead(sec), setProject(project), splitAtPlayhead(), ' +
+    'addMarker(sec) (auto-numbered, returns id), moveMarker(id, sec), removeMarker(id), ' +
     'deleteSelection(), setTransition(clipId, type|null), setEdgeTransitions(...).\n' +
     '- window.kadrEditor.uid() → new id; .PRESETS → export presets; .projectDuration(project); ' +
     '.evalAnim(anim, t); await .reverseClip(clipId) — reverse a video/audio clip in place ' +
@@ -242,7 +276,9 @@ server.registerTool('kadr_fragment_create', {
     'Kadr timeline at [start, end) project seconds. Use it for animations, dynamic subtitles, ' +
     'motion graphics, self-contained scenes. Returns the fragment id and the entry TSX file — ' +
     'EDIT THAT FILE with your normal file tools; the editor preview hot-reloads your changes ' +
-    'live (no rendering during iteration; the real render happens once at export). Rules:\n' +
+    'live (no rendering during iteration; the real render happens once at export). For a saved ' +
+    'project the fragment folder lives next to the .kadr file (<projectDir>/kadr-fragments/<id>); ' +
+    'unsaved projects keep it in the shared workspace until the first save moves it over. Rules:\n' +
     '- the composition is sized to the project and runs at >=60 fps; meta.json in the fragment ' +
     'folder holds width/height/fps/durationInFrames — keep durationInFrames in sync if you ' +
     'change timing\n' +
@@ -250,6 +286,8 @@ server.registerTool('kadr_fragment_create', {
     'self-contained scene\n' +
     '- to use media/images, copy or write files INTO the fragment folder and import them ' +
     '(import bg from "./bg.jpg") — absolute paths will not survive the final render bundling\n' +
+    '- embed video with <Video>, NOT <OffthreadVideo>: the latter needs Remotion\'s native ' +
+    'compositor (glibc >= 2.32) and dies on older systems with "GLIBC_2.3x not found"\n' +
     '- the module must keep exporting `fragment = { component, meta }`\n' +
     '- subtitle data: read SRT files from kadr_state project.texts and bake the cues into the ' +
     'composition (e.g. as a const array) for word-precise animated captions',
@@ -267,6 +305,194 @@ server.registerTool('kadr_fragment_create', {
       try { playerUrl = (await window.kadrEditor.ensureFragmentServer()) + '/?comp=' + r.id } catch {}
       return { fragmentId: r.id, clipId: r.clipId, dir: r.dir, entryFile: r.entry,
                meta: r.meta, playerUrl }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_neon_wave', {
+  description:
+    'Generate a «neon wave» clip: an audio-reactive glowing sine line (the user\'s Blender ' +
+    'preset rebuilt as a Remotion fragment) over [start, end) project seconds. The loudness of ' +
+    'the timeline mix in that range — or of ONE audio track when trackId is given — drives the ' +
+    'wiggle frequency and height (Blender "Bake Sound" follower: 5 ms attack / 200 ms release). ' +
+    'Opaque black background, project size, >=60 fps; lands on the topmost free video track and ' +
+    'is selected. Returns the fragment id and its entry TSX: `S` at the top holds every style ' +
+    'knob (colour ramp, glow, streaks, amplitude, speed), `ENV` the loudness per frame — edit ' +
+    'the file to restyle, the preview hot-reloads. Regenerate (call again) after the audio changes.',
+  inputSchema: {
+    start: z.number().describe('clip start, project seconds'),
+    end: z.number().describe('clip end, project seconds'),
+    trackId: z.string().optional().describe('restrict the sound to this audio track (from kadr_state); default = whole mix'),
+    name: z.string().optional().describe('fragment name, default "wave"')
+  }
+}, async ({ start, end, trackId, name }) => {
+  try {
+    const opts = { range: { start, end }, source: trackId ? { trackId } : 'mix', name }
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.neonWave(${JSON.stringify(opts)})
+      return { fragmentId: r.fragmentId, clipId: r.clipId, entryFile: r.entry, frames: r.frames, peak: r.peak }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_voice_speak', {
+  description:
+    'Voice a text through ElevenLabs and put the audio on the timeline. Needs an API key set in ' +
+    'the editor\'s voice-over settings (it lives in the main process; nothing here can read it). ' +
+    'Give exactly one source: `text` verbatim, `textDocId` from project.texts, or `path` to a ' +
+    'txt/srt on disk. Lands on a free audio track at `at` (default: the playhead), CREATING an ' +
+    'audio track if the project has none. Writes <name>.script.txt next to the audio — the exact ' +
+    'text that was synthesised — and registers it in project.texts; kadr_voice_check aligns ' +
+    'against THAT file, so never retype it. COSTS ElevenLabs credits: say so before calling.',
+  inputSchema: {
+    text: z.string().optional().describe('the text itself'),
+    textDocId: z.string().optional().describe('id of a document from project.texts'),
+    path: z.string().optional().describe('absolute path to a .txt/.srt'),
+    at: z.number().optional().describe('timeline second to place it at; default = playhead'),
+    name: z.string().optional().describe('base name for the produced files')
+  }
+}, async ({ text, textDocId, path, at, name }) => {
+  try {
+    const given = [text, textDocId, path].filter((x) => x !== undefined)
+    if (given.length !== 1) throw new Error('pass exactly one of text / textDocId / path')
+    const opts = { text, textDocId, path, at, name }
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.speakText(${JSON.stringify(opts)})
+      return { runId: r.runId, assetId: r.assetId, clipId: r.clipId, path: r.path,
+               scriptPath: r.scriptPath, duration: r.duration, tempo: r.tempo, chunks: r.chunks }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_voice_check', {
+  description:
+    'Run the local defect detector (python/ttsqc) over ONE voice-over and fill project.defects. ' +
+    'Takes MINUTES and holds the GPU — warn the user, then call and wait, do not retry mid-flight; ' +
+    'an export must not be running. Analyses the asset file itself against the script that was ' +
+    'synthesised; refuses if that script has been edited since (word indices would be lies). ' +
+    'Everything it finds arrives as state "proposed": deciding is the USER\'s job, done by ' +
+    'clicking the violet flags. Returns counts and the analysis trust (below 0.9 the list is ' +
+    'probably incomplete).',
+  inputSchema: {
+    runId: z.string().optional().describe('voice run from project.voiceRuns; default = the selected clip\'s'),
+    assetId: z.string().optional().describe('or pick the run by its audio asset'),
+    minConfidence: z.number().optional().describe('0 = show every candidate (default), 0.4-0.8 = working thresholds'),
+    device: z.string().optional().describe('"cuda" (default) or "cpu"')
+  }
+}, async ({ runId, assetId, minConfidence, device }) => {
+  try {
+    const opts = { runId, assetId, minConfidence, device }
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.checkVoice(${JSON.stringify(opts)})
+      const p = window.kadrEditor.useEditor.getState().project
+      const mine = (p.defects || []).filter(d => d.runId === r.runId)
+      const byClass = {}
+      for (const d of mine) byClass[d.cls || '?'] = (byClass[d.cls || '?'] || 0) + 1
+      return { runId: r.runId, defects: r.defects, trust: r.trust, runDir: r.runDir, byClass }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_voice_verdict', {
+  description:
+    'Record the verdict on defects: defect=true means "yes, regenerate this phrase", false means ' +
+    '"not a defect". ONLY use this when the user has told you their decision in words — the ' +
+    'verdicts also become training data for the detector, so guessing on their behalf poisons it. ' +
+    'Every verdict is one undo entry.',
+  inputSchema: {
+    ids: z.array(z.string()).describe('defect ids from kadr_state.voiceDefects'),
+    defect: z.boolean().describe('true = confirmed defect, false = not a defect')
+  }
+}, async ({ ids, defect }) => {
+  try {
+    return asText(await editorEval(`
+      window.kadrEditor.setVerdict(${JSON.stringify(ids)}, ${defect ? 'true' : 'false'})
+      const p = window.kadrEditor.useEditor.getState().project
+      const st = {}
+      for (const d of (p.defects || [])) st[d.state] = (st[d.state] || 0) + 1
+      return { updated: ${ids.length}, states: st }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_voice_mark', {
+  description:
+    'Record a defect the detector missed, at a place the USER pointed out. Times are TIMELINE ' +
+    'seconds; the editor maps them into the audio and works out which phrase they fall in, using ' +
+    'the finished analysis (no models are loaded). Requires kadr_voice_check to have run once. ' +
+    'This is the only channel that can teach the detector to find a kind of defect it never ' +
+    'proposes — so place them where the user says, never on a hunch.',
+  inputSchema: {
+    start: z.number().describe('timeline seconds'),
+    end: z.number().describe('timeline seconds'),
+    assetId: z.string().optional().describe('voice-over asset; default = the only one')
+  }
+}, async ({ start, end, assetId }) => {
+  try {
+    return asText(await editorEval(`
+      const E = window.kadrEditor, s = E.useEditor.getState()
+      const runs = s.project.voiceRuns || []
+      const run = ${JSON.stringify(assetId ?? null)}
+        ? runs.find(r => r.assetId === ${JSON.stringify(assetId ?? null)}) : runs[0]
+      if (!run) throw new Error('no voice-over in this project')
+      const clip = s.project.tracks.flatMap(t => t.clips)
+        .find(c => c.assetId === run.assetId && ${start} < c.start + c.duration && ${end} > c.start)
+      if (!clip) throw new Error('no clip of that voice-over covers this time')
+      const a = E.projectToSrc(clip, ${start}), b = E.projectToSrc(clip, ${end})
+      const id = await E.addUserDefect(run.assetId, a, b)
+      const d = E.useEditor.getState().project.defects.find(x => x.id === id)
+      return { id, src: d.src, phrase: [d.phrase.t0, d.phrase.t1], text: d.phrase.text }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_voice_regenerate', {
+  description:
+    'Re-synthesise the CONFIRMED defective phrases of one voice-over and splice them back into ' +
+    'the audio. Acts ONLY on defects whose state is "confirmed" — it will not touch "proposed" ' +
+    'ones, because confirming is the user\'s judgement, not yours. Phrases that touch are merged ' +
+    'and everything is spliced in one pass: one new audio file, one undo entry. ' +
+    'The patch is sped up by the SAME factor the file was (VoiceRun.tempo), levelled to the ' +
+    'stretch it replaces and joined with equal-power crossfades in the silence between sentences. ' +
+    'The result is almost never the same length, so by default everything after the splice is ' +
+    'SHIFTED (ripple) across all unlocked tracks — otherwise the picture would drift out of sync. ' +
+    'COSTS ElevenLabs credits, one request per phrase: tell the user how many before calling. ' +
+    'Refuses when a clip boundary falls inside a phrase being replaced.',
+  inputSchema: {
+    runId: z.string().optional().describe('voice run; default = the one with confirmed defects'),
+    ids: z.array(z.string()).optional().describe('specific defect ids; default = all confirmed'),
+    ripple: z.boolean().optional().describe('shift what follows (default true)'),
+    rippleAllTracks: z.boolean().optional().describe('shift on every unlocked track (default true)'),
+    reverify: z.boolean().optional().describe('run the detector again afterwards (minutes)')
+  }
+}, async ({ runId, ids, ripple, rippleAllTracks, reverify }) => {
+  try {
+    const opts = { runId, ids, ripple, rippleAllTracks, reverify }
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.regenerateDefects(${JSON.stringify(opts)})
+      return { phrases: r.units, newAssetId: r.newAssetId, deltaSeconds: r.delta,
+               duration: r.duration, seams: r.seams, warnings: r.warnings }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_voice_learn', {
+  description:
+    'Look at, and optionally retrain, the defect detector\'s confidence model from the verdicts ' +
+    'collected so far. WITHOUT retrain (the default) it only reports what the corpus holds — ' +
+    'examples, files, how many of the user\'s own marks are usable — and touches nothing. ' +
+    'With retrain:true AND confirm:true it rebuilds the model FROM SCRATCH and overwrites the ' +
+    'file, which is shared with the user\'s own console ttsqc; the previous model is backed up ' +
+    'first. Only ever do this when the user asks for it in so many words — never as tidying up. ' +
+    'Be honest about what it buys: confirming and rejecting raises PRECISION; recall only moves ' +
+    'for marks the generator already had a candidate for, and marks it never proposes at all ' +
+    'cannot be learned by this model — they are counted separately (userUnmatched).',
+  inputSchema: {
+    retrain: z.boolean().optional().describe('rebuild the model (default: only report)'),
+    confirm: z.boolean().optional().describe('required together with retrain:true')
+  }
+}, async ({ retrain, confirm }) => {
+  try {
+    if (retrain && !confirm) {
+      throw new Error('retraining overwrites the machine-wide model — pass confirm:true once the user has agreed')
+    }
+    return asText(await editorEval(`
+      await window.kadrEditor.flushAllVerdicts()
+      const r = await window.kadrEditor.${retrain ? 'retrain()' : 'learnStatus()'}
+      return r`))
   } catch (e) { return asError(e) }
 })
 

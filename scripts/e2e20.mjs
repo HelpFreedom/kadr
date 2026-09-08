@@ -87,7 +87,8 @@ for (let i = 0; i < 30; i++) {
   await new Promise((r) => setTimeout(r, 1000))
 }
 
-// clean slate for the fx preset store
+// the fx preset store is REAL USER DATA — back it up, then clean slate
+const userFxPresets = await evalJs(`(async () => (await window.kadr.readUserStore('fx-presets')) ?? [])()`)
 await evalJs(`(async () => {
   const ed = window.kadrEditor
   for (const p of [...ed.useFxPresets.getState().presets]) ed.useFxPresets.getState().deletePreset(p.id)
@@ -188,6 +189,15 @@ const deleted = await evalJs(`(async () => {
 })()`)
 check('preset deletes from store and file', deleted.left === 0 && deleted.fileLen === 0,
   JSON.stringify(deleted))
+
+// restore the user's fx presets (file + cache + live store)
+await evalJs(`(async () => {
+  const presets = ${JSON.stringify(userFxPresets)}
+  await window.kadr.writeUserStore('fx-presets', presets)
+  localStorage.setItem('kadr.fxPresets', JSON.stringify(presets))
+  window.kadrEditor.useFxPresets.setState({ presets })
+  return presets.length
+})()`)
 
 ws.close()
 console.log('e2e20 finished')

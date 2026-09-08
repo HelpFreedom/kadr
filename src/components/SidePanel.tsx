@@ -4,6 +4,7 @@ import { AnimEditor } from './AnimEditor'
 import { TrackMotionEditor } from './TrackMotionEditor'
 import { useEditor } from '@/state/store'
 import { useT } from '@/i18n'
+import { Icon } from './icons'
 
 type Tab = 'media' | 'anim' | 'motion'
 
@@ -35,7 +36,7 @@ export function SidePanel({ width }: { width: number }) {
                 useEditor.getState().setAnimClip(null)
               }}
             >
-              ×
+              <Icon name="close" size={12} />
             </span>
           </button>
         )}
@@ -50,7 +51,7 @@ export function SidePanel({ width }: { width: number }) {
                 useEditor.getState().setMotionTrack(null)
               }}
             >
-              ×
+              <Icon name="close" size={12} />
             </span>
           </button>
         )}

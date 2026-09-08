@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { useEditor, uid } from '@/state/store'
 import { baseOf } from '@shared/paths'
 import type { TextDoc } from '@shared/types'
+import { logError, logWarn } from './log'
 
 /** files/URLs currently being imported (drop or dialog) — drives the '…' hint */
 export const useImportUi = create<{ active: number }>(() => ({ active: 0 }))
@@ -87,7 +88,7 @@ async function importFilesInner(
       st().addAsset({ id, ...asset })
       assetIds.push(id)
     } catch (err) {
-      console.error('probe failed', path, err)
+      logError('импорт', `не удалось прочитать файл: ${path}`, err)
     }
   }
   if (textDocs.length) st().addTexts(textDocs)
@@ -194,7 +195,7 @@ export async function importDrop(
       try {
         paths.push(...await window.kadr.portalFiles(payload.portalKey))
       } catch (err) {
-        console.error('kadr-drop: portal transfer failed', err)
+        logError('импорт', 'portal: не удалось забрать файлы из переноса', err)
       }
     }
     if (!paths.length) {
@@ -208,7 +209,7 @@ export async function importDrop(
             paths.push(await window.kadr.downloadMedia(url))
           }
         } catch (err) {
-          console.error('kadr-drop: url import failed', url, err)
+          logError('импорт', `не удалось скачать ${url}`, err)
         }
       }
       if (!paths.length) {
@@ -217,13 +218,13 @@ export async function importDrop(
             const data = new Uint8Array(await f.arrayBuffer())
             if (data.length) paths.push(await window.kadr.saveBlobMedia(f.name, f.type, data))
           } catch (err) {
-            console.error('kadr-drop: blob import failed', f.name, err)
+            logError('импорт', `не удалось сохранить ${f.name}`, err)
           }
         }
       }
     }
     if (paths.length) await importFilesInner(paths, place)
-    else console.warn('kadr-drop: nothing importable in this drop')
+    else logWarn('импорт', 'в перетаскивании не нашлось ничего, что можно импортировать')
   } finally {
     useImportUi.setState((s) => ({ active: s.active - 1 }))
   }

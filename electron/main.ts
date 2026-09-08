@@ -5,11 +5,19 @@ import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'e
 import { join, dirname, basename } from 'path'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { createHash } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { execFile, spawn, spawnSync } from 'child_process'
-import { probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, ExportMuxer, RawVideoEncoder } from './ffmpeg'
+import {
+  probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, packedAlphaPlan,
+  ExportMuxer, RawVideoEncoder, meanVolume
+} from './ffmpeg'
+import { mediaCacheKey, proxySuffix, decodedSuffix, reverseSuffix } from './cacheKeys'
+import { registerStorageIpc } from './storage'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
+import { registerTtsIpc } from './tts'
+import { registerVoiceIpc } from './voice'
+import { registerEnvelopeIpc } from './envelope'
 import { registerFragmentIpc } from './fragments'
 import { enumerateGpus, applyGpuChoiceAtStartup, confirmGpuTrial, cleanRelaunchEnv } from './gpu'
 import type { ExportJob, Project } from '@shared/types'
@@ -77,6 +85,8 @@ process.on('uncaughtException', (err) => {
 })
 
 let win: BrowserWindow | null = null
+/** window.open name of the detached preview — see src/engine/popout.ts */
+const PREVIEW_WIN = 'kadr-preview'
 
 function createWindow() {
   win = new BrowserWindow({
@@ -97,6 +107,38 @@ function createWindow() {
     }
   })
   win.setMenuBarVisibility(false)
+  const owner = win
+  // The preview can be detached into a window of its own (src/engine/popout.ts).
+  // The renderer opens an about:blank popup — same origin and same renderer
+  // process, which is the only reason the live GL canvas can be adopted into
+  // it — and moves the preview's DOM across. Exactly one window name is
+  // allowed: the Remotion fragment pages served by the workspace dev server
+  // run inside this webContents too, and nothing they contain has any business
+  // opening an OS window.
+  win.webContents.setWindowOpenHandler(({ frameName }) => {
+    if (frameName !== PREVIEW_WIN) return { action: 'deny' }
+    return {
+      action: 'allow',
+      overrideBrowserWindowOptions: {
+        title: 'Kadr',
+        // --c-bg-0: about:blank is white, and the styles arrive a beat later
+        backgroundColor: '#0b0d12',
+        minWidth: 320,
+        minHeight: 200,
+        autoHideMenuBar: true
+      }
+    }
+  })
+  win.webContents.on('did-create-window', (child, { frameName }) => {
+    if (frameName !== PREVIEW_WIN) return
+    child.setMenuBarVisibility(false)
+    child.removeMenu()
+    // closing the editor must not leave the preview window behind: while one
+    // is open window-all-closed never fires and the app would never quit
+    const closeChild = () => { if (!child.isDestroyed()) child.destroy() }
+    owner.on('close', closeChild)
+    child.on('closed', () => owner.isDestroyed() || owner.removeListener('close', closeChild))
+  })
   // a killed/crashed renderer leaves a dead window and an immortal main
   // process (the running project is lost either way — autosave has it);
   // exit cleanly so the next launch starts fresh instead of being blocked
@@ -155,6 +197,26 @@ function streamBody(stream: ReturnType<typeof createReadStream>): ReadableStream
   })
 }
 
+/**
+ * kadr:// is a privileged scheme (bypassCSP + CORS + `Access-Control-Allow-Origin: *`,
+ * all of which the media elements need — without them Chromium taints their
+ * pixels and preview/export go black, see the note at the top), and its handler
+ * streams any absolute path. That is fine for this editor's own renderer, which
+ * holds node access anyway — but the fragment dev server serves pages on ANOTHER
+ * origin (the <iframe> preview, the offscreen capture window) whose code is
+ * written by hand, by Claude, or arrives inside somebody else's project, and
+ * which has no such access. Measured before this lock: such a page could
+ * `fetch('kadr://media/etc/hostname')` and read the reply (issue #13).
+ *
+ * So every URL carries a per-run capability token that only the preload knows:
+ * a page that cannot read the privileged renderer's JS cannot forge one.
+ * A directory allowlist was considered and rejected — media legitimately lives
+ * wherever the user picked it, and a project loaded through kadr_eval never
+ * passes main at all, so the allowlist would have had silent holes exactly
+ * where a miss means a black preview.
+ */
+const MEDIA_TOKEN = randomBytes(24).toString('hex')
+
 function mediaResponse(filePath: string, rangeHeader: string | null): Response {
   const stat = statSync(filePath)
   const size = stat.size
@@ -186,6 +248,9 @@ function mediaResponse(filePath: string, rangeHeader: string | null): Response {
 app.whenReady().then(() => {
   protocol.handle('kadr', (request) => {
     const url = new URL(request.url)
+    if (url.searchParams.get('t') !== MEDIA_TOKEN) {
+      return new Response('forbidden', { status: 403 })
+    }
     let filePath = decodeURIComponent(url.pathname)
     // Windows drive paths travel as /D:/dir/file — drop the URL's leading
     // slash so fs gets D:/dir/file (node accepts forward slashes there)
@@ -197,8 +262,14 @@ app.whenReady().then(() => {
     }
   })
   registerIpc()
+  void pruneDecodedCache()
+  void sweepPartFiles()
   registerClaudeIpc(() => win)
   registerTranscribeIpc(() => win)
+  registerTtsIpc(() => win)
+  registerVoiceIpc(() => win)
+  registerEnvelopeIpc()
+  registerStorageIpc()
   registerFragmentIpc(() => win)
   void sweepExportTemps() // reclaim multi-GB export intermediates left by a crash
   createWindow()
@@ -268,13 +339,21 @@ const userStorePath = (name: string) =>
 const proxyDir = () => join(app.getPath('userData'), 'proxies')
 let proxyChain: Promise<unknown> = Promise.resolve()
 
-async function requestProxy(srcPath: string, duration: number, audioOnly = false): Promise<string> {
+async function requestProxy(
+  srcPath: string,
+  duration: number,
+  opts?: { alpha?: boolean; codec?: string; audioOnly?: boolean }
+): Promise<string> {
   const stat = statSync(srcPath)
-  const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}:${audioOnly ? 'a' : 'v'}`)
-    .digest('hex')
-    .slice(0, 20)
-  const out = join(proxyDir(), `${key}.mp4`)
+  // alpha proxies are a different artifact (webm), and an audio-only proxy
+  // (a music/voice file with an undecodable codec) yet another — each needs
+  // its own cache identity
+  const key = mediaCacheKey(
+    srcPath, stat.size, stat.mtimeMs,
+    proxySuffix(opts?.alpha) + (opts?.audioOnly ? '-a' : '')
+  )
+  const ext = opts?.alpha ? 'webm' : 'mp4'
+  const out = join(proxyDir(), `${key}.${ext}`)
   try {
     await fs.access(out)
     return out
@@ -285,11 +364,11 @@ async function requestProxy(srcPath: string, duration: number, audioOnly = false
       await fs.access(out)
       return // built while we waited in the queue
     } catch { /* still missing */ }
-    const tmp = join(proxyDir(), `${key}.part.mp4`)
+    const tmp = join(proxyDir(), `${key}.part.${ext}`)
     try {
       await makeProxy(srcPath, tmp, duration, (p) => {
         win?.webContents.send('proxy:progress', { path: srcPath, progress: p })
-      }, audioOnly)
+      }, opts)
       await fs.rename(tmp, out)
     } catch (err) {
       fs.unlink(tmp).catch(() => { /* nothing to clean */ })
@@ -308,28 +387,53 @@ async function requestProxy(srcPath: string, duration: number, audioOnly = false
 const decodedDir = () => join(app.getPath('userData'), 'decoded')
 let decodedChain: Promise<unknown> = Promise.resolve()
 
-async function requestDecoded(srcPath: string, duration: number): Promise<string> {
+async function requestDecoded(
+  srcPath: string,
+  duration: number,
+  opts?: { alpha?: boolean; codec?: string; packed?: boolean; matrix?: string }
+): Promise<string> {
   const stat = statSync(srcPath)
-  const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}`)
-    .digest('hex')
-    .slice(0, 20)
-  const out = join(decodedDir(), `${key}.mp4`)
+  const key = mediaCacheKey(srcPath, stat.size, stat.mtimeMs, decodedSuffix(opts))
+  // packed = colour over its alpha matte in one fast-decodable H.264 mp4
+  const ext = opts?.alpha && !opts?.packed ? 'webm' : 'mp4'
+  const out = join(decodedDir(), `${key}.${ext}`)
   try {
-    await fs.access(out)
-    return out
+    // a zero-byte file is the corpse of an interrupted build, not a cache hit
+    if ((await fs.stat(out)).size > 0) return out
+    await fs.unlink(out)
   } catch { /* not built yet */ }
   await fs.mkdir(decodedDir(), { recursive: true })
+  if (opts?.packed) {
+    const plan = await packedAlphaPlan(srcPath)
+    if (!plan.canPack) {
+      throw new Error('alpha packing skipped: full-range source')
+    }
+    opts = { ...opts, matrix: plan.matrix }
+    // lossless colour+matte intermediates are big (~220 MB per minute of
+    // 1080p60, four times that at 4K); refuse rather than fill the disk — the
+    // caller falls back to the slow element path, which is correct, just slow
+    const need = Math.max(2e9, duration * plan.bytesPerSecond) + 3e9
+    try {
+      const st = await fs.statfs(decodedDir())
+      const free = st.bsize * st.bavail
+      if (free < need) {
+        throw new Error(`not enough free disk for a packed alpha intermediate: ` +
+          `${Math.round(free / 1e9)} GB free, ~${Math.round(need / 1e9)} GB needed`)
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('not enough')) throw err
+      // statfs unavailable — proceed, ffmpeg will fail loudly if it can't write
+    }
+  }
   const job = decodedChain.then(async () => {
     try {
-      await fs.access(out)
-      return // built while we waited in the queue
+      if ((await fs.stat(out)).size > 0) return // built while we waited in the queue
     } catch { /* still missing */ }
-    const tmp = join(decodedDir(), `${key}.part.mp4`)
+    const tmp = join(decodedDir(), `${key}.part.${ext}`)
     try {
       await makeDecoded(srcPath, tmp, duration, (p) => {
         win?.webContents.send('proxy:progress', { path: srcPath, progress: p })
-      })
+      }, opts)
       await fs.rename(tmp, out)
     } catch (err) {
       fs.unlink(tmp).catch(() => { /* nothing to clean */ })
@@ -340,6 +444,64 @@ async function requestDecoded(srcPath: string, duration: number): Promise<string
   await job
   win?.webContents.send('proxy:progress', { path: srcPath, progress: 1 })
   return out
+}
+
+/**
+ * Keep the decode cache from eating the disk. A lossless colour+matte
+ * intermediate costs ~250 MB per minute of 1080p60 and every edit of a
+ * fragment makes a new one, so the folder would grow without bound. Runs at
+ * startup only — nothing can be reading these files yet — and drops the
+ * least recently touched entries until the folder is back under the cap.
+ */
+const DECODED_CACHE_CAP = 10e9
+
+async function pruneDecodedCache(): Promise<void> {
+  try {
+    const dir = decodedDir()
+    const names = await fs.readdir(dir)
+    const files = await Promise.all(names.map(async (name) => {
+      const p = join(dir, name)
+      const st = await fs.stat(p).catch(() => null)
+      return st?.isFile() ? { p, size: st.size, used: Math.max(st.mtimeMs, st.atimeMs) } : null
+    }))
+    const list = files.filter((f): f is { p: string; size: number; used: number } => !!f)
+    let total = list.reduce((n, f) => n + f.size, 0)
+    if (total <= DECODED_CACHE_CAP) return
+    list.sort((a, b) => a.used - b.used) // oldest first
+    for (const f of list) {
+      if (total <= DECODED_CACHE_CAP * 0.8) break
+      await fs.unlink(f.p).catch(() => { /* someone else won the race */ })
+      total -= f.size
+      console.log(`[kadr] decode cache: dropped ${f.p} (${Math.round(f.size / 1e6)} MB)`)
+    }
+  } catch { /* no cache dir yet */ }
+}
+
+/**
+ * Every cache here builds into a `<key>.part.<ext>` sidecar and renames on
+ * success, so a survivor of a kill is always a `.part.` file and never a
+ * cache hit. Nothing is building at startup, so any that remain are corpses:
+ * drop them rather than let them count against the cache budget forever.
+ * Directories (the reverse worker's scratch `.tmp` dir) are left alone.
+ */
+async function sweepPartFiles(): Promise<void> {
+  const dirs = ['decoded', 'proxies', 'reversed', 'fragment-renders']
+    .map((d) => join(app.getPath('userData'), d))
+  let dropped = 0
+  for (const dir of dirs) {
+    let names: string[]
+    try { names = await fs.readdir(dir) } catch { continue } // never used yet
+    for (const name of names) {
+      if (!name.includes('.part.')) continue
+      const p = join(dir, name)
+      try {
+        if (!(await fs.stat(p)).isFile()) continue
+        await fs.unlink(p)
+        dropped++
+      } catch { /* raced away */ }
+    }
+  }
+  if (dropped) console.log(`[kadr] swept ${dropped} interrupted cache build(s)`)
 }
 
 // reversed renders: keyed by source identity + range, built one at a time
@@ -353,10 +515,7 @@ async function requestReversed(
   info: { kind: string; hasAudio: boolean; width: number; height: number; fps: number }
 ): Promise<string> {
   const stat = statSync(srcPath)
-  const key = createHash('sha1')
-    .update(`${srcPath}:${stat.size}:${Math.round(stat.mtimeMs)}:${start.toFixed(3)}:${duration.toFixed(3)}`)
-    .digest('hex')
-    .slice(0, 20)
+  const key = mediaCacheKey(srcPath, stat.size, stat.mtimeMs, reverseSuffix(start, duration))
   const out = join(reverseDir(), `${key}.${info.kind === 'video' ? 'mp4' : 'wav'}`)
   try {
     await fs.access(out)
@@ -442,16 +601,22 @@ function nvencAvailable(): boolean {
 }
 
 function registerIpc() {
-  ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number, audioOnly?: boolean) =>
-    requestProxy(srcPath, duration, audioOnly)
+  ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string; audioOnly?: boolean }) =>
+    requestProxy(srcPath, duration, opts)
   )
 
-  ipcMain.handle('media:decoded', (_e, srcPath: string, duration: number) =>
-    requestDecoded(srcPath, duration)
+  ipcMain.handle('media:decoded', (_e, srcPath: string, duration: number,
+    opts?: { alpha?: boolean; codec?: string; packed?: boolean }) =>
+    requestDecoded(srcPath, duration, opts)
   )
 
   ipcMain.handle('media:loudness', (_e, srcPath: string, start: number, duration: number) =>
     measureLoudness(srcPath, start, duration)
+  )
+
+  ipcMain.handle('media:mean-volume', (_e, srcPath: string, start: number, duration: number) =>
+    meanVolume(srcPath, start, duration)
   )
 
   ipcMain.handle(
@@ -504,6 +669,7 @@ function registerIpc() {
     return r.filePaths
   })
 
+  ipcMain.on('media:token', (e) => { e.returnValue = MEDIA_TOKEN })
   ipcMain.handle('media:probe', (_e, path: string) => probeMedia(path))
   // cheap freshness check for the import dedupe — a re-import of a file
   // overwritten with the same name should refresh, not reuse the stale asset

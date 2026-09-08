@@ -6,6 +6,7 @@ import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
 import { getTextLayer } from './text'
 import { attachAudio, setElementGain, isRouted, resumeAudio } from './audio'
+import { logError } from './log'
 
 export interface ActiveLayer {
   clip: Clip
@@ -125,14 +126,23 @@ export class MediaPool {
   /** frame snapshots flip this on to decode ORIGINALS at full quality;
       codecs Chromium can't decode keep their proxy (original would be black) */
   sourceQuality = false
+  /** per-clip source substitution: the exporter routes undecodable-codec
+      clips through an ffmpeg intermediate that the element CAN play */
+  private overrides = new Map<string, string>()
 
   constructor(private opts: MediaPoolOptions = {}) {}
 
+  setSourceOverride(clipId: string, path: string | null) {
+    if (path) this.overrides.set(clipId, path)
+    else this.overrides.delete(clipId)
+  }
+
   get(clipId: string, asset: MediaAsset): HTMLVideoElement | HTMLImageElement {
     let el = this.items.get(clipId)
-    const useProxy = this.opts.proxy && !!asset.proxyPath &&
+    const override = this.overrides.get(clipId)
+    const useProxy = !override && this.opts.proxy && !!asset.proxyPath &&
       (!this.sourceQuality || !chromiumCanDecode(asset.codec))
-    const url = window.kadr.fileUrl(useProxy ? asset.proxyPath! : asset.path)
+    const url = window.kadr.fileUrl(override ?? (useProxy ? asset.proxyPath! : asset.path))
     if (!el) {
       if (asset.kind === 'image') {
         el = new Image()
@@ -219,6 +229,66 @@ export interface BlendFrame {
 }
 
 /**
+ * Everything drawFrame would draw at time t, as a string — without touching
+ * the GPU. Motion blur renders 8 sub-composites per output frame; whenever
+ * the signature is the same at every sub-sample time (no keyframes moving,
+ * no fade or transition in progress, no glow clock running — the common case
+ * in a finished edit) the sub-composites are pixel-identical and one draw
+ * gives EXACTLY the same output frame. Any difference at all, and the full
+ * 8-sample pass runs as before, so this can only ever save redundant work.
+ * A recorder that hits an unknown compositor call returns null = "assume it
+ * moves".
+ *
+ * WHY THIS IS EXACT, AND THE ONE WAY TO BREAK IT. The signature is not a
+ * hand-kept list of "things that count as movement" — it replays the real
+ * drawFrame and records every compositor call with all of its arguments, so
+ * new animated properties, effects and transitions are covered the day they
+ * are added. The single input it does NOT record is the layer's `source`
+ * object: only its cacheKey (and, for captured fragments, raw.version). That
+ * is sound today because within one output frame no source can change — the
+ * decoded VideoFrames are collected once per frame in the exporter's
+ * prepareFrame, and pool elements are seeked there too, so every sub-sample
+ * reads the very same pixels. It follows that motion blur smears TRANSFORMS,
+ * never motion inside the footage. If sub-frame video sampling is ever added
+ * (a true shutter, resampling the source at each sub-sample time), this
+ * function must start recording what the source is showing — otherwise it
+ * will silently declare those frames identical and freeze the very motion the
+ * feature was written to blur.
+ */
+export function frameSignature(
+  project: Project,
+  t: number,
+  pool: MediaPool,
+  frames?: Map<string, VideoFrame>,
+  blends?: Map<string, BlendFrame>,
+  packed?: Set<string>
+): string | null {
+  const parts: string[] = []
+  const sig = (l: LayerDraw) => {
+    const { source, raw, ...rest } = l
+    void source
+    return JSON.stringify(rest) + (raw ? `#${raw.version}` : '')
+  }
+  const rec = {
+    setSize: () => { /* size is constant within a frame */ },
+    begin: (bg?: string) => parts.push(`B${bg}`),
+    beginOverlay: (i: number) => parts.push(`O${i}`),
+    endOverlay: () => parts.push('E'),
+    drawEdgeEffect: (type: string, g: number, op: number) => parts.push(`G${type}|${g}|${op}`),
+    drawTransition: (type: string, p: number, op: number) => parts.push(`T${type}|${p}|${op}`),
+    drawLayer: (l: LayerDraw) => parts.push(`L${sig(l)}`),
+    drawLayerFx: (layers: LayerDraw[], blur: number, glows: unknown[], rel: number) =>
+      parts.push(`F${blur}|${JSON.stringify(glows)}|${rel}|${layers.map(sig).join('~')}`)
+  }
+  try {
+    drawFrame(rec as unknown as Compositor, project, t, pool, frames, blends, packed)
+  } catch {
+    return null // an unrecorded compositor call — never collapse on a guess
+  }
+  return parts.join(';')
+}
+
+/**
  * Draw one frame of the project at time t into the given compositor.
  * `frames` (export fast path) overrides per-clip video sources with decoded
  * WebCodecs frames; clips without an entry fall back to pool elements.
@@ -242,7 +312,9 @@ export function drawFrame(
   t: number,
   pool: MediaPool,
   frames?: Map<string, VideoFrame>,
-  blends?: Map<string, BlendFrame>
+  blends?: Map<string, BlendFrame>,
+  /** clips whose decoded frames are colour-over-alpha-matte (export only) */
+  packed?: Set<string>
 ) {
   comp.setSize(project.width, project.height)
   comp.begin(project.background)
@@ -266,11 +338,11 @@ export function drawFrame(
         const eff = edgeAt(c, t - c.start)
         if (eff && eff.g > 0.003 && eff.g < 0.997) {
           comp.beginOverlay(0)
-          drawClipLayer(comp, project, t, pool, c, track, assetOf(c), 1, frames, blends)
+          drawClipLayer(comp, project, t, pool, c, track, assetOf(c), 1, frames, blends, packed)
           comp.endOverlay()
           comp.drawEdgeEffect(eff.type, eff.g, trackOpacity)
         } else {
-          drawClipLayer(comp, project, t, pool, c, track, assetOf(c), trackOpacity, frames, blends)
+          drawClipLayer(comp, project, t, pool, c, track, assetOf(c), trackOpacity, frames, blends, packed)
         }
       } catch (err) {
         logLayerError(c, err)
@@ -300,9 +372,9 @@ export function drawFrame(
         const overlapEnd = Math.min(A.start + A.duration, B.start + B.duration)
         const p = Math.min(1, Math.max(0, (t - B.start) / Math.max(0.001, overlapEnd - B.start)))
         comp.beginOverlay(0)
-        drawClipLayer(comp, project, t, pool, A, track, assetOf(A), 1, frames, blends)
+        drawClipLayer(comp, project, t, pool, A, track, assetOf(A), 1, frames, blends, packed)
         comp.beginOverlay(1)
-        drawClipLayer(comp, project, t, pool, B, track, assetOf(B), 1, frames, blends)
+        drawClipLayer(comp, project, t, pool, B, track, assetOf(B), 1, frames, blends, packed)
         comp.endOverlay()
         comp.drawTransition(pairType, p, trackOpacity)
       } catch (err) {
@@ -328,7 +400,8 @@ function drawClipLayer(
   asset: MediaAsset | undefined,
   trackOpacity: number,
   frames?: Map<string, VideoFrame>,
-  blends?: Map<string, BlendFrame>
+  blends?: Map<string, BlendFrame>,
+  packed?: Set<string>
 ) {
   {
     const rel = t - clip.start
@@ -425,24 +498,37 @@ function drawClipLayer(
       if (asset.kind === 'audio') return
       const vf = frames?.get(clip.id)
       if (vf) {
+        // alpha sources decode as colour-over-matte (2× tall) — the shader
+        // splits the halves, the layer keeps its logical size
+        const ap = packed?.has(clip.id) ?? false
+        const half = (h: number) => (ap ? h / 2 : h)
         const layers: LayerDraw[] = [{
           source: vf as unknown as TexImageSource,
           cacheKey: clip.id,
           dynamic: true,
+          alphaPacked: ap,
           srcWidth: vf.displayWidth || asset.width,
-          srcHeight: vf.displayHeight || asset.height,
+          srcHeight: half(vf.displayHeight || asset.height * (ap ? 2 : 1)),
           ...common
         }]
         const bl = blends?.get(clip.id)
         if (bl) {
-          // successor frame over the main one: out = A·(1−w) + B·w
+          // successor frame over the main one: out = f·(A·(1−w) + B·w) over bg.
+          // Exact two-pass OVER decomposition: α₁ = f(1−w)/(1−fw), α₂ = fw.
+          // At f=1 this collapses to α₁=1, α₂=w — bit-identical to the old
+          // opaque math. The old α₁=f overweighted A for translucent clips,
+          // and since w alternates per output frame on a 30→60 fps cadence,
+          // fading clips STROBED in exports (fine in the blend-less preview).
+          const f = layers[0].opacity
+          const fw = f * bl.w
+          layers[0].opacity = fw >= 0.999999 ? 0 : (f * (1 - bl.w)) / (1 - fw)
           layers.push({
             ...layers[0],
             source: bl.frame as unknown as TexImageSource,
             cacheKey: `${clip.id}:b`,
             srcWidth: bl.frame.displayWidth || asset.width,
-            srcHeight: bl.frame.displayHeight || asset.height,
-            opacity: common.opacity * bl.w
+            srcHeight: half(bl.frame.displayHeight || asset.height * (ap ? 2 : 1)),
+            opacity: fw
           })
         }
         emit(...layers)
@@ -479,14 +565,22 @@ interface PlayerHooks {
   setPlayhead(t: number): void
   setPlaying(p: boolean): void
   setLoading(l: boolean): void
+  /** the GL context died / came back — the preview cannot draw in between */
+  setGpuLost(lost: boolean): void
   duration(): number
 }
 
 /** Live preview: master clock + media element sync + GPU composite. */
 export class Player {
   private comp: Compositor | null = null
+  private canvas: HTMLCanvasElement | null = null
+  private onLost: ((e: Event) => void) | null = null
+  private onRestored: (() => void) | null = null
   private pool = new MediaPool({ audio: true, proxy: true })
   private raf = 0
+  /** the window whose rAF drives the loop — see schedule() */
+  private view: Window = window
+  private schedule: (() => void) | null = null
   private gcCounter = 0
   private wasLoading = false
   private lastDrawnProject: Project | null = null
@@ -503,8 +597,55 @@ export class Player {
     this.pool.sourceQuality = on
   }
 
+  /** Draw the current state synchronously. Snapshots call this right before
+      reading the canvas: the rAF loop is throttled (or fully parked) while
+      the window is occluded, so "wait and hope a draw happened" grabbed
+      stale pixels. */
+  drawNow() {
+    if (!this.comp) return
+    const { project, playhead } = this.hooks.getState()
+    drawFrame(this.comp, project, playhead, this.pool)
+    this.lastDrawnProject = project
+    this.lastDrawnT = playhead
+  }
+
   attach(canvas: HTMLCanvasElement) {
     this.comp = new Compositor(canvas)
+    // A GPU reset (driver hiccup, another app eating VRAM, Chromium force-losing
+    // the oldest context once a renderer holds 16) turns every GL call into a
+    // no-op. Left alone the preview simply goes black and STAYS black with
+    // nothing to explain it, so: ask for the context back, rebuild the
+    // compositor when it returns, and tell the UI while it is gone.
+    this.canvas = canvas
+    // grab the restore handle NOW, while the context is alive: getExtension
+    // returns null on a lost context — exactly when it would be needed
+    const loseExt = canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context') ?? null
+    this.onLost = (e: Event) => {
+      e.preventDefault() // without this Chromium never offers a restore
+      this.comp = null
+      this.hooks.setGpuLost(true)
+      // the restore must NOT be asked for from inside the lost event — Chromium
+      // ignores it there (measured: the context never came back). Ask on the
+      // next turn; if the GPU cannot give it back, the banner stays up.
+      setTimeout(() => {
+        try {
+          loseExt?.restoreContext()
+        } catch { /* nothing more we can do */ }
+      }, 0)
+    }
+    this.onRestored = () => {
+      // the canvas keeps the same context object, but every program, buffer
+      // and texture in it is gone — a fresh Compositor rebuilds them, and its
+      // texture cache starts empty so sources re-upload on the next draw
+      try {
+        this.comp = new Compositor(canvas)
+        this.hooks.setGpuLost(false)
+      } catch (err) {
+        logError('превью', 'контекст GPU вернулся, но композитор не пересобрался', err)
+      }
+    }
+    canvas.addEventListener('webglcontextlost', this.onLost)
+    canvas.addEventListener('webglcontextrestored', this.onRestored)
     let lastErrLog = 0
     const loop = (ts: number) => {
       // one bad frame (corrupt clip data, GL hiccup) must never kill the
@@ -515,17 +656,45 @@ export class Player {
       } catch (err) {
         if (ts - lastErrLog > 2000) {
           lastErrLog = ts
-          console.error('player tick failed:', err)
+          logError('превью', 'кадр не отрисовался', err)
         }
       }
-      this.raf = requestAnimationFrame(loop)
+      schedule()
     }
-    this.raf = requestAnimationFrame(loop)
+    // The clock follows the canvas, not the window it was born in: once the
+    // preview is detached into its own OS window (engine/popout.ts) the
+    // editor's window may be minimised, and a minimised window's rAF is
+    // throttled to a crawl — playback would stall in the very window the
+    // user is watching. Re-read every frame, so a move needs no notification.
+    const schedule = () => {
+      const v = this.canvas?.ownerDocument.defaultView
+      this.view = v && !v.closed ? v : window
+      this.raf = this.view.requestAnimationFrame(loop)
+    }
+    this.schedule = schedule
+    schedule()
+  }
+
+  /** Re-aim the loop after the canvas changed windows (or its window died). */
+  kick() {
+    if (!this.schedule) return
+    try { this.view.cancelAnimationFrame(this.raf) } catch { /* window gone */ }
+    this.schedule()
   }
 
   detach() {
-    cancelAnimationFrame(this.raf)
+    try { this.view.cancelAnimationFrame(this.raf) } catch { /* window gone */ }
+    this.schedule = null
+    this.view = window
+    if (this.canvas && this.onLost) this.canvas.removeEventListener('webglcontextlost', this.onLost)
+    if (this.canvas && this.onRestored) this.canvas.removeEventListener('webglcontextrestored', this.onRestored)
+    this.canvas = null
+    this.onLost = null
+    this.onRestored = null
     this.pool.dispose()
+    // NB the compositor is NOT disposed: the preview canvas is reused (React
+    // remounts it in dev), and Compositor.dispose kills the context a canvas
+    // hands out forever — the next mount would get a dead one
     this.comp = null
   }
 

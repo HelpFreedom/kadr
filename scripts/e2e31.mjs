@@ -174,7 +174,7 @@ const del = await evalJs(`(async () => {
     undoLabel: st().past[st().past.length - 1]?.label
   }
 })()`)
-check('tile ✕ shows a confirm dialog and removes asset + its clips (linked twin too)',
+check('the tile delete button shows a confirm dialog and removes asset + its clips (linked twin too)',
   del.hadDialog && del.assetGone && del.othersKept && del.clipsGone && del.remainingClips === 2,
   JSON.stringify({ ...del, dialogText: undefined }))
 check('deletion is one hDeleteMedia undo entry', del.undoLabel === 'hDeleteMedia', del.undoLabel)
@@ -213,7 +213,7 @@ const batch = await evalJs(`(async () => {
     clips: p.tracks.reduce((n, t) => n + t.clips.length, 0)
   }
 })()`)
-check('multi-select batch delete empties bin and timeline', batch.label === '✕ 3' &&
+check('multi-select batch delete empties bin and timeline', batch.label === '3' &&
   batch.assets === 0 && batch.clips === 0, JSON.stringify(batch))
 
 // ---- 3. unlimited speed + snap (real Ctrl-drag on the extend handle) --------

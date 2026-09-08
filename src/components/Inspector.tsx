@@ -4,6 +4,7 @@ import { useEditor, useFxPresets, findClip, uid } from '@/state/store'
 import { GLOW_DEFAULTS } from '@/gl/glow'
 import { useT } from '@/i18n'
 import { CtxMenu } from './CtxMenu'
+import { Icon } from './icons'
 
 function Num({
   label, value, step = 1, min, max, onChange
@@ -209,6 +210,7 @@ function EffectsSection({ clip }: { clip: Clip }) {
         <span>{t('effects')}</span>
         <button
           className={`fx-preset-btn${menu ? ' active' : ''}`}
+          data-act="fx-presets"
           title={t('fxPresetsHint')}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
@@ -216,7 +218,7 @@ function EffectsSection({ clip }: { clip: Clip }) {
             setMenu(menu ? null : { x: r.left, y: r.bottom + 4 })
           }}
         >
-          ⭐ {t('presets')}
+          <Icon name="star" size={12} /> {t('presets')}
         </button>
       </div>
       {effects.map((fx) =>
@@ -227,10 +229,14 @@ function EffectsSection({ clip }: { clip: Clip }) {
         ) : null
       )}
       {!effects.some((e) => e.type === 'glow') && (
-        <button className="fx-add" onClick={addGlow}>✨ {t('fxGlow')}</button>
+        <button className="fx-add" data-act="add-glow" onClick={addGlow}>
+          <Icon name="plus" size={13} /> <Icon name="glow" size={14} /> {t('fxGlow')}
+        </button>
       )}
       {!effects.some((e) => e.type === 'blur') && (
-        <button className="fx-add" onClick={addBlur}>🌫 {t('fxBlur')}</button>
+        <button className="fx-add" data-act="add-blur" onClick={addBlur}>
+          <Icon name="plus" size={13} /> <Icon name="blur" size={14} /> {t('fxBlur')}
+        </button>
       )}
       {menu && (
         <CtxMenu x={menu.x} y={menu.y} className="preset-menu fx-preset-menu">
@@ -242,9 +248,10 @@ function EffectsSection({ clip }: { clip: Clip }) {
               <button
                 className="preset-del"
                 title={t('deletePreset')}
+                aria-label={t('deletePreset')}
                 onClick={() => useFxPresets.getState().deletePreset(p.id)}
               >
-                ✕
+                <Icon name="close" size={13} />
               </button>
             </div>
           ))}
@@ -287,7 +294,7 @@ function BlurControls({ clip, fx }: { clip: Clip; fx: Effect }) {
               patchFx({ enabled: e.target.checked })
             }}
           />
-          <span>🌫 {t('fxBlur')}</span>
+          <span><Icon name="blur" size={14} /> {t('fxBlur')}</span>
         </label>
         <button
           className="fx-del"
@@ -298,7 +305,8 @@ function BlurControls({ clip, fx }: { clip: Clip; fx: Effect }) {
               effects: (clip.effects ?? []).filter((e) => e.id !== fx.id)
             })
           }}
-        >✕</button>
+          aria-label={t('fxDelete')}
+        ><Icon name="trash" size={14} /></button>
       </div>
       <Slider label={t('fxBlurSize')} value={size} min={0} max={300} step={1}
         onChange={(v) => patchFx({ params: { ...fx.params, size: v } })} />
@@ -331,7 +339,7 @@ function GlowControls({ clip, fx }: { clip: Clip; fx: Effect }) {
               patchFx({ enabled: e.target.checked })
             }}
           />
-          <span>✨ {t('fxGlow')}</span>
+          <span><Icon name="glow" size={14} /> {t('fxGlow')}</span>
         </label>
         <button
           className="fx-del"
@@ -342,7 +350,8 @@ function GlowControls({ clip, fx }: { clip: Clip; fx: Effect }) {
               effects: (clip.effects ?? []).filter((e) => e.id !== fx.id)
             })
           }}
-        >✕</button>
+          aria-label={t('fxDelete')}
+        ><Icon name="trash" size={14} /></button>
       </div>
       <label className="insp-field">
         <span>{t('color')}</span>

@@ -48,10 +48,40 @@ export function ensureProxies() {
   const st = useEditor.getState()
   for (const a of st.project.assets) {
     if (!wantsProxy(a) || inflight.has(a.id)) continue
+    // A proxy the project remembers but the disk no longer has — the storage
+    // panel wiped it, or a cleanup did. Clear the reference FIRST: the pool
+    // then decodes the original on the very next draw instead of pointing a
+    // <video> at a missing file, and the rebuild below sets the path again.
+    // Without this the clip stays black, because the rebuilt proxy lands under
+    // the SAME name, nothing in the store changes, and the failed element is
+    // never told to reload.
+    if (a.proxyPath) {
+      const proxyPath = a.proxyPath
+      void window.kadr.statFile(proxyPath).then((mtime) => {
+        if (mtime !== null) return
+        const cur = useEditor.getState().project.assets.find((x) => x.id === a.id)
+        if (cur?.proxyPath === proxyPath) {
+          useEditor.getState().updateAsset(a.id, { proxyPath: undefined })
+        }
+      })
+    }
     inflight.add(a.id)
     useProxyProgress.setState((s) => ({ jobs: { ...s.jobs, [a.id]: 0 } }))
-    window.kadr
-      .requestProxy(a.path, a.duration, a.kind === 'audio')
+    ;(async () => {
+      // assets saved before codec/hasAlpha existed: re-probe once so alpha
+      // sources stop getting (and keeping) an H.264 proxy that bakes the
+      // transparency into a solid background
+      let { codec, hasAlpha } = a
+      if (a.kind === 'video' && codec === undefined) {
+        const fresh = (await window.kadr.probeMedia(a.path)).asset
+        codec = fresh.codec
+        hasAlpha = fresh.hasAlpha
+        useEditor.getState().updateAsset(a.id, { codec, hasAlpha: !!hasAlpha })
+      }
+      return window.kadr.requestProxy(a.path, a.duration, {
+        alpha: !!hasAlpha, codec, audioOnly: a.kind === 'audio'
+      })
+    })()
       .then((proxyPath) => {
         const cur = useEditor.getState().project.assets.find((x) => x.id === a.id)
         if (cur && cur.proxyPath !== proxyPath) {

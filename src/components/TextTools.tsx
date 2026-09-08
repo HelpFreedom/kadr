@@ -7,6 +7,8 @@ import {
   parseSrt, cuesToSrt, srtTime, parseSrtTime, docTimeToProject
 } from '@/engine/subtitles'
 import { useT } from '@/i18n'
+import { Icon } from './icons'
+import { Modal } from './Modal'
 
 /** UI state shared by MediaBin, Timeline and App: what's open right now. */
 interface TextUiState {
@@ -30,7 +32,6 @@ export const useTextUi = create<TextUiState>((set) => ({
 export function TranscribeDialog() {
   const t = useT()
   const target = useTextUi((s) => s.transcribeTarget)
-  // Default to the model actually bundled in the archive (offline), else large-v3.
   const bundledModel = window.kadr.defaultWhisperModel
   const [model, setModel] = useState(bundledModel || 'large-v3')
   const [language, setLanguage] = useState('auto')
@@ -86,79 +87,84 @@ export function TranscribeDialog() {
   }
 
   return (
-    <div className="modal-back" onClick={close}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('transcribe')}</h2>
-        <div className="insp-field">
-          <span>{target.kind === 'asset' ? t('trSourceFile') : t('trSourceRange')}</span>
-          <span className="tr-target">{label}</span>
-        </div>
-        <label className="insp-field">
-          <span>{t('trModel')}</span>
-          <select value={model} disabled={running} onChange={(e) => setModel(e.target.value)}>
-            {bundledModel && !['large-v3', 'medium', 'base'].includes(bundledModel) && (
-              <option value={bundledModel}>{bundledModel}</option>
-            )}
-            <option value="large-v3">large-v3 — {t('trBest')}</option>
-            <option value="medium">medium — {t('trFaster')}</option>
-            <option value="base">base — {t('trDraft')}</option>
-          </select>
-        </label>
-        <label className="insp-field">
-          <span>{t('trLanguage')}</span>
-          <select value={language} disabled={running} onChange={(e) => setLanguage(e.target.value)}>
-            <option value="auto">{t('trAuto')}</option>
-            <option value="ru">Русский</option>
-            <option value="en">English</option>
-            <option value="tg">Тоҷикӣ</option>
-          </select>
-        </label>
-        <label className="insp-field">
-          <span>{t('trSplit')}</span>
-          <select
-            value={maxWords}
-            disabled={running}
-            onChange={(e) => setMaxWords(Number(e.target.value))}
-          >
-            <option value={1}>{t('trSplit1')}</option>
-            <option value={2}>2 {t('trSplitWords')}</option>
-            <option value={3}>3 {t('trSplitWords')}</option>
-            <option value={4}>4 {t('trSplitWords')}</option>
-            <option value={0}>{t('trSplitPhrases')}</option>
-          </select>
-        </label>
-        {target.kind === 'range' && (
-          <label className="insp-field">
-            <span>{t('trTimecodes')}</span>
-            <select
-              value={timecodes}
-              disabled={running}
-              onChange={(e) => setTimecodes(e.target.value as 'absolute' | 'relative')}
-            >
-              <option value="absolute">{t('trAbsolute')}</option>
-              <option value="relative">{t('trRelative')}</option>
-            </select>
-          </label>
-        )}
-        {running && (
-          <div className="export-progress">
-            <progress value={progress} max={1} />
-            <div className="dim tr-live">{liveText || t('trWorking')}</div>
-          </div>
-        )}
-        {error && <div className="tr-error">{error}</div>}
-        <div className="modal-actions">
-          {running ? (
-            <button onClick={cancel}>{t('cancel')}</button>
-          ) : (
-            <>
-              <button onClick={close}>{t('cancel')}</button>
-              <button className="primary" onClick={run}>{t('trRun')}</button>
-            </>
-          )}
-        </div>
+    <Modal
+      title={t('transcribe')}
+      onClose={close}
+      closeDisabled={running}
+      titleIcon={<Icon name="captions" size={17} />}
+      actions={
+        running ? (
+          <button onClick={cancel}>{t('cancel')}</button>
+        ) : (
+          <>
+            <button onClick={close}>{t('cancel')}</button>
+            <button className="primary" onClick={run}>
+              <Icon name="captions" /> {t('trRun')}
+            </button>
+          </>
+        )
+      }
+    >
+      <div className="insp-field">
+        <span>{target.kind === 'asset' ? t('trSourceFile') : t('trSourceRange')}</span>
+        <span className="tr-target">{label}</span>
       </div>
-    </div>
+      <label className="insp-field">
+        <span>{t('trModel')}</span>
+        <select value={model} disabled={running} onChange={(e) => setModel(e.target.value)}>
+          {bundledModel && !['large-v3', 'medium', 'base'].includes(bundledModel) && (
+            <option value={bundledModel}>{bundledModel}</option>
+          )}
+          <option value="large-v3">large-v3 — {t('trBest')}</option>
+          <option value="medium">medium — {t('trFaster')}</option>
+          <option value="base">base — {t('trDraft')}</option>
+        </select>
+      </label>
+      <label className="insp-field">
+        <span>{t('trLanguage')}</span>
+        <select value={language} disabled={running} onChange={(e) => setLanguage(e.target.value)}>
+          <option value="auto">{t('trAuto')}</option>
+          <option value="ru">Русский</option>
+          <option value="en">English</option>
+        </select>
+      </label>
+      <label className="insp-field">
+        <span>{t('trSplit')}</span>
+        <select
+          value={maxWords}
+          disabled={running}
+          onChange={(e) => setMaxWords(Number(e.target.value))}
+        >
+          <option value={1}>{t('trSplit1')}</option>
+          <option value={2}>2 {t('trSplitWords')}</option>
+          <option value={3}>3 {t('trSplitWords')}</option>
+          <option value={4}>4 {t('trSplitWords')}</option>
+          <option value={0}>{t('trSplitPhrases')}</option>
+        </select>
+      </label>
+      {target.kind === 'range' && (
+        <label className="insp-field">
+          <span>{t('trTimecodes')}</span>
+          <select
+            value={timecodes}
+            disabled={running}
+            onChange={(e) => setTimecodes(e.target.value as 'absolute' | 'relative')}
+          >
+            <option value="absolute">{t('trAbsolute')}</option>
+            <option value="relative">{t('trRelative')}</option>
+          </select>
+        </label>
+      )}
+      {running && (
+        <div className="export-progress">
+          <progress value={progress} max={1} />
+          <div className="dim tr-live">{liveText || t('trWorking')}</div>
+        </div>
+      )}
+      {error && (
+        <div className="tr-error"><Icon name="alert" size={15} /><span>{error}</span></div>
+      )}
+    </Modal>
   )
 }
 
@@ -234,14 +240,23 @@ export function SubtitlePanel() {
   return (
     <div className="sub-panel">
       <div className="claude-head">
-        <span>📄 {doc.name}</span>
+        <span><Icon name={doc.format === 'srt' ? 'srt' : 'doc'} size={14} /> {doc.name}</span>
         <span className="dim claude-hint">{doc.language ? `(${doc.language})` : ''}</span>
         <button disabled={!dirty} onClick={save}>{t('subSave')}{dirty ? ' *' : ''}</button>
-        <button onClick={() => void load(doc)} title={t('subReload')}>↻</button>
-        <button className="claude-close" onClick={close}>✕</button>
+        <button className="icon-only" onClick={() => void load(doc)}
+                title={t('subReload')} aria-label={t('subReload')}>
+          <Icon name="reload" size={14} />
+        </button>
+        <button className="claude-close" onClick={close} title={t('close')} aria-label={t('close')}>
+          <Icon name="close" size={15} />
+        </button>
       </div>
       <div className="sub-body">
-        {missing && <div className="tr-error">{t('subMissing')}: {doc.path}</div>}
+        {missing && (
+          <div className="tr-error">
+            <Icon name="alert" size={15} /><span>{t('subMissing')}: {doc.path}</span>
+          </div>
+        )}
         {doc.format === 'txt' ? (
           <textarea
             className="sub-txt"
@@ -257,13 +272,13 @@ export function SubtitlePanel() {
               <div className="sub-cue" key={i}>
                 <div className="sub-times">
                   <button className="sub-idx" title={t('subSeek')} onClick={() => seek(c)}>
-                    ▸ {i + 1}
+                    <Icon name="chevronRight" size={11} /> {i + 1}
                   </button>
                   <input
                     value={srtTime(c.start)}
                     onChange={(e) => setCue(i, { start: parseSrtTime(e.target.value) })}
                   />
-                  <span>→</span>
+                  <span className="dim"><Icon name="arrowRight" size={13} /></span>
                   <input
                     value={srtTime(c.end)}
                     onChange={(e) => setCue(i, { end: parseSrtTime(e.target.value) })}
@@ -271,11 +286,12 @@ export function SubtitlePanel() {
                   <button
                     className="preset-del"
                     title={t('delete')}
+                    aria-label={t('delete')}
                     onClick={() => {
                       setCues((cs) => cs.filter((_, j) => j !== i))
                       setDirty(true)
                     }}
-                  >✕</button>
+                  ><Icon name="close" size={13} /></button>
                 </div>
                 <textarea
                   rows={Math.max(1, c.text.split('\n').length)}

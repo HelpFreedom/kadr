@@ -3,12 +3,16 @@ import { useEditor } from '@/state/store'
 import { useProxyProgress } from '@/engine/proxy'
 import { importFiles, dropPayload, dragHasMedia, dropUsable, importDrop, useImportUi } from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
+import { useTtsUi } from './TtsDialog'
 import { useT } from '@/i18n'
+import { Icon, Spinner } from './icons'
+import { Modal } from './Modal'
 
 export function MediaBin() {
   const t = useT()
   const assets = useEditor((s) => s.project.assets)
   const texts = useEditor((s) => s.project.texts ?? [])
+  const ttsReady = useTtsUi((s) => s.hasKey)
   const proxyJobs = useProxyProgress((s) => s.jobs)
   const [busy, setBusy] = useState(false)
   const importing = useImportUi((s) => s.active > 0)
@@ -69,7 +73,7 @@ export function MediaBin() {
       .reduce((n, tr) => n + tr.clips.filter((c) => c.assetId && set.has(c.assetId)).length, 0)
   }
 
-  /** ✕ on a tile removes it (or the whole selection if the tile is part of it) */
+  /** the cross on a tile removes it (or the whole selection it belongs to) */
   const requestDelete = (ids: string[]) => {
     if (clipsUsing(ids) > 0) setConfirmIds(ids)
     else doDelete(ids)
@@ -87,13 +91,14 @@ export function MediaBin() {
         {sel.length > 0 && (
           <button
             className="bin-del-sel"
+            data-act="delete-selected"
             title={t('binDeleteSel')}
             onClick={() => requestDelete(sel)}
           >
-            ✕ {sel.length}
+            <Icon name="trash" size={13} /> {sel.length}
           </button>
         )}
-        <button onClick={importMedia} disabled={busy || importing}>
+        <button data-act="import" onClick={importMedia} disabled={busy || importing}>
           {busy || importing ? '…' : t('import')}
         </button>
       </div>
@@ -127,11 +132,11 @@ export function MediaBin() {
             {a.thumbnail ? (
               <img src={a.thumbnail} alt="" />
             ) : (
-              <div className="bin-audio">♪</div>
+              <div className="bin-audio"><Icon name="audio" size={26} /></div>
             )}
             {proxyJobs[a.id] !== undefined ? (
               <div className="proxy-badge building" title={t('proxyBuilding')}>
-                ⚙ {Math.round(proxyJobs[a.id] * 100)}%
+                <Spinner size={9} /> {Math.round(proxyJobs[a.id] * 100)}%
               </div>
             ) : a.proxyPath ? (
               <div className="proxy-badge" title={t('proxyReady')}>
@@ -142,46 +147,51 @@ export function MediaBin() {
               <button
                 className="tr-badge"
                 title={t('transcribe')}
+                aria-label={t('transcribe')}
                 onClick={(e) => {
                   e.stopPropagation()
                   useTextUi.getState().openTranscribe({ kind: 'asset', assetId: a.id })
                 }}
               >
-                📝
+                <Icon name="captions" size={13} />
               </button>
             )}
             <button
               className="bin-del"
               title={t('binDelete')}
+              aria-label={t('binDelete')}
               onClick={(e) => {
                 e.stopPropagation()
                 requestDelete(sel.length > 1 && sel.includes(a.id) ? sel : [a.id])
               }}
             >
-              ✕
+              <Icon name="close" size={13} />
             </button>
             <div className="bin-name">{a.name}</div>
           </div>
         ))}
       </div>
       {confirmIds && (
-        <div className="modal-back" onClick={() => setConfirmIds(null)}>
-          <div className="modal bin-confirm" onClick={(e) => e.stopPropagation()}>
-            <h2>{t('binConfirmTitle')}</h2>
-            <p>
-              {t('binConfirmBody')
-                .replace('{files}', String(confirmIds.length))
-                .replace('{clips}', String(clipsUsing(confirmIds)))}
-            </p>
-            <p className="dim">{t('binConfirmUndo')}</p>
-            <div className="modal-actions">
+        <Modal
+          title={t('binConfirmTitle')}
+          className="bin-confirm"
+          onClose={() => setConfirmIds(null)}
+          actions={
+            <>
               <button onClick={() => setConfirmIds(null)}>{t('cancel')}</button>
               <button className="primary danger" onClick={() => doDelete(confirmIds)}>
-                {t('delete')}
+                <Icon name="trash" /> {t('delete')}
               </button>
-            </div>
-          </div>
-        </div>
+            </>
+          }
+        >
+          <p>
+            {t('binConfirmBody')
+              .replace('{files}', String(confirmIds.length))
+              .replace('{clips}', String(clipsUsing(confirmIds)))}
+          </p>
+          <p className="dim">{t('binConfirmUndo')}</p>
+        </Modal>
       )}
       {texts.length > 0 && (
         <>
@@ -190,24 +200,38 @@ export function MediaBin() {
             onClick={toggleTexts}
             title={textsOpen ? t('textsCollapse') : t('textsExpand')}
           >
-            <span>{textsOpen ? '▾' : '▸'} {t('texts')} ({texts.length})</span>
+            <span>
+              <Icon name={textsOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+              {t('texts')} ({texts.length})
+            </span>
           </div>
           {textsOpen && (
           <div className="text-list">
             {texts.map((d) => (
               <div className="text-item" key={d.id} title={d.path}>
                 <button className="text-open" onClick={() => useTextUi.getState().openDoc(d.id)}>
-                  {d.format === 'srt' ? '🎬' : '📄'} {d.name}
+                  <Icon name={d.format === 'srt' ? 'srt' : 'doc'} size={13} /> {d.name}
                 </button>
+                {ttsReady && (
+                  <button
+                    className="text-speak"
+                    title={t('ttsBadge')}
+                    aria-label={t('ttsBadge')}
+                    onClick={() => useTtsUi.getState().openSpeak({ kind: 'doc', docId: d.id })}
+                  >
+                    <Icon name="speech" size={14} />
+                  </button>
+                )}
                 <button
                   className="preset-del"
                   title={t('delete')}
+                  aria-label={t('delete')}
                   onClick={() => {
                     if (useTextUi.getState().openDocId === d.id) useTextUi.getState().openDoc(null)
                     useEditor.getState().removeText(d.id)
                   }}
                 >
-                  ✕
+                  <Icon name="close" size={13} />
                 </button>
               </div>
             ))}

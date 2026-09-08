@@ -7,7 +7,7 @@ import { spawn, ChildProcess } from 'child_process'
 import { promises as fs, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
-import { ExportMuxer } from './ffmpeg'
+import { ExportMuxer, mixdownWav } from './ffmpeg'
 import type { TranscribeRequest, TranscribeResult, TranscribeSegment } from '@shared/types'
 
 let current: { muxer: ExportMuxer | null; py: ChildProcess | null; cancelled: boolean } | null = null
@@ -44,23 +44,7 @@ async function run(win: BrowserWindow, req: TranscribeRequest): Promise<Transcri
   try {
     // 1) mixdown — ExportMuxer with an audio-only pcm preset writes a wav
     send(0.01, '')
-    job.muxer = new ExportMuxer()
-    await job.muxer.run(
-      {
-        projectName: 'transcribe',
-        preset: {
-          id: 'wav', name: 'wav', container: 'mp4', codec: '', ffmpegVideo: '',
-          width: 0, height: 0, fps: 0, videoBitrate: 0,
-          audioCodec: 'pcm_s16le', audioBitrate: '256k', audioOnly: true
-        },
-        outputPath: wav,
-        width: 0, height: 0, fps: 0,
-        duration: req.duration,
-        audioSegments: req.audioSegments
-      },
-      '',
-      () => { /* mix progress is fast; whisper dominates */ }
-    )
+    await mixdownWav(req.audioSegments, req.duration, wav, (m) => { job.muxer = m })
     job.muxer = null
     if (job.cancelled) throw new Error('cancelled')
 

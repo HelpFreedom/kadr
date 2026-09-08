@@ -3,7 +3,7 @@ import { execFile, spawn, ChildProcess } from 'child_process'
 import { promisify } from 'util'
 import { promises as fsp } from 'fs'
 import { join, basename } from 'path'
-import type { ProbeResult, ExportJob, ExportProgress, WaveformData } from '@shared/types'
+import type { ProbeResult, ExportJob, ExportProgress, WaveformData, AudioSegment } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
 
 const execFileP = promisify(execFile)
@@ -49,6 +49,15 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
   }
   if (kind === 'video' && video?.codec_name) asset.codec = video.codec_name
   try { asset.mtimeMs = Math.round((await fsp.stat(path)).mtimeMs) } catch { /* stat optional */ }
+  if (kind === 'video') {
+    // alpha travels two ways: an alpha pixel format (yuva…, rgba, prores
+    // 4444) or WebM's container-level alpha_mode tag (vp8/vp9 alpha planes —
+    // their pix_fmt still reads plain yuv420p)
+    const pf = String(video?.pix_fmt ?? '')
+    const tagAlpha = String(video?.tags?.alpha_mode ?? video?.tags?.ALPHA_MODE ?? '') === '1'
+    const pfAlpha = /^(yuva|rgba|argb|abgr|bgra|gbrap|ya8|ya16)/.test(pf)
+    if (tagAlpha || pfAlpha) asset.hasAlpha = true
+  }
 
   if (kind !== 'audio') {
     try {
@@ -118,37 +127,55 @@ async function readWaveform(path: string, duration: number): Promise<WaveformDat
   }
 }
 
+/** Input decoder flags: vpx alpha only decodes through the libvpx decoders
+    (the native vp8/vp9 decoder silently drops the alpha plane). */
+function alphaInputArgs(codec?: string): string[] {
+  if (codec === 'vp9') return ['-c:v', 'libvpx-vp9']
+  if (codec === 'vp8') return ['-c:v', 'libvpx']
+  return []
+}
+
 /**
- * Preview proxy: light 540p H.264 + AAC copy of a heavy source. The preview
- * decodes this instead of the original; export always reads the original.
+ * Preview proxy: light 540p H.264 + AAC copy of a heavy source. Sources with
+ * an alpha channel become VP9+alpha WebM instead — H.264 would bake the
+ * transparency into a solid background. The preview decodes this instead of
+ * the original; export always reads the original.
  */
 export function makeProxy(
   src: string,
   out: string,
   duration: number,
   onProgress?: (p: number) => void,
-  audioOnly = false
+  opts?: { alpha?: boolean; codec?: string; audioOnly?: boolean }
 ): Promise<void> {
   // audioOnly: the source has no usable video (a music/voice file) but an audio
   // codec Chromium can't decode (ac3/dts/…) — transcode just the audio to AAC
-  // so the preview element has sound. Otherwise a normal 540p video+AAC proxy.
-  const args = audioOnly
-    ? [
-        '-y', '-v', 'error', '-progress', 'pipe:1',
-        '-i', src,
-        '-vn', '-c:a', 'aac', '-b:a', '160k',
-        '-movflags', '+faststart',
-        out
-      ]
-    : [
-        '-y', '-v', 'error', '-progress', 'pipe:1',
-        '-i', src,
-        '-vf', "scale=-2:'min(540,ih)'",
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac', '-b:a', '96k',
-        '-movflags', '+faststart',
-        out
-      ]
+  // so the preview element has sound. alpha: a VP9+alpha WebM keeps the
+  // transparency. Otherwise a normal 540p video+AAC proxy.
+  const args = opts?.audioOnly ? [
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    '-i', src,
+    '-vn', '-c:a', 'aac', '-b:a', '160k',
+    '-movflags', '+faststart',
+    out
+  ] : opts?.alpha ? [
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    ...alphaInputArgs(opts.codec),
+    '-i', src,
+    '-vf', "scale=-2:'min(540,ih)'",
+    '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-crf', '32', '-b:v', '0',
+    '-cpu-used', '8', '-row-mt', '1',
+    '-c:a', 'libopus', '-b:a', '96k',
+    out
+  ] : [
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    '-i', src,
+    '-vf', "scale=-2:'min(540,ih)'",
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '96k',
+    '-movflags', '+faststart',
+    out
+  ]
   return new Promise((resolve, reject) => {
     const child = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let err = ''
@@ -212,19 +239,134 @@ export function measureLoudness(
   })
 }
 
+export interface PackedAlphaPlan {
+  /** false = keep the slower element-decode path for this source */
+  canPack: boolean
+  /** the matrix a browser decode of this source ends up using */
+  matrix: string
+  /** size the packed intermediate will reach, bytes per second of source */
+  bytesPerSecond: number
+}
+
+/**
+ * Everything requestDecoded needs to decide on packing a source as
+ * colour-over-matte, from ONE ffprobe.
+ *
+ * Every source but a full-range one can be packed: the packer converts the
+ * picture to BT.709 limited, the one space Chromium hands to WebGL untouched.
+ * (Full-range YUV is rare in alpha footage and would need its own dance, so
+ * it keeps the slower element-decode path — correct, just slow.)
+ */
+export async function packedAlphaPlan(src: string): Promise<PackedAlphaPlan> {
+  const t = await probeColorTags(src)
+  // The lossless intermediate grows with PIXELS, not with running time:
+  // measured 3.7 MB/s for 1080p60, i.e. ~0.030 bytes per source pixel. The
+  // disk check used to reserve a flat 9 MB/s, which happens to be that same
+  // 2.4× margin at 1080p60 and a serious UNDER-estimate at anything larger —
+  // 4K carries four times the pixels, so a long 4K source could pass the
+  // check and then run the volume dry mid-build. Keep the margin, follow the
+  // frame size. A source that would not probe is assumed to be 1080p60,
+  // exactly what the flat figure assumed.
+  const w = t.width || 1920
+  const h = t.height || 1080
+  const fps = t.fps || 60
+  return {
+    canPack: t.range !== 'pc',
+    // Untagged footage (Remotion's VP9 renders included) is read as BT.601 by
+    // the <video> pipeline — measured against known RGB: BT.709 turned pure
+    // red into (255, 36, 12).
+    matrix: t.matrix || 'bt601',
+    bytesPerSecond: w * h * fps * 0.075
+  }
+}
+
+async function probeColorTags(
+  src: string
+): Promise<{ matrix: string; range: string; width: number; height: number; fps: number }> {
+  let s: Record<string, string> = {}
+  try {
+    const { stdout } = await execFileP(FFPROBE, [
+      '-v', 'error', '-select_streams', 'v:0', '-print_format', 'json',
+      '-show_entries', 'stream=width,height,r_frame_rate,color_space,color_range', src
+    ], { maxBuffer: 1024 * 1024 })
+    s = (JSON.parse(stdout).streams || [])[0] || {}
+  } catch { /* fall through to the heuristic */ }
+  const known = (v?: string) => (v && v !== 'unknown' && v !== 'reserved' ? v : '')
+  const [num, den] = String(s.r_frame_rate || '').split('/')
+  const fps = Number(num) / (Number(den) || 1)
+  return {
+    matrix: known(s.color_space),
+    range: known(s.color_range) === 'pc' ? 'pc' : 'tv',
+    width: Number(s.width) || 0,
+    height: Number(s.height) || 0,
+    fps: Number.isFinite(fps) && fps > 0 ? fps : 0
+  }
+}
+
 /**
  * Full-resolution H.264 intermediate for sources Chromium cannot decode
  * (HEVC without VAAPI, mpeg4, prores, …). Near-lossless on purpose — the
  * export pipeline re-encodes it once more; video-only (the audio mix always
  * reads the original).
  */
-export function makeDecoded(
+export async function makeDecoded(
   src: string,
   out: string,
   duration: number,
-  onProgress?: (p: number) => void
+  onProgress?: (p: number) => void,
+  opts?: { alpha?: boolean; codec?: string; packed?: boolean; matrix?: string }
 ): Promise<void> {
-  const args = [
+  const args = opts?.packed ? [
+    // ALPHA FAST PATH. Chromium's WebCodecs cannot decode alpha at all
+    // (VP9-alpha WebM carries it as container side data; ProRes 4444 is
+    // unsupported), so alpha sources fell back to per-frame <video> seeks —
+    // ~0.2 s per frame, i.e. 4 fps exports. Packing colour over its alpha
+    // matte into ONE ordinary H.264 MP4 (2× height) turns them into plain
+    // mp4s the fast demux+WebCodecs path reads at full speed; the compositor
+    // shader recombines the halves. LOSSLESS on purpose (-qp 0): the export
+    // must be pixel-identical to the old element-decode path, so this
+    // intermediate may not add a generation. The matte is mapped full→limited
+    // range so the decoder's limited→full expansion restores it exactly.
+    // Cost: ~400 MB per minute of 1080p60, encoded at ~1.3× realtime once
+    // per source (cached); the disk guard in requestDecoded keeps it sane.
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    ...alphaInputArgs(opts.codec),
+    '-i', src,
+    '-filter_complex',
+    '[0:v]format=yuva420p,split=2[c][a];' +
+    // the picture's samples are copied verbatim — no colour conversion is
+    // applied here or tagged on the file, so the decoder treats it exactly
+    // like the original (guaranteed by the BT.709/HD gate in requestDecoded)
+    // The picture is converted to BT.709 limited — a pure matrix change
+    // (swscale, no gamma or gamut transform), a no-op when the source is
+    // BT.709 already. It has to be BT.709: Chromium runs its own colour
+    // transform on any other space while uploading the frame, and that
+    // transform would also sweep over the bottom half and lift the alpha
+    // matte (128 → 143). A matte is not colour and must arrive verbatim.
+    `[c]format=yuv420p,scale=in_color_matrix=${opts.matrix || 'bt601'}:out_color_matrix=bt709[col];` +
+    // the matte rides in the luma plane, mapped into the same limited range
+    // the decoder will expand back — verified to round-trip bit-exactly
+    '[a]alphaextract,format=yuv420p,scale=in_range=pc:out_range=tv[m];' +
+    '[col][m]vstack=inputs=2[v]',
+    '-map', '[v]', '-an',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-qp', '0', '-pix_fmt', 'yuv420p',
+    // deliberately UNTAGGED: a tagged frame reaches WebGL through Chromium's
+    // colour-managed upload, which rewrites mid-tones (it lifted the alpha
+    // matte 128 → 143). Untagged frames are re-wrapped on the CPU by
+    // Mp4FrameSource and upload verbatim — the picture is already BT.709.
+    '-movflags', '+faststart',
+    out
+  ] : opts?.alpha ? [
+    // alpha sources (ProRes 4444, HEVC-alpha…) must keep transparency:
+    // near-lossless VP9+alpha WebM, decoded by the element-seek path
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    ...alphaInputArgs(opts.codec),
+    '-i', src,
+    '-map', '0:v:0', '-an',
+    '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-crf', '12', '-b:v', '0',
+    '-cpu-used', '4', '-row-mt', '1',
+    out
+  ] : [
     '-y', '-v', 'error', '-progress', 'pipe:1',
     '-i', src,
     '-map', '0:v:0', '-an',
@@ -320,7 +462,27 @@ export async function makeReversed(
 }
 
 /** atempo only accepts 0.5..2 per instance — chain factors for wider speeds. */
-function atempoChain(speed: number): string[] {
+/** ffmpeg's atempo only accepts 0.5-2.0 per instance, so anything outside
+    that range becomes a chain. Shared with the TTS speed-up pass. */
+/**
+ * Как кодировать звук озвучки, по расширению файла.
+ *
+ * FLAC — БЕЗ ПОТЕРЬ, поэтому все свойства, на которых стоит перегенерация,
+ * сохраняются: рез посемплово точен, `acrossfade` сшивает то же самое, а
+ * повторные склейки не копят поколений. `-sample_fmt s16` обязателен — иначе
+ * ffmpeg волен выбрать s32, и файл перестал бы быть побитовой копией того же
+ * PCM (проверено: с s16 round-trip wav→flac→wav идентичен байт в байт).
+ * Речь ужимается примерно в 2.4 раза (реальные 12 минут: 71.4 → 29.4 МБ) за
+ * 0.6 с — против 142 МБ, которые тот же материал занимал стерео-PCM.
+ * `.wav` остаётся для всего, что уже лежит у пользователя.
+ */
+export function audioCodecArgs(outPath: string): string[] {
+  return /\.flac$/i.test(outPath)
+    ? ['-c:a', 'flac', '-sample_fmt', 's16', '-compression_level', '5']
+    : ['-c:a', 'pcm_s16le']
+}
+
+export function atempoChain(speed: number): string[] {
   const out: string[] = []
   let s = Math.min(8, Math.max(0.25, speed))
   while (s > 2) {
@@ -354,6 +516,48 @@ function runCollect(bin: string, args: string[], maxBytes = 64 * 1024 * 1024): P
     child.on('error', reject)
     child.on('close', (code) => {
       if (code === 0) resolve(Buffer.concat(chunks))
+      else reject(new Error(`${bin} exited ${code}: ${err.slice(0, 500)}`))
+    })
+  })
+}
+
+/** Like runCollect but streams stdout to `onData` — no size cap (a minutes-long
+    f32 PCM decode would blow the 64 MB limit in seconds). */
+/**
+ * Plain mean/peak level of a source range, dBFS.
+ *
+ * measureLoudness (EBU R128 integrated) needs a few seconds of material to
+ * settle — on a 2-second phrase its answer wanders by dBs. For matching the
+ * level of a short patch to the stretch it replaces, the crude mean is the
+ * honest tool: what matters is the DIFFERENCE, measured the same way on both.
+ */
+export async function meanVolume(src: string, start: number, duration: number):
+  Promise<{ mean: number; max: number }> {
+  const args = ['-v', 'info', '-nostats', '-ss', start.toFixed(3), '-t', duration.toFixed(3),
+    '-i', src, '-map', 'a:0', '-af', 'volumedetect', '-f', 'null', '-']
+  const err = await new Promise<string>((resolve) => {
+    const child = spawn(FFMPEG, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let out = ''
+    child.stderr.on('data', (c) => { out += c })
+    child.on('close', () => resolve(out))
+    child.on('error', () => resolve(''))
+  })
+  const num = (re: RegExp) => {
+    const m = re.exec(err)
+    return m ? parseFloat(m[1]) : -91
+  }
+  return { mean: num(/mean_volume:\s*(-?[\d.]+)/), max: num(/max_volume:\s*(-?[\d.]+)/) }
+}
+
+export function runStream(bin: string, args: string[], onData: (chunk: Buffer) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let err = ''
+    child.stdout.on('data', onData)
+    child.stderr.on('data', (c) => { err += c })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) resolve()
       else reject(new Error(`${bin} exited ${code}: ${err.slice(0, 500)}`))
     })
   })
@@ -533,4 +737,35 @@ export class ExportMuxer {
       })
     })
   }
+}
+
+/**
+ * Mix timeline AudioSegments into a pcm_s16le wav — the same segment graph as
+ * exports, so what you hear is what gets analysed. Shared by transcription and
+ * the loudness-envelope IPC. `onMuxer` hands the muxer out for cancellation.
+ */
+export async function mixdownWav(
+  segments: AudioSegment[],
+  duration: number,
+  outPath: string,
+  onMuxer?: (m: ExportMuxer) => void
+): Promise<void> {
+  const muxer = new ExportMuxer()
+  onMuxer?.(muxer)
+  await muxer.run(
+    {
+      projectName: 'mixdown',
+      preset: {
+        id: 'wav', name: 'wav', container: 'mp4', codec: '', ffmpegVideo: '',
+        width: 0, height: 0, fps: 0, videoBitrate: 0,
+        audioCodec: 'pcm_s16le', audioBitrate: '256k', audioOnly: true
+      },
+      outputPath: outPath,
+      width: 0, height: 0, fps: 0,
+      duration,
+      audioSegments: segments
+    },
+    '',
+    () => { /* mixing is fast; callers report their own progress */ }
+  )
 }

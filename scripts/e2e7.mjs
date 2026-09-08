@@ -216,9 +216,14 @@ const snapped = await evalJs(`(() => {
 })()`)
 check('move snap: tiny drag snaps back to center (0,0)', snapped.x === 0 && snapped.y === 0, JSON.stringify(snapped))
 
-// 6. rotation snapping to 45°: drag the rotate handle a little
+// 6. rotation snapping to 45°: nudge the rotate handle by an angle inside the
+// snap window. AnimEditor snaps when the angle is within 4° of a multiple of
+// 45°, so the pixel distance has to be derived from the handle's radius —
+// a fixed 7 px used to be ~4.4° here and fell just outside it.
 const rot = await rect('.rotate-handle')
-await drag(rot.cx, rot.cy, rot.cx + 7, rot.cy)
+const radius = Math.hypot(rot.cx - layer.cx, rot.cy - layer.cy)
+const nudge = Math.max(2, Math.round(radius * Math.tan((2 * Math.PI) / 180)))
+await drag(rot.cx, rot.cy, rot.cx + nudge, rot.cy)
 const rotV = await evalJs(`(() => {
   const c = window.kadrEditor.useEditor.getState().project.tracks.find(t => t.name === 'V1').clips[0]
   return c.transform.rotation.value

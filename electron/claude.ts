@@ -4,13 +4,15 @@
 // (mcp-bridge.cjs, spawned by claude itself) talks to.
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { createServer, type Server } from 'http'
+import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import type { IPty } from 'node-pty'
 
-// The session inherits this process's environment. Anything extra the
+// The session inherits this process's environment MINUS the markers of any
+// Claude session that launched the editor (see SESSION_MARKERS). Anything extra the
 // user's claude needs (proxies, custom PATH…) plus command/args overrides
 // live in userData/claude-env.json: { "command": "...", "args": [...],
 // "env": { "HTTPS_PROXY": "...", ... } }. If you proxy claude, exclude
@@ -42,6 +44,10 @@ interface Session {
 }
 
 let session: Session | null = null
+/** bumped by every open/close request; a spawn whose generation is stale is abandoned */
+let sessionGen = 0
+/** open/close are serialized through this chain — see openSession */
+let sessionChain: Promise<unknown> = Promise.resolve()
 
 /**
  * Kill leftovers of previous editor sessions: any process whose cmdline
@@ -63,7 +69,8 @@ export async function sweepStaleSessions(): Promise<number> {
     join(app.getPath('userData'), 'reversed'),
     join(app.getPath('userData'), 'decoded'),
     join(app.getPath('userData'), 'fragment-renders'),
-    join(app.getAppPath(), 'scripts', 'transcribe.py')
+    join(app.getAppPath(), 'scripts', 'transcribe.py'),
+    join(app.getAppPath(), 'scripts', 'ttsqc_run.py')
   ]
   let entries: string[]
   try { entries = await fs.readdir('/proc') } catch { return 0 } // non-Linux
@@ -124,12 +131,35 @@ async function evalInPage(win: BrowserWindow, code: string): Promise<string> {
   return win.webContents.executeJavaScript(wrapped, true)
 }
 
-/** Local bridge: POST /eval {code} from mcp-bridge.cjs into the renderer. */
-function startBridge(win: BrowserWindow): Promise<{ server: Server; port: number }> {
+/**
+ * Local bridge: POST /eval {code} from mcp-bridge.cjs into the renderer.
+ *
+ * /eval is arbitrary JS in the page, and the page holds window.kadr (file
+ * writes, pty spawn) — so the socket needs a door, not just an address.
+ * Anything running on this machine can reach 127.0.0.1, and a WEB PAGE can
+ * too: a fetch() with a simple content type is sent cross-origin without the
+ * browser asking permission first, and the reply being unreadable does not
+ * stop the code from running. A fragment previewed from the workspace vite
+ * server is such a page. Two cheap locks close that:
+ *   • a per-session secret in a custom header — a custom header forces the
+ *     browser to ask permission first (preflight), which this server answers
+ *     with 404, so a page cannot even send the request;
+ *   • rejecting anything that carries an Origin at all — only browsers set
+ *     it, and the only legitimate client here is a node process.
+ * The health check (GET /) stays open: mcp-bridge only needs *a* reply.
+ */
+function startBridge(
+  win: BrowserWindow
+): Promise<{ server: Server; port: number; token: string }> {
+  const token = randomBytes(24).toString('hex')
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
       if (req.method !== 'POST' || req.url !== '/eval') {
         res.writeHead(404).end()
+        return
+      }
+      if (req.headers.origin !== undefined || req.headers['x-kadr-token'] !== token) {
+        res.writeHead(403).end()
         return
       }
       let body = ''
@@ -149,7 +179,7 @@ function startBridge(win: BrowserWindow): Promise<{ server: Server; port: number
     server.on('error', reject)
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address()
-      if (addr && typeof addr === 'object') resolve({ server, port: addr.port })
+      if (addr && typeof addr === 'object') resolve({ server, port: addr.port, token })
       else reject(new Error('bridge listen failed'))
     })
   })
@@ -161,6 +191,52 @@ function which(cmd: string): Promise<string | null> {
       resolve(err ? null : stdout.trim() || null)
     })
   })
+}
+
+/**
+ * Markers a Claude Code session puts in the environment of everything it
+ * spawns. They have to go before the panel's own session starts.
+ *
+ * If the editor was launched FROM a Claude session — which is exactly what
+ * happens when an agent starts it to test something — Electron inherits
+ * `CLAUDE_CODE_CHILD_SESSION=1`, node-pty passes it on, and the panel's claude
+ * decides it is a nested session: it prints «Transcript saving is off —
+ * inherited CLAUDE_CODE_CHILD_SESSION marker» and keeps no history. The panel
+ * is not a nested session, though. The user opens it by hand from the editor's
+ * UI, and its transcripts are theirs to keep; that it happened to be started
+ * through another session is an accident of process lineage, nothing more.
+ *
+ * The list is explicit on purpose. Dropping everything that matches CLAUDE_*
+ * would also take configuration the user may legitimately set for their own
+ * CLI (CLAUDE_CONFIG_DIR being the dangerous one — it decides where the
+ * credentials live), and a panel that cannot authenticate is a far worse
+ * failure than a missing transcript. A marker added by a future version simply
+ * has to be added here as well.
+ */
+const SESSION_MARKERS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_BRIDGE_SESSION',
+  'CLAUDE_PID',
+  'CLAUDE_EFFORT'
+]
+
+/**
+ * The environment the panel's session runs in: ours, minus the markers of the
+ * session that happened to launch the editor, plus whatever the user put in
+ * claude-env.json (their own overrides always win — including, if they ever
+ * want one back, a marker).
+ */
+function sessionEnv(extra?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = { ...process.env } as Record<string, string>
+  for (const key of SESSION_MARKERS) delete env[key]
+  return { ...env, ...extra }
 }
 
 interface ClaudeConfig {
@@ -178,18 +254,18 @@ async function userConfig(): Promise<ClaudeConfig> {
   }
 }
 
-async function openSession(
+async function spawnSession(
   win: BrowserWindow,
   cols: number,
   rows: number,
   cwd: string | null
 ): Promise<{ ok: boolean; port?: number; error?: string }> {
-  if (session) closeSession()
+  killSession() // a reopen without a close in between
   const cfg = await userConfig()
   const cmdName = process.env.KADR_CLAUDE_CMD || cfg.command || 'claude'
   const bin = (await which(cmdName)) ?? cmdName
 
-  let bridge: { server: Server; port: number }
+  let bridge: { server: Server; port: number; token: string }
   try {
     bridge = await startBridge(win)
   } catch (err) {
@@ -211,7 +287,11 @@ async function openSession(
         ...extraServers,
         kadr: {
           command: 'node',
-          args: [join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'), String(bridge.port)]
+          args: [
+            join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'),
+            String(bridge.port),
+            bridge.token
+          ]
         }
       }
     }, null, 1)
@@ -240,19 +320,26 @@ async function openSession(
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
       cwd: dir,
-      env: { ...process.env, ...cfg.env } as Record<string, string>
+      env: sessionEnv(cfg.env)
     })
-    p.onData((data) => win.webContents.send('claude:data', data))
+    // publish BEFORE wiring the handlers: data emitted between spawn and the
+    // assignment would otherwise be dropped by the identity guard below
+    const mine: Session = { pty: p, server: bridge.server, port: bridge.port }
+    session = mine
+    // both handlers are keyed to THIS session: a pty that outlived its panel
+    // (a kill that lost a race, say) must never paint into the live terminal
+    p.onData((data) => {
+      if (session === mine) win.webContents.send('claude:data', data)
+    })
     p.onExit(({ exitCode }) => {
       // only announce deaths of the CURRENT session: deliberate closes
-      // (panel toggle, StrictMode remount) null `session` before killing
-      if (session?.pty === p) {
+      // (panel toggle, StrictMode remount) drop `session` before killing
+      if (session === mine) {
         win.webContents.send('claude:exit', exitCode)
-        session.server.close()
+        mine.server.close()
         session = null
       }
     })
-    session = { pty: p, server: bridge.server, port: bridge.port }
     return { ok: true, port: bridge.port }
   } catch (err) {
     bridge.server.close()
@@ -260,7 +347,7 @@ async function openSession(
   }
 }
 
-function closeSession() {
+function killSession() {
   if (!session) return
   const s = session
   session = null
@@ -272,6 +359,43 @@ function closeSession() {
     try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
   }, 1500)
   s.server.close()
+}
+
+/**
+ * Open and close run ONE AT A TIME, and every request takes a generation.
+ *
+ * `spawnSession` is async (config read, `which`, the node-pty import) while a
+ * close is instant, so a close that overtook an in-flight open used to find
+ * `session` still null, do nothing, and let the pending spawn install itself
+ * afterwards — an orphaned claude nobody could reach or kill. React StrictMode
+ * turned that race into the norm: it mounts ClaudePanel twice in dev
+ * (mount → cleanup → mount), so every panel open spawned two ptys, both
+ * writing into the same 'claude:data' channel — two interleaved sessions in
+ * one terminal (issue #11). A fast open→close leaked one the same way in any
+ * build. Serializing fixes the leak; the generation also lets a spawn that has
+ * already been superseded be skipped instead of started and killed.
+ */
+function openSession(
+  win: BrowserWindow,
+  cols: number,
+  rows: number,
+  cwd: string | null
+): Promise<{ ok: boolean; port?: number; error?: string }> {
+  const gen = ++sessionGen
+  const job = sessionChain.then(() =>
+    gen === sessionGen
+      ? spawnSession(win, cols, rows, cwd)
+      : { ok: false, error: 'superseded' }
+  )
+  sessionChain = job.catch(() => undefined)
+  return job
+}
+
+function closeSession(): Promise<void> {
+  sessionGen++ // abandon anything still in flight
+  const job = sessionChain.then(killSession)
+  sessionChain = job.catch(() => undefined)
+  return job
 }
 
 /**

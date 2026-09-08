@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import type { ExportProgress } from '@shared/types'
 import { PRESETS } from '@/presets'
 import { startExport, type ExportHandle } from '@/engine/exporter'
+import { useVoiceUi } from '@/engine/voiceCheck'
 import { useEditor } from '@/state/store'
 import { useT } from '@/i18n'
+import { Icon } from './icons'
+import { Modal } from './Modal'
 
 type Status =
   | { kind: 'idle' }
@@ -13,6 +16,7 @@ type Status =
   | { kind: 'cancelled' }
 
 export function ExportDialog() {
+  const checking = useVoiceUi((v) => v.phase === 'check')
   const t = useT()
   const open = useEditor((s) => s.exportOpen)
   const range = useEditor((s) => s.range)
@@ -91,87 +95,97 @@ export function ExportDialog() {
       : ''
 
   return (
-    <div className="modal-back" onClick={close}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('export')}</h2>
-        <label className="insp-field">
-          <span>{t('preset')}</span>
-          <select value={presetId} disabled={running} onChange={(e) => setPresetId(e.target.value)}>
-            {PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        </label>
-        <div className="insp-field">
-          <span>{t('duration')}</span>
-          <span>
-            {range
-              ? `${t('exportRange')}: ${range.start.toFixed(2)}–${range.end.toFixed(2)} c`
-              : t('wholeProject')}
-          </span>
-        </div>
-        {!range && <div className="dim">{t('rangeHint')}</div>}
-        <label className="anim-check export-mb">
-          <input
-            type="checkbox"
-            checked={motionBlur}
-            disabled={running}
-            onChange={(e) => setMotionBlur(e.target.checked)}
-          />
-          {t('motionBlur')}
-        </label>
-        <label className="anim-check export-mb" title={t('frameBlendingHint')}>
-          <input
-            type="checkbox"
-            checked={frameBlending}
-            disabled={running}
-            onChange={(e) => setFrameBlending(e.target.checked)}
-          />
-          {t('frameBlending')}
-        </label>
-        <label className="anim-check export-mb" title={t('fastEncoderHint')}>
-          <input
-            type="checkbox"
-            checked={fastEncoder}
-            disabled={running}
-            onChange={(e) => setFastEncoder(e.target.checked)}
-          />
-          {t('fastEncoder')}
-        </label>
-        <label className="anim-check export-mb" title={t('nvencHint')}>
-          <input
-            type="checkbox"
-            checked={nvenc && nvencOk}
-            disabled={running || !nvencOk}
-            onChange={(e) => setNvenc(e.target.checked)}
-          />
-          {t('nvenc')}{!nvencOk ? ` — ${t('nvencNA')}` : ''}
-        </label>
-
-        {status.kind === 'running' && (
-          <div className="export-progress">
-            <div>{phaseLabel}</div>
-            <progress value={status.progress} max={1} />
-            <div className="dim">{Math.round(status.progress * 100)}%</div>
-          </div>
-        )}
-        {status.kind === 'done' && <div className="export-ok">✓ {t('exportDone')}</div>}
-        {status.kind === 'cancelled' && <div className="dim">{t('exportCancelled')}</div>}
-        {status.kind === 'error' && (
-          <div className="export-err">{t('exportError')}: {status.message}</div>
-        )}
-
-        <div className="modal-actions">
-          {running ? (
-            <button onClick={cancel}>{t('cancel')}</button>
-          ) : (
-            <>
-              <button className="primary" onClick={begin}>{t('startExport')}</button>
-              <button onClick={close}>{t('close')}</button>
-            </>
-          )}
-        </div>
+    <Modal
+      title={t('export')}
+      onClose={close}
+      closeDisabled={running}
+      titleIcon={<Icon name="download" size={17} />}
+      wide
+      actions={
+        running ? (
+          <button onClick={cancel}>{t('cancel')}</button>
+        ) : (
+          <>
+            <button onClick={close}>{t('close')}</button>
+            <button className="primary" disabled={checking} onClick={begin}
+                    title={checking ? t('dfLong') : undefined}>
+              <Icon name="download" /> {t('startExport')}
+            </button>
+          </>
+        )
+      }
+    >
+      <label className="insp-field">
+        <span>{t('preset')}</span>
+        <select value={presetId} disabled={running} onChange={(e) => setPresetId(e.target.value)}>
+          {PRESETS.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+      </label>
+      <div className="insp-field">
+        <span>{t('duration')}</span>
+        <span>
+          {range
+            ? `${t('exportRange')}: ${range.start.toFixed(2)}–${range.end.toFixed(2)} c`
+            : t('wholeProject')}
+        </span>
       </div>
-    </div>
+      {!range && <div className="dim">{t('rangeHint')}</div>}
+      <label className="anim-check export-mb">
+        <input
+          type="checkbox"
+          checked={motionBlur}
+          disabled={running}
+          onChange={(e) => setMotionBlur(e.target.checked)}
+        />
+        {t('motionBlur')}
+      </label>
+      <label className="anim-check export-mb" title={t('frameBlendingHint')}>
+        <input
+          type="checkbox"
+          checked={frameBlending}
+          disabled={running}
+          onChange={(e) => setFrameBlending(e.target.checked)}
+        />
+        {t('frameBlending')}
+      </label>
+      <label className="anim-check export-mb" title={t('fastEncoderHint')}>
+        <input
+          type="checkbox"
+          checked={fastEncoder}
+          disabled={running}
+          onChange={(e) => setFastEncoder(e.target.checked)}
+        />
+        {t('fastEncoder')}
+      </label>
+      <label className="anim-check export-mb" title={t('nvencHint')}>
+        <input
+          type="checkbox"
+          checked={nvenc && nvencOk}
+          disabled={running || !nvencOk}
+          onChange={(e) => setNvenc(e.target.checked)}
+        />
+        {t('nvenc')}{!nvencOk ? ` — ${t('nvencNA')}` : ''}
+      </label>
+
+      {status.kind === 'running' && (
+        <div className="export-progress">
+          <div>{phaseLabel}</div>
+          <progress value={status.progress} max={1} />
+          <div className="dim">{Math.round(status.progress * 100)}%</div>
+        </div>
+      )}
+      {status.kind === 'done' && (
+        <div className="export-ok"><Icon name="check" /> {t('exportDone')}</div>
+      )}
+      {status.kind === 'cancelled' && <div className="dim">{t('exportCancelled')}</div>}
+      {status.kind === 'error' && (
+        <div className="export-err">
+          <Icon name="alert" size={15} />
+          <span>{t('exportError')}: {status.message}</span>
+        </div>
+      )}
+    </Modal>
   )
 }

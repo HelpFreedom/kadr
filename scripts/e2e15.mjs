@@ -77,6 +77,9 @@ async function reload() {
 
 await connect()
 await reload()
+// the preset store is REAL USER DATA shared with the user's own instance —
+// back it up before the clean-slate wipe and restore it at the end
+const userPresets = await evalJs(`(async () => (await window.kadr.readUserStore('pose-presets')) ?? [])()`)
 await evalJs(`(async () => {
   localStorage.removeItem('kadr.posePresets')
   await window.kadr.writeUserStore('pose-presets', [])
@@ -288,6 +291,15 @@ check('presets persist via userData file even without localStorage',
   persisted.store.length === 1 && persisted.store[0] === 'Сдвиг вправо' &&
   persisted.file.length === 1,
   JSON.stringify(persisted))
+
+// restore the user's presets (file + cache + live store)
+await evalJs(`(async () => {
+  const presets = ${JSON.stringify(userPresets)}
+  await window.kadr.writeUserStore('pose-presets', presets)
+  localStorage.setItem('kadr.posePresets', JSON.stringify(presets))
+  window.kadrEditor.usePosePresets.setState({ presets })
+  return presets.length
+})()`)
 
 ws.close()
 console.log('e2e15 finished')

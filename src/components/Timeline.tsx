@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
-import type { Clip, MediaAsset, Track } from '@shared/types'
+import type { AudioDefect, Clip, MediaAsset, Track } from '@shared/types'
 import {
   useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM
 } from '@/state/store'
-import { useT } from '@/i18n'
+import { useT, type TKey } from '@/i18n'
 import { TRANSITIONS } from '@/gl/transitions'
 import { EDGE_TRANSITIONS } from '@/gl/edges'
 import { CtxMenu } from './CtxMenu'
@@ -13,6 +13,32 @@ import { normalizeClip, useNormalizeUi } from '@/engine/normalize'
 import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
+import { useNeonWaveUi } from './NeonWaveDialog'
+import { useTtsUi } from './TtsDialog'
+import { evalAnim } from '@/engine/anim'
+import { spanToProject, projectToSrc, type VisibleSpan } from '@/engine/voiceDefects'
+import { useVoiceUi, setVerdict, clearVerdict, addUserDefect, setDefectsHidden } from '@/engine/voiceCheck'
+import { confirmDefect } from '@/engine/voiceRegen'
+import { useDefectsUi, targetRun } from './DefectsDialog'
+import { Icon, Spinner } from './icons'
+import { token } from '@/theme'
+import { logWarn } from '@/engine/log'
+
+/** Neon wave (audio-reactive fragment) from the selected range. */
+function NeonWaveButton() {
+  const t = useT()
+  const range = useEditor((s) => s.range)
+  return (
+    <button
+      disabled={!range}
+      data-act="neon-wave"
+      title={t('nwButtonHint')}
+      onClick={() => useNeonWaveUi.getState().setOpen(true)}
+    >
+      <Icon name="wave" /> {t('nwButton')}
+    </button>
+  )
+}
 
 /** Transcribe the selected range (Shift-drag on the ruler) into SRT/TXT. */
 function TranscribeRangeButton() {
@@ -26,8 +52,9 @@ function TranscribeRangeButton() {
         const r = useEditor.getState().range
         if (r) useTextUi.getState().openTranscribe({ kind: 'range', start: r.start, end: r.end })
       }}
+      data-act="transcribe-range"
     >
-      📝 {t('transcribeRange')}
+      <Icon name="captions" /> {t('transcribeRange')}
     </button>
   )
 }
@@ -253,15 +280,26 @@ export function Timeline({ height }: { height: number }) {
   return (
     <div className="timeline" style={{ height }}>
       <div className="tl-toolbar">
-        <button onClick={() => useEditor.getState().addTrack('video')}>{t('addVideoTrack')}</button>
-        <button onClick={() => useEditor.getState().addTrack('audio')}>{t('addAudioTrack')}</button>
+        <button data-act="add-video" onClick={() => useEditor.getState().addTrack('video')}>
+          <Icon name="plus" size={13} /> {t('addVideoTrack')}
+        </button>
+        <button data-act="add-audio" onClick={() => useEditor.getState().addTrack('audio')}>
+          <Icon name="plus" size={13} /> {t('addAudioTrack')}
+        </button>
         <TranscribeRangeButton />
         <button
+          data-act="captions"
           title={t('capButtonHint')}
           onClick={() => useCaptionsUi.getState().setOpen(true)}
         >
-          ✨ {t('capButton')}
+          <Icon name="glow" /> {t('capButton')}
         </button>
+        <NeonWaveButton />
+        <button data-act="tts" title={t('ttsButtonHint')}
+                onClick={() => useTtsUi.getState().openSettings()}>
+          <Icon name="speech" /> {t('ttsButton')}
+        </button>
+        <DefectButtons />
         <span className="dim hint-inline">{t('dropHint')}</span>
         <span className="flex1" />
         <label className="zoom-ctl">
@@ -302,6 +340,7 @@ export function Timeline({ height }: { height: number }) {
           ))}
           <RangeOverlay />
           <KfMarker />
+          <Markers />
           <Playhead />
         </div>
       </div>
@@ -344,12 +383,16 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
         <div className="ctx-title dim">{t('transition')}</div>
         {TRANSITIONS.map((tr) => (
           <button key={tr.id} onClick={() => pick(tr.id)}>
-            <span className="ctx-check">{transCur === tr.id ? '✓' : ''}</span>
+            <span className="ctx-check">
+              {transCur === tr.id && <Icon name="check" size={13} />}
+            </span>
             {t(tr.nameKey)}
           </button>
         ))}
         <button onClick={() => pick('none')}>
-          <span className="ctx-check">{transCur === 'none' ? '✓' : ''}</span>
+          <span className="ctx-check">
+            {transCur === 'none' && <Icon name="check" size={13} />}
+          </span>
           {t('trNone')}
         </button>
       </CtxMenu>
@@ -374,7 +417,9 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
         <div className="ctx-title dim">{title}</div>
         {EDGE_TRANSITIONS.map((ed) => (
           <button key={ed.id} onClick={() => { apply(ed.id); onClose() }}>
-            <span className="ctx-check">{edgeCur?.type === ed.id ? '✓' : ''}</span>
+            <span className="ctx-check">
+              {edgeCur?.type === ed.id && <Icon name="check" size={13} />}
+            </span>
             {t(ed.nameKey)}
           </button>
         ))}
@@ -464,7 +509,11 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
             if (!a || a.kind === 'image' || !a.duration) return null
             const busy = useReverseUi.getState().busy[menu.clipId!]
             if (busy !== undefined) {
-              return <button disabled>⏳ {t('reversing')} {Math.round(busy * 100)}%</button>
+              return (
+                <button disabled>
+                  <Spinner size={14} /> {t('reversing')} {Math.round(busy * 100)}%
+                </button>
+              )
             }
             return (
               <button
@@ -483,13 +532,13 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
             const a = f?.clip.assetId ? p.assets.find((x) => x.id === f.clip.assetId) : null
             if (!a?.hasAudio) return null
             if (useNormalizeUi.getState().busy[menu.clipId!]) {
-              return <button disabled>⏳ {t('normalizing')}…</button>
+              return <button disabled><Spinner size={14} /> {t('normalizing')}…</button>
             }
             return (
               <button
                 onClick={() => {
                   normalizeClip(menu.clipId!).catch((err) =>
-                    console.warn('[kadr] normalize failed', err)
+                    logWarn('громкость', 'нормализовать не удалось', err)
                   )
                   onClose()
                 }}
@@ -544,6 +593,46 @@ function Playhead() {
   const playhead = useEditor((s) => s.playhead)
   const zoom = useEditor((s) => s.zoom)
   return <div className="playhead" style={{ left: HEADER_W + playhead * zoom }} />
+}
+
+/** Track-independent user markers: M adds one at the playhead, the flag
+    drags along the timeline (snapping), right-click removes. */
+function Markers() {
+  const markers = useEditor((s) => s.project.markers)
+  const zoom = useEditor((s) => s.zoom)
+  const t = useT()
+  if (!markers?.length) return null
+  return (
+    <>
+      {markers.map((m) => (
+        <div
+          key={m.id}
+          className="tl-marker"
+          style={{ left: HEADER_W + m.time * zoom }}
+          onPointerDown={(e) => {
+            if (e.button !== 0) return
+            e.stopPropagation()
+            const st = useEditor.getState()
+            st.pushHistory('hMarkerMove')
+            const points = snapPoints(st.project, '', st.playhead)
+            const startX = e.clientX
+            const t0 = m.time
+            windowDrag(e, (_dx, ev) => {
+              const s = useEditor.getState()
+              s.moveMarker(m.id, snapTime(t0 + (ev.clientX - startX) / s.zoom, points, s.zoom))
+            })
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            useEditor.getState().removeMarker(m.id)
+          }}
+        >
+          <span className="tl-marker-flag" title={t('markerTip')}>{m.label}</span>
+        </div>
+      ))}
+    </>
+  )
 }
 
 /** Yellow marker mirroring a keyframe being dragged in a mini-timeline. */
@@ -737,25 +826,33 @@ function TrackRow({
           {track.kind === 'video' && (
             <button
               className={track.motion ? 'toggled-on' : ''}
+              data-act="track-motion"
               title={t('trackMotion')}
+              aria-label={t('trackMotion')}
               onClick={() => useEditor.getState().setMotionTrack(track.id)}
             >
-              ✥
+              <Icon name="move" size={13} />
             </button>
           )}
           <button
             className={track.muted ? 'toggled' : ''}
+            data-act="mute"
             title={t('mute')}
+            aria-label={t('mute')}
+            aria-pressed={track.muted}
             onClick={() => useEditor.getState().updateTrack(track.id, { muted: !track.muted })}
           >
-            {track.muted ? '🔇' : '🔊'}
+            <Icon name={track.muted ? 'mute' : 'volume'} size={13} />
           </button>
           <button
             className={track.locked ? 'toggled' : ''}
+            data-act="lock"
             title={t('lock')}
+            aria-label={t('lock')}
+            aria-pressed={track.locked}
             onClick={() => useEditor.getState().updateTrack(track.id, { locked: !track.locked })}
           >
-            {track.locked ? '🔒' : '🔓'}
+            <Icon name={track.locked ? 'lock' : 'unlock'} size={13} />
           </button>
         </div>
         {trackH >= 46 && (
@@ -798,8 +895,258 @@ function TrackRow({
           <ClipView key={c.id} clip={c} track={track} laneHeight={trackH} view={view} onMenu={onMenu} />
         ))}
         <TransitionZones track={track} onMenu={onMenu} />
+        <DefectBands track={track} />
       </div>
     </div>
+  )
+}
+
+/** Run the detector, and mark a defect the detector missed.
+ *
+ * The manual mark deliberately reuses the in/out range (Shift+drag) instead of
+ * a Ctrl-drag on the clip: Ctrl+drag over a clip body is how clips are handled,
+ * and stealing it would break moving them. Without a range the playhead does.
+ */
+function DefectButtons() {
+  const t = useT()
+  const hasRuns = useEditor((s) => (s.project.voiceRuns?.length ?? 0) > 0)
+  const hidden = useVoiceUi((s) => s.hidden)
+  const [busy, setBusy] = useState(false)
+  if (!hasRuns) return null
+
+  /** Mark from the in/out range, or from the playhead when there is none. */
+  const mark = async (kind: 'defect' | 'redo') => {
+    const s = useEditor.getState()
+    const run = targetRun()
+    if (!run) return
+    const r = s.range
+    const a = r ? r.start : s.playhead
+    const b = r ? r.end : s.playhead + 0.15
+    // range/playhead are TIMELINE seconds; a defect lives in source time
+    const found = s.project.tracks.flatMap((tr) => tr.clips)
+      .find((c) => c.assetId === run.assetId && a < c.start + c.duration && b > c.start)
+    if (!found) return
+    setBusy(true)
+    try {
+      await addUserDefect(run.assetId, projectToSrc(found, a), projectToSrc(found, b), kind)
+    } catch (e) {
+      useVoiceUi.setState({ error: String((e as Error)?.message ?? e) })
+      useDefectsUi.getState().setOpen(true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <button data-act="defects" title={t('dfButtonHint')}
+              onClick={() => useDefectsUi.getState().setOpen(true)}>
+        <Icon name="target" /> {t('dfButton')}
+      </button>
+      <button data-act="mark-defect" title={`${t('dfUserHint')} · ${t('dfDragHint')}`}
+              disabled={busy} onClick={() => mark('defect')}>
+        <Icon name="pencil" /> {t('dfUserAdd')}
+      </button>
+      <button data-act="mark-redo" title={t('dfRedoHint')} disabled={busy}
+              onClick={() => mark('redo')}>
+        <Icon name="again" /> {t('dfRedoAdd')}
+      </button>
+      <button className="icon-only" data-act="hide-defects"
+              title={hidden ? t('dfShow') : t('dfHide')}
+              aria-label={hidden ? t('dfShow') : t('dfHide')}
+              aria-pressed={hidden}
+              onClick={() => setDefectsHidden(!hidden)}>
+        <Icon name={hidden ? 'eyeOff' : 'eye'} />
+      </button>
+    </>
+  )
+}
+
+/** ttsqc's classes, for the flag. 'user' is ours, for a hand-placed mark. */
+const DEFECT_LABEL: Record<string, TKey> = {
+  insert: 'dfInsert', corrupt: 'dfCorrupt', missing: 'dfMissing',
+  truncation: 'dfTruncation', stress: 'dfStress', misread: 'dfMisread',
+  script_typo: 'dfTypo', region_fail: 'dfRegion', user: 'dfUser',
+  // «заново» — это НЕ утверждение о дефекте: фраза перегенерируется, но в
+  // корпус не идёт. Своя подпись, свой цвет и свой значок — иначе по метке не
+  // отличить, попадёт ли она в обучение
+  redo: 'dfRedoCls'
+}
+
+/**
+ * Audio defects of a voice-over, drawn INSIDE the lane of the clip they belong
+ * to — deliberately unlike markers (full-height green flags) and the range
+ * (full-height blue band), because a defect is a property of one clip's audio,
+ * not of the timeline. Violet is the one unused colour here.
+ *
+ * The bands themselves are pointer-transparent so dragging the clip underneath
+ * still works (the trick `.tl-marker` uses); only the flag and the two phrase
+ * edge handles take the mouse.
+ */
+function DefectBands({ track }: { track: Track }) {
+  const t = useT()
+  const zoom = useEditor((s) => s.zoom)
+  const defects = useEditor((s) => s.project.defects)
+  const clips = track.clips
+  const busy = useVoiceUi((s) => s.busy)
+  const hidden = useVoiceUi((s) => s.hidden)
+  const marking = useVoiceUi((s) => s.marking)
+  const preview = marking && marking.trackId === track.id ? marking : null
+  if (hidden) return null
+  if (!defects?.length && !preview) return null
+
+  const placed: Array<{ d: AudioDefect; src: VisibleSpan; phrase: VisibleSpan | null; clipId: string }> = []
+  for (const d of defects ?? []) {
+    // «не дефект» — метка и выделение уходят с таймлайна. Сама запись остаётся
+    // в проекте: это обучающий пример для детектора, и Ctrl+Z вернёт её вид.
+    if (d.state === 'rejected') continue
+    for (const clip of clips) {
+      if (clip.assetId !== d.assetId) continue
+      const src = spanToProject(clip, d.src[0], d.src[1])
+      if (!src) continue
+      placed.push({ d, src, phrase: spanToProject(clip, d.phrase.t0, d.phrase.t1), clipId: clip.id })
+    }
+  }
+  if (!placed.length && !preview) return null
+
+  const dragEdge = (e: React.PointerEvent, d: AudioDefect, edge: 't0' | 't1', clip: Clip) => {
+    e.stopPropagation()
+    const st = useEditor.getState()
+    st.pushHistory('hDefectEdge')
+    const startX = e.clientX
+    const from = d.phrase[edge]
+    windowDrag(e, (_dx, ev) => {
+      const s = useEditor.getState()
+      const speed = clip.speed || 1
+      const next = from + ((ev.clientX - startX) / s.zoom) * speed
+      const cur = s.project.defects?.find((x) => x.id === d.id)
+      if (!cur) return
+      // the phrase must keep containing its defect — that invariant is what the
+      // splice stands on, so the handle simply cannot be dragged past it
+      const t0 = edge === 't0' ? Math.min(next, cur.src[0]) : cur.phrase.t0
+      const t1 = edge === 't1' ? Math.max(next, cur.src[1]) : cur.phrase.t1
+      s.updateDefect(d.id, {
+        phrase: { ...cur.phrase, t0: Math.max(0, t0), t1, cut: ['fallback', 'fallback'] }
+      })
+    })
+  }
+
+  const dragSrc = (e: React.PointerEvent, d: AudioDefect, edge: 0 | 1, clip: Clip) => {
+    e.stopPropagation()
+    const st = useEditor.getState()
+    st.pushHistory('hDefectEdge')
+    const startX = e.clientX
+    const from = d.src[edge]
+    windowDrag(e, (_dx, ev) => {
+      const s = useEditor.getState()
+      const speed = clip.speed || 1
+      const cur = s.project.defects?.find((x) => x.id === d.id)
+      if (!cur) return
+      const next = from + ((ev.clientX - startX) / s.zoom) * speed
+      // дефект обязан остаться внутри своей фразы и не вывернуться наизнанку
+      const lo = cur.phrase.t0
+      const hi = cur.phrase.t1
+      const src: [number, number] = edge === 0
+        ? [Math.min(Math.max(next, lo), cur.src[1] - 0.02), cur.src[1]]
+        : [cur.src[0], Math.max(Math.min(next, hi), cur.src[0] + 0.02)]
+      s.updateDefect(d.id, { src })
+    })
+  }
+
+  return (
+    <>
+      {preview && (
+        <div className="adefect marking"
+             style={{ left: Math.min(preview.from, preview.to) * zoom,
+                      width: Math.max(3, Math.abs(preview.to - preview.from) * zoom) }} />
+      )}
+      {placed.map(({ d, src, phrase, clipId }) => {
+        const clip = clips.find((c) => c.id === clipId)
+        const working = busy[d.id] !== undefined
+        const label = t(DEFECT_LABEL[d.cls ?? 'user'] ?? 'dfUser')
+        const conf = d.confidence === undefined ? '' : ` ${d.confidence.toFixed(2)}`
+        const redo = d.cls === 'redo'
+        // прямо в подсказке: пойдёт эта отметка в обучение или нет
+        const learns = redo ? t('dfNoLearn') : t('dfLearns')
+        return (
+          <div key={`${d.id}-${clipId}`}>
+            {phrase && (
+              <div
+                className={`adefect-phrase ${d.state}`}
+                style={{ left: phrase.start * zoom, width: Math.max(2, (phrase.end - phrase.start) * zoom) }}
+              >
+                {clip && !phrase.clippedIn && (
+                  <span className="adefect-edge left"
+                        title={t('dfEdgeTip')}
+                        onPointerDown={(e) => dragEdge(e, d, 't0', clip)} />
+                )}
+                {clip && !phrase.clippedOut && (
+                  <span className="adefect-edge right"
+                        title={t('dfEdgeTip')}
+                        onPointerDown={(e) => dragEdge(e, d, 't1', clip)} />
+                )}
+              </div>
+            )}
+            <div
+              className={`adefect ${d.state} ${d.origin}${redo ? ' redo' : ''}` +
+                `${working ? ' working' : ''}` +
+                `${src.clippedIn ? ' clipped-in' : ''}${src.clippedOut ? ' clipped-out' : ''}`}
+              data-defect={d.id}
+              style={{ left: src.start * zoom, width: Math.max(3, (src.end - src.start) * zoom) }}
+            >
+              {clip && !src.clippedIn && (
+                <span className="adefect-edge src left" title={t('dfSrcEdge')}
+                      onPointerDown={(e) => dragSrc(e, d, 0, clip)} />
+              )}
+              {clip && !src.clippedOut && (
+                <span className="adefect-edge src right" title={t('dfSrcEdge')}
+                      onPointerDown={(e) => dragSrc(e, d, 1, clip)} />
+              )}
+            </div>
+            <button
+              className={`adefect-flag ${d.state} ${d.origin}${redo ? ' redo' : ''}` +
+                `${working ? ' working' : ''}`}
+              style={{ left: src.start * zoom }}
+              title={`${label}${conf}\n${learns}\n${t(redo ? 'dfTipRedo' : 'dfTip')}` +
+                `\n${(d.phrase.text || '').slice(0, 120)}`}
+              onPointerDown={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => {
+                e.stopPropagation()
+                if (!phrase) return
+                // прослушать место — главное действие при разборе: ставим
+                // диапазон на фразу и сразу запускаем
+                const s = useEditor.getState()
+                s.setRange({ start: phrase.start, end: phrase.end })
+                s.setPlayhead(phrase.start)
+                s.setPlaying(true)
+              }}
+              onClick={(e) => {
+                e.stopPropagation()
+                // Alt returns it to undecided — a mis-click must be cheap
+                if (e.altKey) clearVerdict(d.id)
+                else confirmDefect(d.id)
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                if (d.origin === 'user') useEditor.getState().removeDefects(d.id)
+                else setVerdict(d.id, false)
+              }}
+            >
+              {d.state === 'confirmed' || d.state === 'done'
+                ? <Icon name="check" size={10} strokeWidth={3} />
+                : d.state === 'failed'
+                  ? <Icon name="alert" size={10} strokeWidth={2.5} />
+                  : redo
+                    ? <Icon name="again" size={10} strokeWidth={2.5} />
+                    : d.origin === 'user'
+                      ? <Icon name="pencil" size={10} strokeWidth={2.5} />
+                      : <Icon name="diamond" size={10} strokeWidth={2.5} />}
+            </button>
+          </div>
+        )
+      })}
+    </>
   )
 }
 
@@ -849,8 +1196,9 @@ function TransitionZones({ track, onMenu }: { track: Track; onMenu: (m: MenuStat
                   e.stopPropagation()
                   onMenu({ x: e.clientX, y: e.clientY, kind: 'transition', clipId: z.clip.id })
                 }}
+                aria-label={`${t('transition')}: ${name}`}
               >
-                ⤬
+                <Icon name="transition" size={12} />
               </button>
             )}
           </div>
@@ -875,8 +1223,9 @@ function TransitionZones({ track, onMenu }: { track: Track; onMenu: (m: MenuStat
                   x: e.clientX, y: e.clientY, kind: 'junction', clipIds: [j.a.id, j.b.id]
                 })
               }}
+              aria-label={t('edgeJunction')}
             >
-              ◈
+              <Icon name="junction" size={12} />
             </button>
           )
         })}
@@ -963,9 +1312,9 @@ function ClipView({
       }
       const ph = Math.max(1, Math.min(1, (peak * wf.norm) / 255) * mid)
       const rh = Math.max(1, Math.min(1, (rms * wf.norm) / 255) * mid)
-      ctx.fillStyle = 'rgba(116, 187, 110, 0.65)'
+      ctx.fillStyle = token('--c-wave-peak')
       ctx.fillRect(x, mid - ph, 1, ph * 2)
-      ctx.fillStyle = 'rgba(204, 244, 188, 0.95)'
+      ctx.fillStyle = token('--c-wave-rms')
       ctx.fillRect(x, mid - rh, 1, rh * 2)
     }
   }, [asset, zoom, vis0, visW, clip.inPoint, clip.start, speed, laneHeight])
@@ -994,11 +1343,51 @@ function ClipView({
           return
         }
       }
-      // otherwise: toggle the clip together with its linked partner
-      const sel = new Set(st.selection)
-      if (sel.has(clip.id)) linkedIds.forEach((id) => sel.delete(id))
-      else linkedIds.forEach((id) => sel.add(id))
-      st.select([...sel])
+      const toggleSelection = () => {
+        const s = useEditor.getState()
+        const sel = new Set(s.selection)
+        if (sel.has(clip.id)) linkedIds.forEach((id) => sel.delete(id))
+        else linkedIds.forEach((id) => sel.add(id))
+        s.select([...sel])
+      }
+
+      // On a voice-over clip Ctrl+DRAG marks a span for the defect detector —
+      // the gesture the work actually needs. A Ctrl+CLICK (no movement) still
+      // toggles the selection exactly as before, so nothing is taken away.
+      const run = clip.assetId
+        ? st.project.voiceRuns?.find((r) => r.assetId === clip.assetId)
+        : undefined
+      if (run) {
+        const box = e.currentTarget.getBoundingClientRect()
+        const atX = (x: number) => {
+          const s = useEditor.getState()
+          const t = clip.start + (x - box.left) / s.zoom
+          return Math.min(clip.start + clip.duration, Math.max(clip.start, t))
+        }
+        const from = atX(e.clientX)
+        let moved = false
+        useVoiceUi.setState({ marking: { trackId: track.id, from, to: from } })
+        windowDrag(e, (_dx, ev) => {
+          if (Math.abs(ev.clientX - e.clientX) > 3) moved = true
+          useVoiceUi.setState({ marking: { trackId: track.id, from, to: atX(ev.clientX) } })
+        }, () => {
+          const m = useVoiceUi.getState().marking
+          useVoiceUi.setState({ marking: null })
+          if (!moved || !m || Math.abs(m.to - m.from) < 0.02) {
+            toggleSelection()
+            return
+          }
+          const a = Math.min(m.from, m.to)
+          const b = Math.max(m.from, m.to)
+          addUserDefect(clip.assetId!, projectToSrc(clip, a), projectToSrc(clip, b))
+            .catch((err) => {
+              useVoiceUi.setState({ error: String((err as Error)?.message ?? err) })
+              useDefectsUi.getState().setOpen(true)
+            })
+        })
+        return
+      }
+      toggleSelection()
       return
     }
     if (!selected) st.select(linkedIds)
@@ -1205,7 +1594,7 @@ function ClipView({
   // rubber band: opacity for video clips, gain for audio clips
   const isAudio = track.kind === 'audio'
   const levelMax = isAudio ? 2 : 1
-  const level = isAudio ? clip.gain.value : clip.transform.opacity.value
+  const level = isAudio ? evalAnim(clip.gain, 0) : evalAnim(clip.transform?.opacity, 0)
   const levelPad = 7
   const levelUsable = Math.max(4, laneHeight - 8 - levelPad * 2)
   const levelY = levelPad + (1 - Math.min(levelMax, Math.max(0, level)) / levelMax) * levelUsable
@@ -1312,15 +1701,18 @@ function ClipView({
         <div key={x} className="loop-mark" style={{ left: x }} title="loop" />
       ))}
       <span className="clip-label">
-        {clip.linkId ? '🔗' : ''}
-        {isText ? `T: ${clip.text}` : clip.label}
-        {speed !== 1 ? ` ×${speed.toFixed(2)}` : ''}
-        {loops ? ' ↻' : ''}
+        {clip.kind === 'remotion' && <Icon name="atom" size={11} />}
+        {clip.linkId && <Icon name="link" size={11} />}
+        <span>
+          {isText ? `T: ${clip.text}` : clip.label}
+          {speed !== 1 ? ` ×${speed.toFixed(2)}` : ''}
+        </span>
+        {loops && <Icon name="loop" size={11} />}
         {reversing !== undefined
-          ? ` ⏳ ${Math.round(reversing * 100)}%`
+          ? <><Spinner size={11} /> {Math.round(reversing * 100)}%</>
           : asset?.reverseOf
-            ? ' ⏪'
-            : ''}
+            ? <Icon name="rewind" size={11} />
+            : null}
       </span>
       {reversing !== undefined && (
         <div className="reverse-progress" style={{ width: `${Math.round(reversing * 100)}%` }} />

@@ -14,6 +14,10 @@ let rawEnc: ChildProcess | null = null
 let rawEncErr = ''
 let rawEncExit: Promise<void> | null = null
 
+// capability token for the kadr:// media protocol (issue #13). Sync on purpose:
+// fileUrl must work from the renderer's very first frame.
+const MEDIA_TOKEN: string = ipcRenderer.sendSync('media:token')
+
 const api: KadrApi = {
   rawEncodeStart: (o) => {
     // disk-backed temp (KADR_TMPDIR) — os.tmpdir() is often a small tmpfs that a
@@ -47,8 +51,16 @@ const api: KadrApi = {
         reject(new Error(`raw encoder gone: ${rawEncErr.slice(0, 300)}`))
         return
       }
-      if (stdin.write(view)) resolve()
-      else stdin.once('drain', resolve)
+      // The frame buffer is handed over BY REFERENCE (contextIsolation is
+      // off exactly to avoid an 8 MB copy per frame) and the exporter reuses
+      // it as soon as this promise resolves. `write()` returning true only
+      // means "you may keep writing" — the chunk itself can still sit in the
+      // stream's queue, still pointing at our buffer, so resolving on it let
+      // the next frame overwrite data ffmpeg had not read yet: exports came
+      // out with occasional TORN frames (half frame k, half frame k+2) and
+      // no two runs were pixel-identical. The write callback fires only once
+      // the chunk has actually been flushed to the pipe.
+      stdin.write(view, (err) => (err ? reject(err) : resolve()))
     }),
   rawEncodeEnd: async () => {
     rawEnc?.stdin?.end()
@@ -70,7 +82,9 @@ const api: KadrApi = {
     // the element never loads and the preview spins forever (issue #6)
     const posix = path.replace(/\\/g, '/')
     const abs = posix.startsWith('/') ? posix : `/${posix}`
-    return `kadr://media${encodeURI(abs).replace(/[?#]/g, encodeURIComponent)}`
+    // ?t= is the capability token gating the protocol (issue #13, see main.ts);
+    // ? and # are escaped above, so the query can only be this one
+    return `kadr://media${encodeURI(abs).replace(/[?#]/g, encodeURIComponent)}?t=${MEDIA_TOKEN}`
   },
   pathForFile: (f) => {
     try { return webUtils.getPathForFile(f) } catch { return '' }
@@ -87,6 +101,8 @@ const api: KadrApi = {
   writeProject: (path, project) => ipcRenderer.invoke('project:write', path, project),
   autosaveProject: (project, mainPath) => ipcRenderer.invoke('project:autosave', project, mainPath),
 
+  storageScan: (projects, open) => ipcRenderer.invoke('storage:scan', projects, open),
+  storagePrune: (req) => ipcRenderer.invoke('storage:prune', req),
   readUserStore: (name) => ipcRenderer.invoke('store:read', name),
   writeUserStore: (name, data) => ipcRenderer.invoke('store:write', name, data),
 
@@ -97,11 +113,13 @@ const api: KadrApi = {
     ipcRenderer.on('reverse:progress', handler)
     return () => ipcRenderer.removeListener('reverse:progress', handler)
   },
-  requestProxy: (path, duration, audioOnly) => ipcRenderer.invoke('proxy:request', path, duration, audioOnly),
-  requestDecoded: (path, duration) => ipcRenderer.invoke('media:decoded', path, duration),
+  requestProxy: (path, duration, opts) => ipcRenderer.invoke('proxy:request', path, duration, opts),
+  requestDecoded: (path, duration, opts) => ipcRenderer.invoke('media:decoded', path, duration, opts),
   pickDirectory: (title) => ipcRenderer.invoke('dialog:pick-dir', title),
   saveSnapshot: (dir, baseName, png) => ipcRenderer.invoke('snapshot:save', dir, baseName, png),
   measureLoudness: (path, start, duration) => ipcRenderer.invoke('media:loudness', path, start, duration),
+  meanVolume: (path, start, duration) => ipcRenderer.invoke('media:mean-volume', path, start, duration),
+  audioEnvelope: (req) => ipcRenderer.invoke('audio:envelope', req),
   onProxyProgress: (cb) => {
     const handler = (_e: unknown, p: { path: string; progress: number }) => cb(p)
     ipcRenderer.on('proxy:progress', handler)
@@ -126,12 +144,14 @@ const api: KadrApi = {
 
   fragmentEnsure: () => ipcRenderer.invoke('fragment:ensure'),
   fragmentServer: () => ipcRenderer.invoke('fragment:server'),
-  fragmentCreate: (spec) => ipcRenderer.invoke('fragment:create', spec),
+  fragmentCreate: (spec, projectDir) => ipcRenderer.invoke('fragment:create', spec, projectDir),
   fragmentDelete: (id) => ipcRenderer.invoke('fragment:delete', id),
+  fragmentRelocate: (projectDir, ids) => ipcRenderer.invoke('fragment:relocate', projectDir, ids),
   fragmentCaptureStart: (id, url, w, h, fps) =>
     ipcRenderer.invoke('fragment:capture-start', id, url, w, h, fps),
   fragmentCaptureStop: (id) => ipcRenderer.invoke('fragment:capture-stop', id),
   fragmentCaptureSync: (id, msg) => ipcRenderer.send('fragment:capture-sync', id, msg),
+  fragmentCaptureQuery: (id) => ipcRenderer.invoke('fragment:capture-query', id),
   onFragmentFrame: (cb) => {
     const handler = (_e: unknown, p: { id: string; w: number; h: number; data: Uint8Array }) => cb(p)
     ipcRenderer.on('fragment:frame', handler)
@@ -145,6 +165,35 @@ const api: KadrApi = {
   },
 
   defaultWhisperModel: process.env.KADR_WHISPER_MODEL || '',
+  ttsSpeakPhrase: (req) => ipcRenderer.invoke('tts:speak-phrase', req),
+  voiceSplice: (req) => ipcRenderer.invoke('voice:splice', req),
+  voiceSilenceAt: (path, at) => ipcRenderer.invoke('voice:silence-at', path, at),
+  voiceVerdicts: (req) => ipcRenderer.invoke('voice:verdicts', req),
+  voiceReindex: (req) => ipcRenderer.invoke('voice:reindex', req),
+  voiceVersions: (req) => ipcRenderer.invoke('voice:versions', req),
+  voiceLearn: (req) => ipcRenderer.invoke('voice:learn', req),
+  voiceSelfTest: (python) => ipcRenderer.invoke('voice:selftest', python),
+  voiceCheck: (req) => ipcRenderer.invoke('voice:check', req),
+  voiceCheckCancel: () => ipcRenderer.invoke('voice:cancel'),
+  voicePhraseAt: (req) => ipcRenderer.invoke('voice:phrase-at', req),
+  onVoiceProgress: (cb) => {
+    const handler = (_e: unknown, p: { progress: number; stage: string }) => cb(p)
+    ipcRenderer.on('voice:progress', handler)
+    return () => ipcRenderer.removeListener('voice:progress', handler)
+  },
+
+  ttsHasKey: () => ipcRenderer.invoke('tts:has-key'),
+  ttsIsMock: () => ipcRenderer.invoke('tts:is-mock'),
+  ttsSetKey: (key) => ipcRenderer.invoke('tts:set-key', key),
+  ttsVoices: (proxy) => ipcRenderer.invoke('tts:voices', proxy),
+  ttsSpeak: (req) => ipcRenderer.invoke('tts:speak', req),
+  ttsCancel: () => ipcRenderer.invoke('tts:cancel'),
+  onTtsProgress: (cb) => {
+    const handler = (_e: unknown, p: { progress: number; stage: string; text?: string }) => cb(p)
+    ipcRenderer.on('tts:progress', handler)
+    return () => ipcRenderer.removeListener('tts:progress', handler)
+  },
+
   transcribe: (req) => ipcRenderer.invoke('transcribe:run', req),
   transcribeCancel: () => ipcRenderer.invoke('transcribe:cancel'),
   onTranscribeProgress: (cb) => {

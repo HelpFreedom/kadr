@@ -5,7 +5,7 @@
 // Requires the workspace to be installed (first fragmentEnsure run).
 import WebSocket from 'ws'
 import { spawn, execFileSync } from 'child_process'
-import { writeFileSync, unlinkSync, readFileSync } from 'fs'
+import { writeFileSync, unlinkSync, readFileSync, existsSync, readdirSync } from 'fs'
 
 const PORT = process.env.KADR_CDP_PORT || 9777
 const ENV_FILE = `${process.env.HOME}/.config/kadr/claude-env.json`
@@ -147,10 +147,46 @@ try {
   check('hot edit keeps the overlay alive', afterEdit === true)
 
   // 4) one-shot render: vp9 alpha webm lands in the cache
-  const rendered = await evalJs(`(async () =>
+  //
+  // ...and gets there ATOMICALLY. remotion writes its output progressively, so
+  // a render that dies (app quit, startup sweep of a crashed session) used to
+  // leave a truncated file exactly where the next export looks for a cache
+  // hit — silently, for transparent fragments, because a short WebM still
+  // parses. So while the render runs, the cache path must stay empty and the
+  // bytes must land in a `.part.` sidecar; the final name appears only on
+  // success.
+  const RENDER_DIR = `${process.env.HOME}/.config/kadr/fragment-renders`
+  const partsOf = () => readdirSync(RENDER_DIR).filter(
+    (f) => f.startsWith(fragId) && f.includes('.part.'))
+  const finalOf = () => readdirSync(RENDER_DIR).filter(
+    (f) => f.startsWith(fragId) && !f.includes('.part.'))
+  for (const f of finalOf()) unlinkSync(`${RENDER_DIR}/${f}`) // force a real render
+  for (const f of partsOf()) unlinkSync(`${RENDER_DIR}/${f}`)
+
+  const renderPromise = evalJs(`(async () =>
     window.kadr.fragmentRender(${JSON.stringify(fragId)}, { transparent: true })
   )()`)
+  let sawPart = false
+  let finalDuringRender = null
+  for (let i = 0; i < 600; i++) {
+    if (partsOf().length) {
+      sawPart = true
+      finalDuringRender = finalOf()
+      break
+    }
+    if (finalOf().length) break // finished before we looked
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  check('an in-progress render writes to a .part sidecar, not the cache name',
+    sawPart === true, sawPart ? '' : 'never observed a partial file')
+  check('the cache name stays absent until the render succeeds',
+    Array.isArray(finalDuringRender) && finalDuringRender.length === 0,
+    JSON.stringify(finalDuringRender))
+
+  const rendered = await renderPromise
   check('fragment renders to an alpha webm', rendered.path.endsWith('.webm'), rendered.path)
+  check('the finished render leaves no .part sidecar behind',
+    partsOf().length === 0 && existsSync(rendered.path), partsOf().join(','))
   const probe = execFileSync('ffprobe', ['-v', 'error', '-show_entries',
     'stream=codec_name,width,r_frame_rate', '-of', 'csv', rendered.path]).toString()
   check('render is vp9 at 60 fps, project width',

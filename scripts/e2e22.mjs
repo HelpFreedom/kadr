@@ -111,6 +111,13 @@ try {
     gen.mcpServers.kadr.args?.[1] === String(opened.port),
     Object.keys(gen.mcpServers).join(','))
 
+  // /eval runs arbitrary JS in the page, which holds window.kadr (file writes,
+  // pty spawn), so the socket carries a per-session secret handed to the MCP
+  // server through this very config
+  const TOKEN = gen.mcpServers.kadr.args?.[2]
+  check('the bridge hands the MCP server a per-session token',
+    typeof TOKEN === 'string' && TOKEN.length >= 32, `len=${TOKEN?.length}`)
+
   const echoed = await evalJs(`(async () => {
     window.kadr.claudeInput('echo KADR_$((40+2))\\n')
     await new Promise(r => setTimeout(r, 1200))
@@ -119,27 +126,46 @@ try {
   check('pty round-trip works (typed command echoes back)', echoed === true)
 
   // 2) editor HTTP bridge: eval from outside the page
-  const bridged = await new Promise((resolve) => {
+  const post = (headers) => new Promise((resolve) => {
     const body = JSON.stringify({
       code: 'return window.kadrEditor.useEditor.getState().project.name'
     })
     const req = http.request(
       { host: '127.0.0.1', port: opened.port, path: '/eval', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+        headers: { 'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body), ...headers } },
       (res) => {
         let data = ''
         res.on('data', (c) => { data += c })
-        res.on('end', () => resolve(JSON.parse(data)))
+        res.on('end', () => {
+          let parsed = null
+          try { parsed = JSON.parse(data) } catch { /* empty body */ }
+          resolve({ status: res.statusCode, body: parsed })
+        })
       }
     )
-    req.on('error', (e) => resolve({ error: e.message }))
+    req.on('error', (e) => resolve({ status: 0, body: { error: e.message } }))
     req.end(body)
   })
-  check('editor HTTP bridge evaluates in the page', bridged.ok === 'mcp-test-project',
+
+  const bridged = await post({ 'x-kadr-token': TOKEN })
+  check('editor HTTP bridge evaluates in the page', bridged.body?.ok === 'mcp-test-project',
     JSON.stringify(bridged))
 
+  // anything on this machine can reach 127.0.0.1 — including a web page, which
+  // can POST cross-origin without being able to read the reply. Neither gets in.
+  const noToken = await post({})
+  check('bridge refuses /eval without the session token', noToken.status === 403,
+    `status=${noToken.status}`)
+  const wrongToken = await post({ 'x-kadr-token': 'f'.repeat(48) })
+  check('bridge refuses /eval with a wrong token', wrongToken.status === 403,
+    `status=${wrongToken.status}`)
+  const fromPage = await post({ 'x-kadr-token': TOKEN, Origin: 'http://localhost:5621' })
+  check('bridge refuses /eval that carries a browser Origin', fromPage.status === 403,
+    `status=${fromPage.status}`)
+
   // 3) MCP stdio server: handshake + tools + live state + mutation
-  const mcp = spawn('node', ['electron/mcp-bridge.cjs', String(opened.port)],
+  const mcp = spawn('node', ['electron/mcp-bridge.cjs', String(opened.port), TOKEN],
     { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'inherit'] })
   const pending = new Map()
   let buf = ''
@@ -179,7 +205,10 @@ try {
   const names = (tools.result?.tools ?? []).map((t) => t.name).sort()
   check('MCP exposes kadr tools',
     JSON.stringify(names) === JSON.stringify(
-      ['kadr_eval', 'kadr_export', 'kadr_fragment_create', 'kadr_state', 'kadr_transcribe']),
+      ['kadr_eval', 'kadr_export', 'kadr_fragment_create', 'kadr_neon_wave', 'kadr_snapshot',
+       'kadr_state', 'kadr_transcribe',
+       'kadr_voice_check', 'kadr_voice_learn', 'kadr_voice_mark', 'kadr_voice_regenerate',
+       'kadr_voice_speak', 'kadr_voice_verdict']),
     names.join(','))
 
   const state = await mcpCall('tools/call', { name: 'kadr_state', arguments: {} })

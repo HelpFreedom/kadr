@@ -136,7 +136,7 @@ check('orbit drag sets rotY≈+20 and rotX≈-12', Math.abs(rot3d.rotY - 20) < 3
 await evalJs(`(() => {
   const head = [...document.querySelectorAll('.track-head')]
     .find(h => h.querySelector('.track-name')?.textContent === 'V1')
-  const btn = [...head.querySelectorAll('button')].find(b => b.textContent === '✥')
+  const btn = head.querySelector('button[data-act="track-motion"]')
   btn.click()
   return 1
 })()`)

@@ -346,7 +346,14 @@ export async function makeDecoded(
     `[c]format=yuv420p,scale=in_color_matrix=${opts.matrix || 'bt601'}:out_color_matrix=bt709[col];` +
     // the matte rides in the luma plane, mapped into the same limited range
     // the decoder will expand back — verified to round-trip bit-exactly
-    '[a]alphaextract,format=yuv420p,scale=in_range=pc:out_range=tv[m];' +
+    // Range-compress the matte BEFORE format=yuv420p. Newer swscale already
+    // maps gray→yuv420p into limited range, so a scale=pc→tv placed after it
+    // compressed the matte TWICE (255 → 235 → 218): every opaque area of an
+    // alpha source composited at ~92 % (a 255 red came out at 229). With the
+    // explicit scale first, format= sees a tv-tagged input and leaves it alone
+    // on new swscale, while old swscale (a plain copy) still gets the one
+    // compression it needs — 235/127/71 for α 255/129/64 on both.
+    '[a]alphaextract,scale=in_range=pc:out_range=tv,format=yuv420p[m];' +
     '[col][m]vstack=inputs=2[v]',
     '-map', '[v]', '-an',
     '-c:v', 'libx264', '-preset', 'veryfast', '-qp', '0', '-pix_fmt', 'yuv420p',

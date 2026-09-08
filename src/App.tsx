@@ -311,13 +311,7 @@ export default function App() {
           </button>
         </span>
         <span className="bar-group">
-          <button
-            data-act="new-project"
-            onClick={() => {
-              useEditor.getState().setProject(newProject())
-              markProjectSaved(useEditor.getState().project)
-            }}
-          >
+          <button data-act="new-project" onClick={() => setNewProjOpen(true)}>
             <Icon name="filePlus" /> {t('newProject')}
           </button>
           <button data-act="open-project" onClick={openProject}>
@@ -331,9 +325,6 @@ export default function App() {
         <button className="primary" data-act="export"
                 onClick={() => useEditor.getState().setExportOpen(true)}>
           <Icon name="download" /> {t('export')}
-        </button>
-        <button onClick={() => setNewProjOpen(true)}>
-          {t('newProject')}
         </button>
         <button
           className={`icon-only log-btn${storageOpen ? ' active' : ''}`}

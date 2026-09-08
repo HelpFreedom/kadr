@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { PROJECT_PRESETS } from '@/presets'
 import { useT } from '@/i18n'
+import { Modal } from './Modal'
+import { Icon } from './icons'
 
 export interface Dims {
   width: number
@@ -43,29 +45,35 @@ export function ProjectFormatDialog({
   }
 
   return (
-    <div className="modal-back" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{title}</h2>
-        <label className="insp-field">
-          <span>{t('format')}</span>
-          <select value={sel} onChange={(e) => setSel(e.target.value)}>
-            {matchVideo && (
-              <option value="match">
-                {t('projectMatchVideo')} ({matchVideo.width}×{matchVideo.height})
-              </option>
-            )}
-            {PROJECT_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} ({p.width}×{p.height})
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="modal-actions">
-          <button className="primary" onClick={() => onApply(dims())}>{applyLabel}</button>
+    <Modal
+      title={title}
+      onClose={onClose}
+      titleIcon={<Icon name="crop" size={17} />}
+      wide
+      actions={
+        <>
           <button onClick={onClose}>{t('cancel')}</button>
-        </div>
-      </div>
-    </div>
+          <button className="primary" onClick={() => onApply(dims())}>
+            <Icon name="check" /> {applyLabel}
+          </button>
+        </>
+      }
+    >
+      <label className="insp-field">
+        <span>{t('format')}</span>
+        <select value={sel} onChange={(e) => setSel(e.target.value)}>
+          {matchVideo && (
+            <option value="match">
+              {t('projectMatchVideo')} ({matchVideo.width}×{matchVideo.height})
+            </option>
+          )}
+          {PROJECT_PRESETS.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name} ({p.width}×{p.height})
+            </option>
+          ))}
+        </select>
+      </label>
+    </Modal>
   )
 }

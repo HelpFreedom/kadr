@@ -472,6 +472,12 @@ export function startExport(
       await window.kadr.exportCancel().catch(() => { /* already gone */ })
       throw err
     } finally {
+      // Frames still in flight when the run ended (cancelled, or aborted on a
+      // lost context) reject once the encoder is killed, and nothing awaits
+      // them any more — each became an "unhandled promise rejection" in the
+      // session log. The run's outcome is already decided; claim them so they
+      // die quietly.
+      for (const p of slotPending) p?.catch(() => { /* run already over */ })
       try { rawWs?.close() } catch { /* already closed */ }
       try { encoder?.close() } catch { /* already closed */ }
       for (const src of sources.values()) src?.close()

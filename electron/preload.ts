@@ -29,6 +29,12 @@ const api: KadrApi = {
     rawEnc = child
     rawEncErr = ''
     child.stderr!.on('data', (c) => { rawEncErr += c })
+    // Killing the encoder (a cancelled or aborted export) breaks this pipe
+    // mid-write, and a stdin stream with no 'error' listener turns that EPIPE
+    // into an uncaught exception — three "сбой" rows in the session log every
+    // time someone cancels an export. The failure is already delivered where it
+    // can be acted on: the write callback below, and rawEncExit.
+    child.stdin!.on('error', () => { /* see rawEncodeFrame / rawEncExit */ })
     rawEncExit = new Promise<void>((resolve, reject) => {
       child.on('close', (code) => {
         rawEnc = null

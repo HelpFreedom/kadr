@@ -19,7 +19,15 @@ asar: false
 files:
   - out/**/*
   - electron/mcp-bridge.cjs
+  # every one of these is read from disk at runtime by app.getAppPath(), so a
+  # build without them starts fine and then fails the feature: the Claude panel
+  # cannot sync its skill ("skill sync failed: ENOENT"), and voice-defect
+  # detection has no driver, no package and no model. 2.2 MB in total, of which
+  # 1.9 MB is python/models.
+  - electron/kadr-skill.md
   - scripts/transcribe.py
+  - scripts/ttsqc_run.py
+  - python/**/*
   - package.json
 
 # Bundled runtime + Remotion seed land under resources/ (process.resourcesPath).

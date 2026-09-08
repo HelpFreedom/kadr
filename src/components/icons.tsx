@@ -100,6 +100,14 @@ const GLYPHS: Record<string, ReactElement> = {
   glow: (
     <><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z" /><path d="M20 2v4" /><path d="M22 4h-4" /><circle cx="4" cy="20" r="2" /></>
   ),
+  // not in lucide: a graphics card — a board with its two fans. The GPU picker
+  // is the only place in the UI that means "this physical device", and
+  // `settings` (the gear) said nothing about which setting. One fan plus two
+  // port lines read as a contact card at 17px; the dual-fan silhouette is what
+  // makes it a video card at a glance.
+  gpu: (
+    <><rect width="20" height="12" x="2" y="6" rx="2" /><circle cx="8" cy="12" r="2.5" /><circle cx="16" cy="12" r="2.5" /></>
+  ),
   grip: (
     <><circle cx="9" cy="12" r="1" /><circle cx="9" cy="5" r="1" /><circle cx="9" cy="19" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="15" cy="5" r="1" /><circle cx="15" cy="19" r="1" /></>
   ),

@@ -362,8 +362,14 @@ export default function App() {
         >
           <Icon name="bot" /> Claude
         </button>
-        <button title={t('settings')} onClick={() => useEditor.getState().setSettingsOpen(true)}>
-          ⚙
+        <button
+          className="icon-only"
+          data-act="settings"
+          title={t('settings')}
+          aria-label={t('settings')}
+          onClick={() => useEditor.getState().setSettingsOpen(true)}
+        >
+          <Icon name="gpu" />
         </button>
         <LangSwitch />
       </div>

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import type { GpuInfo } from '@shared/types'
 import { useEditor } from '@/state/store'
 import { useT } from '@/i18n'
+import { Modal } from './Modal'
+import { Icon } from './icons'
 
 /** Read the currently-active WebGL renderer string (e.g. "Mesa Intel(R) UHD
  *  Graphics 630 …" or an NVIDIA string) so the user can confirm a GPU switch
@@ -78,41 +80,41 @@ export function SettingsDialog() {
   }
 
   return (
-    <div className="modal-back" onClick={close}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('settings')}</h2>
-
-        <label className="insp-field">
-          <span>{t('gpu')}</span>
-          <select value={node} onChange={(e) => setNode(e.target.value)}>
-            <option value="">{t('gpuAuto')}</option>
-            {gpus.map((g) => (
-              <option key={g.node} value={g.node}>{label(g)}</option>
-            ))}
-          </select>
-        </label>
-
-        {renderer && <div className="dim">{t('gpuActive')}: {renderer}</div>}
-        {reverted && <div className="export-err">{t('gpuFailedRevert')}</div>}
-        <div className="dim">{t('gpuEncodeNote')}</div>
-
-        {trialPending && !changed && (
-          <div className="export-ok" style={{ marginTop: 8 }}>{t('gpuTrialAsk')}</div>
-        )}
-        {changed && (
-          <div className="export-ok" style={{ marginTop: 8 }}>{t('gpuRestartHint')}</div>
-        )}
-
-        <div className="modal-actions">
+    <Modal
+      title={t('settings')}
+      onClose={close}
+      titleIcon={<Icon name="gpu" size={17} />}
+      wide
+      actions={
+        <>
+          <button onClick={close}>{t('close')}</button>
           {trialPending && !changed && (
             <button className="primary" onClick={keep}>{t('gpuKeep')}</button>
           )}
           {changed && (
-            <button className="primary" onClick={applyRestart}>{t('gpuApplyRestart')}</button>
+            <button className="primary" onClick={applyRestart}>
+              <Icon name="again" /> {t('gpuApplyRestart')}
+            </button>
           )}
-          <button onClick={close}>{t('close')}</button>
-        </div>
-      </div>
-    </div>
+        </>
+      }
+    >
+      <label className="insp-field">
+        <span>{t('gpu')}</span>
+        <select value={node} onChange={(e) => setNode(e.target.value)}>
+          <option value="">{t('gpuAuto')}</option>
+          {gpus.map((g) => (
+            <option key={g.node} value={g.node}>{label(g)}</option>
+          ))}
+        </select>
+      </label>
+
+      {renderer && <div className="dim hint-inline">{t('gpuActive')}: {renderer}</div>}
+      {reverted && <div className="export-err">{t('gpuFailedRevert')}</div>}
+      <div className="dim hint-inline">{t('gpuEncodeNote')}</div>
+
+      {trialPending && !changed && <div className="export-ok">{t('gpuTrialAsk')}</div>}
+      {changed && <div className="export-ok">{t('gpuRestartHint')}</div>}
+    </Modal>
   )
 }

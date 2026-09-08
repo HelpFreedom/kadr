@@ -651,7 +651,10 @@ function registerIpc() {
     // Intel runs native Wayland; the new process re-adds x11 only if it picks NVIDIA
     const relaunchArgs = process.argv.slice(1).filter((a) => !a.startsWith('--ozone-platform'))
     spawn(process.execPath, relaunchArgs, {
-      env: cleanRelaunchEnv(),
+      // KADR_WAIT_PID holds the successor at the top of runtime-env until this
+      // process is gone — otherwise the two overlap and the new one inherits a
+      // half-released --remote-debugging-port it can bind but never accept on
+      env: { ...cleanRelaunchEnv(), KADR_WAIT_PID: String(process.pid) },
       detached: true,
       stdio: 'ignore'
     }).unref()

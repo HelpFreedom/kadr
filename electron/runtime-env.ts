@@ -27,6 +27,33 @@ import { join } from 'path'
 // application.icon_name is stamped by Chromium on the stream itself and can't be
 // overridden via env, so the mixer icon stays Chromium's; the Kadr logo still
 // shows in the app menu, task bar and window from the packaged icon.)
+// A relaunch — the GPU switch, or the PRIME re-exec that puts Chromium on the
+// discrete card — spawns its successor and only then exits, so for a moment
+// both processes are alive and the newcomer loses whatever singleton the old
+// one still holds. The visible casualty is --remote-debugging-port: the new
+// process binds the socket but can never accept on it (Recv-Q fills to the
+// backlog and every CDP client hangs), which silently kills the e2e suites and
+// any automation. Block here — before Chromium initialises anything — until the
+// predecessor is really gone. Capped, so a stuck old process can't hold the app
+// hostage; the worst case is the race we already had.
+{
+  const waitPid = Number(process.env.KADR_WAIT_PID)
+  delete process.env.KADR_WAIT_PID // must not be inherited further down the chain
+  if (waitPid > 0) {
+    const sleep = (ms: number) =>
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      try {
+        process.kill(waitPid, 0) // signal 0: liveness probe, delivers nothing
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ESRCH') break // gone
+      }
+      sleep(50)
+    }
+  }
+}
+
 process.env.PULSE_PROP_OVERRIDE ??= 'application.name=Kadr'
 process.env.PULSE_PROP ??= 'application.name=Kadr'
 

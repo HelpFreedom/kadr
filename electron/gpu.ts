@@ -110,7 +110,9 @@ function relaunchWithOffload(): void {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...NVIDIA_ENV,
-    KADR_GPU_OFFLOAD: '1'
+    KADR_GPU_OFFLOAD: '1',
+    // hold the successor at the top of runtime-env until we are gone
+    KADR_WAIT_PID: String(process.pid)
   }
   // load the built renderer (out/), not a dev-server URL that dies on relaunch
   delete env.ELECTRON_RENDERER_URL

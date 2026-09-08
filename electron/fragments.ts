@@ -297,10 +297,15 @@ async function ensureWorkspace(
     onProgress?.('install', 0)
     const extraEnv = await netEnv()
     await new Promise<void>((resolve, reject) => {
-      const child = spawn('npm', ['install', '--no-audit', '--no-fund'], {
+      // npm is npm.cmd on Windows, and node refuses to spawn a .cmd without a
+      // shell (CVE-2024-27980); the argv here is constant, so a shell is safe
+      const win = process.platform === 'win32'
+      const child = spawn(win ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund'], {
         cwd: WORKSPACE,
         env: { ...process.env, ...extraEnv },
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: win,
+        windowsHide: true
       })
       let err = ''
       child.stderr.on('data', (c) => { err += c })
@@ -346,15 +351,28 @@ async function ensureServer(): Promise<{ url: string }> {
   // inherit Electron's listening sockets and would block the next launch.
   // The bin runs directly (NOT via npx — npx makes vite a grandchild the
   // watchdog's kill couldn't reach).
-  const child = spawn('sh', ['-c',
-    `"./node_modules/.bin/vite" --port ${VITE_PORT} --strictPort & V=$!; ` +
-    `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; kill $V 2>/dev/null) & ` +
-    'wait $V'
-  ], {
-    cwd: WORKSPACE,
-    env: { ...process.env },
-    stdio: ['ignore', 'pipe', 'pipe']
-  })
+  // On Windows the bin is run straight through node (no sh, no watchdog): an
+  // orphan left by a hard exit is tolerated — probeExisting() adopts a
+  // server from a previous run instead of fighting it for the port.
+  const child = process.platform === 'win32'
+    ? spawn('node', [
+        join(WORKSPACE, 'node_modules', 'vite', 'bin', 'vite.js'),
+        '--port', String(VITE_PORT), '--strictPort'
+      ], {
+        cwd: WORKSPACE,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      })
+    : spawn('sh', ['-c',
+        `"./node_modules/.bin/vite" --port ${VITE_PORT} --strictPort & V=$!; ` +
+        `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; kill $V 2>/dev/null) & ` +
+        'wait $V'
+      ], {
+        cwd: WORKSPACE,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
   const url = await new Promise<string>((resolve, reject) => {
     let out = ''
     const timer = setTimeout(() => reject(new Error('vite start timeout: ' + out.slice(-400))), 30000)
@@ -563,11 +581,20 @@ async function renderFragment(
     } catch { /* still missing */ }
     try {
       await new Promise<void>((resolve, reject) => {
-        const child = spawn('npx', args, {
-          cwd: WORKSPACE,
-          env: { ...process.env, ...extraEnv },
-          stdio: ['ignore', 'pipe', 'pipe']
-        })
+        // npx is a .cmd shim on Windows — call the CLI's JS entry through node
+        // instead, which also spares the npx startup and its network probe
+        const child = process.platform === 'win32'
+          ? spawn('node', [join(WORKSPACE, 'node_modules', '@remotion', 'cli', 'remotion-cli.js'), ...args.slice(1)], {
+              cwd: WORKSPACE,
+              env: { ...process.env, ...extraEnv },
+              stdio: ['ignore', 'pipe', 'pipe'],
+              windowsHide: true
+            })
+          : spawn('npx', args, {
+              cwd: WORKSPACE,
+              env: { ...process.env, ...extraEnv },
+              stdio: ['ignore', 'pipe', 'pipe']
+            })
         let all = ''
         const onData = (c: Buffer) => {
           all += c

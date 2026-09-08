@@ -1,9 +1,12 @@
+// Side-effect import — MUST stay first so bundled-runtime PATH/env is set
+// before './ffmpeg' (which captures KADR_FFMPEG/FFPROBE at load) is imported.
+import './runtime-env'
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'electron'
 import { join, dirname, basename } from 'path'
 import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { createHash, randomBytes } from 'crypto'
-import { execFile } from 'child_process'
+import { execFile, spawn, spawnSync } from 'child_process'
 import {
   probeMedia, makeProxy, makeDecoded, makeReversed, measureLoudness, packedAlphaPlan,
   ExportMuxer, RawVideoEncoder, meanVolume
@@ -16,6 +19,7 @@ import { registerTtsIpc } from './tts'
 import { registerVoiceIpc } from './voice'
 import { registerEnvelopeIpc } from './envelope'
 import { registerFragmentIpc } from './fragments'
+import { enumerateGpus, applyGpuChoiceAtStartup, confirmGpuTrial, cleanRelaunchEnv } from './gpu'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -54,11 +58,25 @@ app.commandLine.appendSwitch('password-store', 'basic')
 // Let Chromium use VAAPI for hardware video encode/decode where the driver
 // allows it (Intel iGPU on this machine); WebCodecs then picks it up via
 // hardwareAcceleration: 'prefer-hardware'.
+//
+// EXCEPT on the NVIDIA PRIME-offload path (KADR_GPU_OFFLOAD): there is no VA
+// driver for the NVIDIA GLX context, so VaapiVideoDecoder init fails ("Could
+// not get a valid VA display") and — worse — a WebCodecs decode can then wedge
+// with neither an output nor an error callback, hanging the offline export
+// forever. So on that path we DON'T enable VAAPI decode (WebCodecs falls back
+// to software decode, which works); GPU compositing still runs on the dGPU.
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
 app.commandLine.appendSwitch(
   'enable-features',
-  'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
+  process.env.KADR_GPU_OFFLOAD
+    ? 'VaapiVideoEncoder,AcceleratedVideoEncoder'
+    : 'VaapiVideoEncoder,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoEncoder'
 )
+
+// Point the GPU process at the user's chosen render node (else Chromium's
+// default = the integrated GPU). MUST run before app 'ready'. Also sets
+// KADR_GPU_POWER for the renderer's WebGL powerPreference.
+applyGpuChoiceAtStartup()
 
 // Last line of defense: a stray async error (e.g. a stream racing a request
 // abort) must be logged, not shown as a modal error dialog over the editor.
@@ -253,7 +271,16 @@ app.whenReady().then(() => {
   registerEnvelopeIpc()
   registerStorageIpc()
   registerFragmentIpc(() => win)
+  void sweepExportTemps() // reclaim multi-GB export intermediates left by a crash
   createWindow()
+  // log which GPU Chromium actually settled on — the diagnostic for the GPU
+  // picker (0x8086 = Intel, 0x10de = NVIDIA, 0x1002 = AMD)
+  app.getGPUInfo('basic').then((info) => {
+    const dev = (info as { gpuDevice?: Array<{ active?: boolean; vendorId?: number; deviceId?: number }> }).gpuDevice
+    const g = dev?.find((d) => d.active) ?? dev?.[0]
+    const hex = (n?: number) => (n == null ? '?' : '0x' + n.toString(16))
+    console.log(`[kadr] active GPU: vendor=${hex(g?.vendorId)} device=${hex(g?.deviceId)}`)
+  }).catch(() => { /* getGPUInfo unavailable — Settings readout still shows it */ })
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -264,8 +291,10 @@ app.on('window-all-closed', () => {
     app.quit()
     // an in-flight export/muxer or any stray handle must never keep a
     // windowless process alive — a lingering instance blocks the next
-    // launch and reads as "the editor won't open anymore"
-    setTimeout(() => app.exit(0), 2500)
+    // launch and reads as "the editor won't open anymore". On a clean close
+    // force-exit quickly: a slow GPU-process teardown (NVIDIA PRIME offload)
+    // otherwise makes closing hang for seconds. Give an export longer to flush.
+    setTimeout(() => app.exit(0), exportState ? 2500 : 400)
   }
 })
 
@@ -313,11 +342,16 @@ let proxyChain: Promise<unknown> = Promise.resolve()
 async function requestProxy(
   srcPath: string,
   duration: number,
-  opts?: { alpha?: boolean; codec?: string }
+  opts?: { alpha?: boolean; codec?: string; audioOnly?: boolean }
 ): Promise<string> {
   const stat = statSync(srcPath)
-  // alpha proxies are a different artifact (webm) — separate cache identity
-  const key = mediaCacheKey(srcPath, stat.size, stat.mtimeMs, proxySuffix(opts?.alpha))
+  // alpha proxies are a different artifact (webm), and an audio-only proxy
+  // (a music/voice file with an undecodable codec) yet another — each needs
+  // its own cache identity
+  const key = mediaCacheKey(
+    srcPath, stat.size, stat.mtimeMs,
+    proxySuffix(opts?.alpha) + (opts?.audioOnly ? '-a' : '')
+  )
   const ext = opts?.alpha ? 'webm' : 'mp4'
   const out = join(proxyDir(), `${key}.${ext}`)
   try {
@@ -542,9 +576,33 @@ async function rememberDir(kind: string, filePath: string) {
   } catch { /* best effort */ }
 }
 
+// Is NVIDIA hardware H.264 encoding actually usable? Listing h264_nvenc in
+// -encoders is NOT enough: ffmpeg's bundled NVENC SDK can be newer than the
+// installed driver (e.g. build needs NVENC API 13.1 but the driver only has
+// 13.0), and it fails only at encode time. So we run a real 1-frame encode and
+// trust the exit code — a mismatch just leaves the NVENC option off and x264 is
+// used, instead of a hard export error. Probed once, cached.
+let nvencCache: boolean | null = null
+function nvencAvailable(): boolean {
+  if (nvencCache !== null) return nvencCache
+  try {
+    if (!existsSync('/dev/nvidia0')) return (nvencCache = false)
+    const ff = process.env.KADR_FFMPEG || 'ffmpeg'
+    const r = spawnSync(ff, [
+      '-hide_banner', '-v', 'error',
+      '-f', 'lavfi', '-i', 'color=c=black:s=64x64:d=1',
+      '-frames:v', '1', '-c:v', 'h264_nvenc', '-f', 'null', '-'
+    ], { timeout: 15000 })
+    nvencCache = r.status === 0
+  } catch {
+    nvencCache = false
+  }
+  return nvencCache
+}
+
 function registerIpc() {
   ipcMain.handle('proxy:request', (_e, srcPath: string, duration: number,
-    opts?: { alpha?: boolean; codec?: string }) =>
+    opts?: { alpha?: boolean; codec?: string; audioOnly?: boolean }) =>
     requestProxy(srcPath, duration, opts)
   )
 
@@ -580,6 +638,36 @@ function registerIpc() {
     await fs.writeFile(userStorePath(name), JSON.stringify(data, null, 1))
   })
 
+  ipcMain.handle('nvenc:available', () => nvencAvailable())
+  ipcMain.handle('gpu:list', () => enumerateGpus())
+  // called from Settings only when the user can SEE the switched GPU works —
+  // a blank window can't confirm, so it heals to auto on the next launch
+  ipcMain.handle('gpu:confirm', () => confirmGpuTrial())
+  ipcMain.handle('gpu:relaunch', () => {
+    // spawn a fresh top-level process (not app.relaunch) so cleanRelaunchEnv can
+    // clear the NVIDIA offload vars / x11 hint and a dev-server URL — the new
+    // process re-reads gpu.json and applies the chosen GPU from scratch.
+    // drop any --ozone-platform=x11 the NVIDIA path added, so a switch back to
+    // Intel runs native Wayland; the new process re-adds x11 only if it picks NVIDIA
+    const relaunchArgs = process.argv.slice(1).filter((a) => !a.startsWith('--ozone-platform'))
+    // KNOWN, dev-only: a relaunch loses --remote-debugging-port. Chromium's
+    // DevTools listening socket has no CLOEXEC, so the child inherits the fd;
+    // its own bind then fails with EADDRINUSE against itself, no DevTools
+    // server starts (DevToolsActivePort is never rewritten), and the socket
+    // sits in LISTEN with nobody accepting — Recv-Q climbs to the backlog and
+    // every CDP client hangs. Measured: the socket inode is IDENTICAL either
+    // side of a switch, so it is the same socket, not a re-bind. Waiting for
+    // this process to exit first does NOT help — the fd is duplicated at spawn,
+    // long before any wait. Only affects runs started with a debugging port
+    // (e2e, automation); relaunch from the terminal to get one back.
+    spawn(process.execPath, relaunchArgs, {
+      env: cleanRelaunchEnv(),
+      detached: true,
+      stdio: 'ignore'
+    }).unref()
+    app.exit(0)
+  })
+
   ipcMain.handle('media:open-dialog', async () => {
     const r = await dialog.showOpenDialog(win!, {
       properties: ['openFile', 'multiSelections'],
@@ -593,6 +681,16 @@ function registerIpc() {
 
   ipcMain.on('media:token', (e) => { e.returnValue = MEDIA_TOKEN })
   ipcMain.handle('media:probe', (_e, path: string) => probeMedia(path))
+  // cheap freshness check for the import dedupe — a re-import of a file
+  // overwritten with the same name should refresh, not reuse the stale asset
+  ipcMain.handle('media:stat', (_e, path: string) => {
+    try {
+      const s = statSync(path)
+      return { mtimeMs: s.mtimeMs, size: s.size }
+    } catch {
+      return null
+    }
+  })
 
   // sanitized basename + MIME-derived extension for downloaded/pasted media
   const mediaBase = (name: string, mime: string): string => {
@@ -808,7 +906,9 @@ function registerIpc() {
 
   ipcMain.handle('export:begin', async (_e, job: ExportJob) => {
     await cleanupExport()
-    const videoTemp = join(tmpdir(), `kadr-export-${Date.now()}.mp4`)
+    // disk-backed temp (KADR_TMPDIR) — os.tmpdir() is often a small tmpfs (see
+    // runtime-env.ts); a multi-GB export intermediate overflows it otherwise
+    const videoTemp = join(process.env.KADR_TMPDIR || tmpdir(), `kadr-export-${Date.now()}.mp4`)
     const fh = job.preset.audioOnly ? null : await fs.open(videoTemp, 'w')
     exportState = {
       job, videoTemp, fh, muxer: null, raw: null, rawEncoded: false,
@@ -937,4 +1037,27 @@ async function cleanupExport() {
   st.rawWss?.close()
   try { await st.fh?.close() } catch { /* already closed */ }
   try { await fs.unlink(st.videoTemp) } catch { /* never created */ }
+}
+
+// Delete raw-export / mux temp files (kadr-export[-raw]-<ts>.mp4) orphaned by a
+// previous crash or hard kill — these intermediates can be multi-GB. Only files
+// older than a minute are touched, so a concurrent instance's live export (temps
+// named by Date.now()) is never removed. Covers KADR_TMPDIR and os.tmpdir()
+// (leftovers from before temps moved off the tmpfs).
+async function sweepExportTemps() {
+  const cutoff = Date.now() - 60_000
+  const dirs = new Set([process.env.KADR_TMPDIR, tmpdir()].filter(Boolean) as string[])
+  for (const dir of dirs) {
+    let names: string[]
+    try {
+      names = await fs.readdir(dir)
+    } catch { continue } // dir missing — nothing to sweep
+    for (const name of names) {
+      if (!/^kadr-export(-raw)?-\d+\.mp4$/.test(name)) continue
+      const p = join(dir, name)
+      try {
+        if ((await fs.stat(p)).mtimeMs < cutoff) await fs.unlink(p)
+      } catch { /* raced with another cleanup */ }
+    }
+  }
 }

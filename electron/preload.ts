@@ -20,13 +20,21 @@ const MEDIA_TOKEN: string = ipcRenderer.sendSync('media:token')
 
 const api: KadrApi = {
   rawEncodeStart: (o) => {
-    const out = join(tmpdir(), `kadr-export-raw-${Date.now()}.mp4`)
+    // disk-backed temp (KADR_TMPDIR) — os.tmpdir() is often a small tmpfs that a
+    // big export overflows mid-encode (see runtime-env.ts)
+    const out = join(process.env.KADR_TMPDIR || tmpdir(), `kadr-export-raw-${Date.now()}.mp4`)
     const child = spawn(process.env.KADR_FFMPEG || 'ffmpeg', rawEncodeArgs({ ...o, out }), {
       stdio: ['pipe', 'ignore', 'pipe']
     })
     rawEnc = child
     rawEncErr = ''
     child.stderr!.on('data', (c) => { rawEncErr += c })
+    // Killing the encoder (a cancelled or aborted export) breaks this pipe
+    // mid-write, and a stdin stream with no 'error' listener turns that EPIPE
+    // into an uncaught exception — three "сбой" rows in the session log every
+    // time someone cancels an export. The failure is already delivered where it
+    // can be acted on: the write callback below, and rawEncExit.
+    child.stdin!.on('error', () => { /* see rawEncodeFrame / rawEncExit */ })
     rawEncExit = new Promise<void>((resolve, reject) => {
       child.on('close', (code) => {
         rawEnc = null
@@ -73,6 +81,7 @@ const api: KadrApi = {
 
   openMediaDialog: () => ipcRenderer.invoke('media:open-dialog'),
   probeMedia: (path) => ipcRenderer.invoke('media:probe', path),
+  statMedia: (path) => ipcRenderer.invoke('media:stat', path),
   fileUrl: (path) => {
     // Windows paths (D:\dir\file) must become /D:/dir/file — a raw drive
     // letter glued after the host ('kadr://mediaD:\…') is an INVALID URL:
@@ -161,6 +170,7 @@ const api: KadrApi = {
     return () => ipcRenderer.removeListener('fragment:progress', handler)
   },
 
+  defaultWhisperModel: process.env.KADR_WHISPER_MODEL || '',
   ttsSpeakPhrase: (req) => ipcRenderer.invoke('tts:speak-phrase', req),
   voiceSplice: (req) => ipcRenderer.invoke('voice:splice', req),
   voiceSilenceAt: (path, at) => ipcRenderer.invoke('voice:silence-at', path, at),
@@ -214,7 +224,13 @@ const api: KadrApi = {
     const handler = (_e: unknown, code: number) => cb(code)
     ipcRenderer.on('claude:exit', handler)
     return () => ipcRenderer.removeListener('claude:exit', handler)
-  }
+  },
+
+  defaultGpuPower: process.env.KADR_GPU_POWER || '',
+  nvencAvailable: () => ipcRenderer.invoke('nvenc:available'),
+  gpuList: () => ipcRenderer.invoke('gpu:list'),
+  gpuConfirm: () => { void ipcRenderer.invoke('gpu:confirm') },
+  relaunchApp: () => { void ipcRenderer.invoke('gpu:relaunch') }
 }
 
 // contextIsolation is off (see main.ts: export frames pass by reference),

@@ -49,7 +49,10 @@ export function evalAnim(a: Anim | number | undefined, t: number): number {
         }
         return k0.value + (k1.value - k0.value) * f
       }
-      return k0.value + (k1.value - k0.value) * ease[k0.easing](f)
+      // easing may be missing/unknown on script-written or foreign keyframes;
+      // fall back to linear rather than throwing (an unguarded ease[…] would
+      // blow up drawFrame and black out the whole frame).
+      return k0.value + (k1.value - k0.value) * (ease[k0.easing] ?? ease.linear)(f)
     }
   }
   return last.value

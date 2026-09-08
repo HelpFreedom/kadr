@@ -26,9 +26,10 @@ uniform float uPackHalfTexel;          // half texel of the packed texture (v un
 uniform float uOpacity;
 uniform vec4 uCrop;                    // left, top, right, bottom cut fractions
 uniform int uShapeCount;
-uniform int uShapeType[MAX_SHAPES];    // 1 rect, 2 ellipse, 3 triangle
+uniform int uShapeType[MAX_SHAPES];    // 1 rect, 2 ellipse, 3 triangle, 4 roundrect
 uniform vec4 uShapeRect[MAX_SHAPES];   // cx, cy, halfW, halfH in UV
 uniform vec3 uShapeFeather[MAX_SHAPES];// featherIn, featherOut, invert flag
+uniform float uShapeRadius[MAX_SHAPES];// corner radius (y-height units), roundrect only
 uniform float uAspect;                 // layer width/height (aspect-correct distances)
 out vec4 outColor;
 
@@ -75,6 +76,11 @@ void main() {
         d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
       } else if (uShapeType[i] == 2) {
         d = (length(p / b) - 1.0) * min(b.x, b.y);
+      } else if (uShapeType[i] == 4) {
+        // rounded box: sharp box shrunk by rr then re-expanded (rr=0 ⇒ rect)
+        float rr = clamp(uShapeRadius[i], 0.0, min(b.x, b.y));
+        vec2 q = abs(p) - b + rr;
+        d = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - rr;
       } else {
         vec2 v0 = vec2(0.0, -b.y);
         vec2 v1 = vec2(b.x, b.y);
@@ -227,13 +233,15 @@ export interface LayerDraw {
 }
 
 export interface ShapeUniform {
-  type: 1 | 2 | 3 // rect | ellipse | triangle
+  type: 1 | 2 | 3 | 4 // rect | ellipse | triangle | roundrect
   cx: number
   cy: number
   halfW: number
   halfH: number
   featherIn: number
   featherOut: number
+  /** corner radius for roundrect (y-height fractions); ignored by other types */
+  radius?: number
   invert: boolean
 }
 
@@ -302,6 +310,7 @@ export class Compositor {
   private uShapeType: WebGLUniformLocation
   private uShapeRect: WebGLUniformLocation
   private uShapeFeather: WebGLUniformLocation
+  private uShapeRadius: WebGLUniformLocation
   private uAspect: WebGLUniformLocation
   private textures = new Map<string, TexEntry>()
   private frame = 0
@@ -310,11 +319,17 @@ export class Compositor {
 
   constructor(canvas: HTMLCanvasElement | OffscreenCanvas) {
     this.canvas = canvas
+    // powerPreference nudges Chromium toward the discrete GPU when the user
+    // picked one (main sets KADR_GPU_POWER → preload's defaultGpuPower).
+    const power = window.kadr?.defaultGpuPower
     const gl = canvas.getContext('webgl2', {
       alpha: false,
       antialias: false,
       preserveDrawingBuffer: true,
-      desynchronized: true
+      desynchronized: true,
+      ...(power === 'high-performance' || power === 'low-power'
+        ? { powerPreference: power }
+        : {})
     }) as WebGL2RenderingContext | null
     if (!gl) throw new Error('WebGL2 is not available')
     this.gl = gl
@@ -330,6 +345,7 @@ export class Compositor {
     this.uShapeType = gl.getUniformLocation(prog, 'uShapeType[0]')!
     this.uShapeRect = gl.getUniformLocation(prog, 'uShapeRect[0]')!
     this.uShapeFeather = gl.getUniformLocation(prog, 'uShapeFeather[0]')!
+    this.uShapeRadius = gl.getUniformLocation(prog, 'uShapeRadius[0]')!
     this.uAspect = gl.getUniformLocation(prog, 'uAspect')!
 
     this.vbo = gl.createBuffer()!
@@ -517,14 +533,17 @@ export class Compositor {
       const types = new Int32Array(MAX_SHAPES)
       const rects = new Float32Array(MAX_SHAPES * 4)
       const feathers = new Float32Array(MAX_SHAPES * 3)
+      const radii = new Float32Array(MAX_SHAPES)
       shapes.forEach((s, i) => {
         types[i] = s.type
         rects.set([s.cx, s.cy, s.halfW, s.halfH], i * 4)
         feathers.set([s.featherIn, s.featherOut, s.invert ? 1 : 0], i * 3)
+        radii[i] = s.radius ?? 0
       })
       gl.uniform1iv(this.uShapeType, types)
       gl.uniform4fv(this.uShapeRect, rects)
       gl.uniform3fv(this.uShapeFeather, feathers)
+      gl.uniform1fv(this.uShapeRadius, radii)
       gl.uniform1f(this.uAspect, l.srcWidth / Math.max(1, l.srcHeight))
     }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)

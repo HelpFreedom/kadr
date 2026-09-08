@@ -1,5 +1,5 @@
 // Test: Remotion fragments — create over a range (clip on a fresh top
-// track, ≥60 fps meta), live preview overlay iframe, hot file edits keep it
+// track, meta at the project fps), live preview overlay iframe, hot file edits keep it
 // alive, one-shot final render (vp9 alpha webm), export materialization
 // composites the fragment over a video, MCP exposes kadr_fragment_create.
 // Requires the workspace to be installed (first fragmentEnsure run).
@@ -114,11 +114,13 @@ try {
     const overlapping = track?.clips.filter(c =>
       c.id !== r.clipId && c.start < 2 && c.start + c.duration > 1).length
     return { id: r.id, entry: r.entry, kind: clip?.kind, fps: clip?.fragmentMeta?.fps,
-             trackKind: track?.kind, overlapping }
+             projectFps: st().project.fps, trackKind: track?.kind, overlapping }
   })()`)
   fragId = created.id
+  // the fragment samples at the project fps: forcing ≥60 doubled the PNG frame
+  // pile for 30 fps projects with no visible gain in a 30 fps export
   check('fragment created as a remotion clip on a free video track',
-    created.kind === 'remotion' && created.fps >= 60 &&
+    created.kind === 'remotion' && created.fps === created.projectFps &&
     created.trackKind === 'video' && created.overlapping === 0,
     JSON.stringify(created))
 
@@ -189,8 +191,8 @@ try {
     partsOf().length === 0 && existsSync(rendered.path), partsOf().join(','))
   const probe = execFileSync('ffprobe', ['-v', 'error', '-show_entries',
     'stream=codec_name,width,r_frame_rate', '-of', 'csv', rendered.path]).toString()
-  check('render is vp9 at 60 fps, project width',
-    probe.includes('vp9') && probe.includes('60/1'), probe.trim().split('\n')[0])
+  check('render is vp9 at the project fps, project width',
+    probe.includes('vp9') && probe.includes(`${created.fps}/1`), probe.trim().split('\n')[0])
 
   // 5) export composites the fragment over an underlying video
   await evalJs(`(async () => {

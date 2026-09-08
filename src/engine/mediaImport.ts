@@ -7,6 +7,21 @@ import { logError, logWarn } from './log'
 /** files/URLs currently being imported (drop or dialog) — drives the '…' hint */
 export const useImportUi = create<{ active: number }>(() => ({ active: 0 }))
 
+/** The UI installs this so that dropping/importing the first media into an
+ *  empty project can ask for a project format (resolve dims, or null = keep
+ *  current). Set to null when no UI is mounted. */
+export type ProjectFormatResolver = (
+  probe: { width: number; height: number; fps: number }
+) => Promise<{ width: number; height: number; fps: number } | null>
+let formatResolver: ProjectFormatResolver | null = null
+export function setProjectFormatResolver(fn: ProjectFormatResolver | null): void {
+  formatResolver = fn
+}
+function projectIsEmpty(): boolean {
+  const p = useEditor.getState().project
+  return p.assets.length === 0 && p.tracks.every((tr) => tr.clips.length === 0)
+}
+
 /**
  * Import files by absolute path: probe each into a bin asset (paths already
  * in the bin are reused, not duplicated), register srt/txt as text docs, and
@@ -31,6 +46,8 @@ async function importFilesInner(
   place: { trackId: string | null; at: number } | null
 ): Promise<string[]> {
   const st = useEditor.getState
+  // the first media into a fresh project may set the project format
+  const wasEmpty = projectIsEmpty()
   const assetIds: string[] = []
   const textDocs: TextDoc[] = []
   for (const path of paths) {
@@ -46,6 +63,22 @@ async function importFilesInner(
     }
     const existing = st().project.assets.find((a) => a.path === path)
     if (existing) {
+      // reuse only if the file on disk hasn't changed; a same-name overwrite
+      // (new mtime) re-probes and refreshes the asset in place, keeping its id
+      // so every clip that references it picks up the new pixels/waveform/dims.
+      const stat = await window.kadr.statMedia(path).catch(() => null)
+      const unchanged =
+        !stat || (existing.mtimeMs != null && Math.round(stat.mtimeMs) === Math.round(existing.mtimeMs))
+      if (unchanged) {
+        assetIds.push(existing.id)
+        continue
+      }
+      try {
+        const { asset } = await window.kadr.probeMedia(path)
+        st().updateAsset(existing.id, asset)
+      } catch (err) {
+        console.error('re-probe failed', path, err)
+      }
       assetIds.push(existing.id)
       continue
     }
@@ -59,6 +92,20 @@ async function importFilesInner(
     }
   }
   if (textDocs.length) st().addTexts(textDocs)
+  // fresh project + a video just landed → offer to set the project format
+  if (wasEmpty && formatResolver && assetIds.length) {
+    const vid = st().project.assets.find(
+      (a) => assetIds.includes(a.id) && a.kind === 'video'
+    )
+    if (vid) {
+      const choice = await formatResolver({ width: vid.width, height: vid.height, fps: vid.fps })
+      if (choice) {
+        useEditor.setState((s) => ({
+          project: { ...s.project, width: choice.width, height: choice.height, fps: choice.fps }
+        }))
+      }
+    }
+  }
   if (place && assetIds.length) {
     st().insertClipsFromAssets(assetIds, place.trackId, place.at)
   }

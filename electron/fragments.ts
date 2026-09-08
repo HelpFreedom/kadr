@@ -295,21 +295,33 @@ async function ensureWorkspace(
   let installed = false
   if (!existsSync(join(WORKSPACE, 'node_modules', 'remotion'))) {
     onProgress?.('install', 0)
-    const extraEnv = await netEnv()
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn('npm', ['install', '--no-audit', '--no-fund'], {
-        cwd: WORKSPACE,
-        env: { ...process.env, ...extraEnv },
-        stdio: ['ignore', 'pipe', 'pipe']
+    // Packaged builds ship a pre-installed node_modules (resources/
+    // kadr-fragments-seed) so the first fragment needs neither host npm nor a
+    // ~150 MB network install. Copy it once; if the seed's browser cache came
+    // along inside node_modules it travels for free. No seed (dev, or a lite
+    // build) → fall back to a live `npm install` with the bundled node/npm.
+    const seed = app.isPackaged
+      ? join(process.resourcesPath, 'kadr-fragments-seed', 'node_modules')
+      : ''
+    if (seed && existsSync(join(seed, 'remotion'))) {
+      await fs.cp(seed, join(WORKSPACE, 'node_modules'), { recursive: true })
+    } else {
+      const extraEnv = await netEnv()
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('npm', ['install', '--no-audit', '--no-fund'], {
+          cwd: WORKSPACE,
+          env: { ...process.env, ...extraEnv },
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
+        let err = ''
+        child.stderr.on('data', (c) => { err += c })
+        child.on('error', reject)
+        child.on('close', (code) => {
+          if (code === 0) resolve()
+          else reject(new Error(`npm install failed (${code}): ${err.slice(-600)}`))
+        })
       })
-      let err = ''
-      child.stderr.on('data', (c) => { err += c })
-      child.on('error', reject)
-      child.on('close', (code) => {
-        if (code === 0) resolve()
-        else reject(new Error(`npm install failed (${code}): ${err.slice(-600)}`))
-      })
-    })
+    }
     installed = true
     onProgress?.('install', 1)
   }
@@ -420,7 +432,9 @@ async function createFragment(spec: FragmentSpec, projectDir?: string | null): P
     name: spec.name,
     width: Math.round(spec.width),
     height: Math.round(spec.height),
-    fps: Math.max(60, Math.round(spec.fps)),
+    // honor the requested (project) fps — forcing ≥60 doubled the PNG frame
+    // pile on tmpfs for 30 fps projects (see renderFragment TMPDIR handling)
+    fps: Math.max(1, Math.round(spec.fps)),
     durationInFrames: Math.max(1, Math.round(spec.durationInFrames)),
     transparent: !!spec.transparent
   }
@@ -516,15 +530,47 @@ function fragmentHash(id: string): string {
 const renderDir = () => join(app.getPath('userData'), 'fragment-renders')
 let renderChain: Promise<unknown> = Promise.resolve()
 
+/** Fail fast (with a clear message) if the temp filesystem can't hold the PNG
+ *  frame pile Remotion produces. ~0.25 B/px/frame is conservative vs the
+ *  ~0.18 B/px measured on flat fills. Best-effort: skips if it can't estimate. */
+async function ensureRenderSpace(
+  dir: string,
+  meta: { width?: number; height?: number; durationInFrames?: number }
+): Promise<void> {
+  const { width, height, durationInFrames } = meta
+  if (!width || !height || !durationInFrames) return
+  let free: number
+  try {
+    const st = await fs.statfs(dir)
+    free = st.bavail * st.bsize
+  } catch {
+    return // statfs unavailable — skip the guard rather than block the render
+  }
+  const est = width * height * 0.25 * durationInFrames
+  if (free < est) {
+    const gb = (n: number) => (n / 1e9).toFixed(2)
+    throw new Error(
+      `Not enough disk for this fragment render: ~${gb(est)} GB of temp frames ` +
+      `(${durationInFrames} × ${width}×${height} PNG) but only ${gb(free)} GB free ` +
+      `at ${dir}. Free up space, or lower the fragment resolution/fps/length.`
+    )
+  }
+}
+
 async function renderFragment(
   id: string,
   opts: { transparent?: boolean } | undefined,
   onProgress: (p: number) => void
 ): Promise<{ path: string; cached: boolean }> {
   await ensureWorkspace()
+  // Heal the registry against the folders actually on disk BEFORE bundling: a
+  // fragment folder deleted outside the app (rm -rf) would otherwise leave a
+  // stale `import … from './<gone>'` in src/fragments/index.ts and fail the render.
+  await regenRegistry()
   let transparent = !!opts?.transparent
+  let meta: { width?: number; height?: number; durationInFrames?: number; transparent?: boolean } = {}
   try {
-    const meta = JSON.parse(await fs.readFile(join(FRAG_DIR(), id, 'meta.json'), 'utf8'))
+    meta = JSON.parse(await fs.readFile(join(FRAG_DIR(), id, 'meta.json'), 'utf8'))
     if (opts?.transparent === undefined) transparent = !!meta.transparent
   } catch { /* meta is optional for the decision */ }
   const ext = transparent ? 'webm' : 'mp4'
@@ -555,6 +601,15 @@ async function renderFragment(
   if (transparent) args.push('--codec=vp9', '--pixel-format=yuva420p', '--crf=12')
   else args.push('--codec=h264', '--crf=15')
 
+  // Remotion writes every frame as a full-res PNG to the OS temp dir before
+  // muxing. On this machine /tmp is a small tmpfs (~1.8 GB free) and a 4K
+  // fragment overflowed it mid-render (EDQUOT at ~90%). Redirect Remotion's
+  // temp to a disk-backed dir under userData, and pre-flight the space so we
+  // fail up front with a clear message instead of after a 10-minute render.
+  const tmpDir = join(app.getPath('userData'), 'fragment-tmp')
+  await fs.mkdir(tmpDir, { recursive: true })
+  await ensureRenderSpace(tmpDir, meta)
+
   const extraEnv = await netEnv()
   const job = renderChain.then(async () => {
     try {
@@ -565,7 +620,8 @@ async function renderFragment(
       await new Promise<void>((resolve, reject) => {
         const child = spawn('npx', args, {
           cwd: WORKSPACE,
-          env: { ...process.env, ...extraEnv },
+          // TMPDIR: keep Remotion's per-frame PNGs off the tmpfs (see above)
+          env: { ...process.env, ...extraEnv, TMPDIR: tmpDir },
           stdio: ['ignore', 'pipe', 'pipe']
         })
         let all = ''

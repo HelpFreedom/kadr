@@ -50,14 +50,15 @@ const MASK_PARAMS: ParamDef[] = [
   { key: 'mB', label: 'maskBottom', step: 0.01, min: 0, max: 0.49, get: (c) => maskOf(c).bottom, patch: (c, a) => ({ mask: { ...maskOf(c), bottom: a } }) }
 ]
 
-type ShapeField = 'cx' | 'cy' | 'w' | 'h' | 'featherIn' | 'featherOut'
+type ShapeField = 'cx' | 'cy' | 'w' | 'h' | 'featherIn' | 'featherOut' | 'radius'
 
 function shapeParam(
   i: number, field: ShapeField, label: TKey, step: number, min: number, max: number
 ): ParamDef {
+  const zeroDefault = field === 'featherIn' || field === 'featherOut' || field === 'radius'
   return {
     key: `s${i}.${field}`, label, step, min, max,
-    get: (c) => shapesOf(c)[i]?.[field] ?? defAnim(field === 'featherIn' || field === 'featherOut' ? 0 : 0.5),
+    get: (c) => shapesOf(c)[i]?.[field] ?? defAnim(zeroDefault ? 0 : 0.5),
     patch: (c, a) => patchShapes(shapesOf(c).map((s, j) => (j === i ? { ...s, [field]: a } : s)))
   }
 }
@@ -423,7 +424,8 @@ export function AnimEditor({ width }: { width: number }) {
     const newShape: MaskShape = {
       type,
       cx: defAnim(a.u), cy: defAnim(a.v), w: defAnim(0.05), h: defAnim(0.05),
-      featherIn: defAnim(0), featherOut: defAnim(0), invert: false
+      featherIn: defAnim(0), featherOut: defAnim(0), invert: false,
+      ...(type === 'roundrect' ? { radius: defAnim(0.08) } : {})
     }
     const f0 = findClip(st.project, clip.id)
     if (!f0) return
@@ -506,7 +508,8 @@ export function AnimEditor({ width }: { width: number }) {
           invert: s.invert,
           cx: evalAnim(s.cx, rel), cy: evalAnim(s.cy, rel),
           w: evalAnim(s.w, rel), h: evalAnim(s.h, rel),
-          featherIn: evalAnim(s.featherIn, rel), featherOut: evalAnim(s.featherOut, rel)
+          featherIn: evalAnim(s.featherIn, rel), featherOut: evalAnim(s.featherOut, rel),
+          ...(s.radius ? { radius: evalAnim(s.radius, rel) } : {})
         }))
       })
     }
@@ -555,7 +558,10 @@ export function AnimEditor({ width }: { width: number }) {
       })
       const f2 = findClip(useEditor.getState().project, clip.id)
       if (f2) useEditor.getState().updateClip(clip.id, patchShapes(
-        shapesOf(f2.clip).map((s, i) => ({ ...s, type: ps[i].type, invert: ps[i].invert }))
+        shapesOf(f2.clip).map((s, i) => ({
+          ...s, type: ps[i].type, invert: ps[i].invert,
+          ...(ps[i].radius != null ? { radius: defAnim(ps[i].radius!) } : {})
+        }))
       ))
     } else {
       // different layout — replace with the preset's shapes as static values
@@ -563,7 +569,8 @@ export function AnimEditor({ width }: { width: number }) {
         type: s.type,
         invert: s.invert,
         cx: defAnim(s.cx), cy: defAnim(s.cy), w: defAnim(s.w), h: defAnim(s.h),
-        featherIn: defAnim(s.featherIn), featherOut: defAnim(s.featherOut)
+        featherIn: defAnim(s.featherIn), featherOut: defAnim(s.featherOut),
+        ...(s.radius != null ? { radius: defAnim(s.radius) } : {})
       }))))
     }
   }
@@ -778,6 +785,7 @@ export function AnimEditor({ width }: { width: number }) {
   const shapeTools: { id: Tool; icon: IconName; title: TKey }[] = [
     { id: 'edges', icon: 'crop', title: 'toolEdges' },
     { id: 'rect', icon: 'square', title: 'toolRect' },
+    { id: 'roundrect', icon: 'squircle', title: 'toolRoundrect' },
     { id: 'ellipse', icon: 'circle', title: 'toolEllipse' },
     { id: 'triangle', icon: 'triangle', title: 'toolTriangle' }
   ]
@@ -925,6 +933,19 @@ export function AnimEditor({ width }: { width: number }) {
               onChange={(e) => write(selShapeParams[5], Number(e.target.value))}
             />
           </label>
+          {sel.type === 'roundrect' && (
+            <label>
+              {t('shapeRadius')}
+              <input
+                type="range" min={0} max={0.5} step={0.005}
+                value={sel.radius ? evalAnim(sel.radius, rel) : 0}
+                onPointerDown={() => push(gestureLabel())}
+                onChange={(e) =>
+                  write(shapeParam(selIdx, 'radius', 'shapeRadius', 0.005, 0, 0.5), Number(e.target.value))
+                }
+              />
+            </label>
+          )}
         </div>
       )}
 

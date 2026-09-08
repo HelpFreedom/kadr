@@ -4,18 +4,39 @@
 // text to the renderer. One job at a time.
 import { app, ipcMain, BrowserWindow } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
-import { promises as fs } from 'fs'
+import { promises as fs, existsSync } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 import { ExportMuxer, mixdownWav } from './ffmpeg'
 import type { TranscribeRequest, TranscribeResult, TranscribeSegment } from '@shared/types'
 
 let current: { muxer: ExportMuxer | null; py: ChildProcess | null; cancelled: boolean } | null = null
 
+// A whisper model bundled by `pack.sh --model` (resources/runtime/whisper-seed)
+// is copied into the user's writable HF cache on first use, so faster-whisper
+// finds it there instead of downloading — and the read-only /opt copy is never
+// written to. One-time; dev or no-bundle → no-op, falling back to on-demand DL.
+let seededModels = false
+async function seedBundledModels(): Promise<void> {
+  if (seededModels || !app.isPackaged) return
+  seededModels = true
+  try {
+    const srcHub = join(process.resourcesPath, 'runtime', 'whisper-seed', 'hub')
+    if (!existsSync(srcHub)) return
+    const dstHub = join(homedir(), '.cache', 'huggingface', 'hub')
+    await fs.mkdir(dstHub, { recursive: true })
+    for (const name of await fs.readdir(srcHub)) {
+      if (!name.startsWith('models--') || existsSync(join(dstHub, name))) continue
+      await fs.cp(join(srcHub, name), join(dstHub, name), { recursive: true })
+    }
+  } catch { /* fall back to on-demand download */ }
+}
+
 async function run(win: BrowserWindow, req: TranscribeRequest): Promise<TranscribeResult> {
   if (current) throw new Error('transcription already running')
   const job = { muxer: null as ExportMuxer | null, py: null as ChildProcess | null, cancelled: false }
   current = job
+  await seedBundledModels()
   const wav = join(tmpdir(), `kadr-transcribe-${Date.now()}.wav`)
   const send = (progress: number, text: string) =>
     win.webContents.send('transcribe:progress', { progress, text })

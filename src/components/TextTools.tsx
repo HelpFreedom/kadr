@@ -32,7 +32,8 @@ export const useTextUi = create<TextUiState>((set) => ({
 export function TranscribeDialog() {
   const t = useT()
   const target = useTextUi((s) => s.transcribeTarget)
-  const [model, setModel] = useState('large-v3')
+  const bundledModel = window.kadr.defaultWhisperModel
+  const [model, setModel] = useState(bundledModel || 'large-v3')
   const [language, setLanguage] = useState('auto')
   const [timecodes, setTimecodes] = useState<'absolute' | 'relative'>('absolute')
   const [maxWords, setMaxWords] = useState(3)
@@ -111,6 +112,9 @@ export function TranscribeDialog() {
       <label className="insp-field">
         <span>{t('trModel')}</span>
         <select value={model} disabled={running} onChange={(e) => setModel(e.target.value)}>
+          {bundledModel && !['large-v3', 'medium', 'base'].includes(bundledModel) && (
+            <option value={bundledModel}>{bundledModel}</option>
+          )}
           <option value="large-v3">large-v3 — {t('trBest')}</option>
           <option value="medium">medium — {t('trFaster')}</option>
           <option value="base">base — {t('trDraft')}</option>

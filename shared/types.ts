@@ -21,6 +21,8 @@ export interface MediaAsset {
   height: number
   fps: number
   hasAudio: boolean
+  /** ffprobe audio codec_name (e.g. 'aac', 'ac3'); drives preview-proxy need */
+  audioCodec?: string
   /** data: URL of a poster frame, generated on import */
   thumbnail?: string
   /** poster of the last frame (clip tails show it on the timeline) */
@@ -36,6 +38,9 @@ export interface MediaAsset {
   proxyPath?: string
   /** this asset is a reversed render of a source range of another asset */
   reverseOf?: { assetId: string; start: number; duration: number }
+  /** source file mtime at probe time — lets a re-import of an overwritten
+      same-name file refresh the asset instead of reusing the stale one */
+  mtimeMs?: number
 }
 
 export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'hold'
@@ -86,7 +91,7 @@ export interface ClipMask {
   bottom: Anim
 }
 
-export type MaskShapeType = 'rect' | 'ellipse' | 'triangle'
+export type MaskShapeType = 'rect' | 'ellipse' | 'triangle' | 'roundrect'
 
 /** Drawn shape mask in layer UV space (0..1), with soft borders. */
 export interface MaskShape {
@@ -98,6 +103,8 @@ export interface MaskShape {
   /** soft border inward / outward, in layer-height fractions */
   featherIn: Anim
   featherOut: Anim
+  /** corner radius for 'roundrect', in layer-height fractions (0 = sharp) */
+  radius?: Anim
   /** exclude mode: the shape cuts a hole instead of keeping its inside */
   invert: boolean
 }
@@ -223,6 +230,8 @@ export interface PoseShape {
   h: number
   featherIn: number
   featherOut: number
+  /** corner radius for 'roundrect' (y-height fractions) */
+  radius?: number
 }
 
 export interface PosePreset {
@@ -874,6 +883,8 @@ export interface StoragePruneResult {
 export interface KadrApi {
   openMediaDialog(): Promise<string[]>
   probeMedia(path: string): Promise<ProbeResult>
+  /** cheap stat for the import dedupe (mtime/size), or null if unreadable */
+  statMedia(path: string): Promise<{ mtimeMs: number; size: number } | null>
   fileUrl(path: string): string
   /** Absolute path of a File dropped from the OS (File.path is gone since
       Electron 32 — this goes through webUtils.getPathForFile). */
@@ -917,9 +928,11 @@ export interface KadrApi {
   ): () => void
 
   /** Build (or reuse) a preview proxy; resolves with the proxy file path.
-      Alpha sources get a VP9+alpha WebM proxy instead of H.264. */
+      Alpha sources get a VP9+alpha WebM proxy instead of H.264; audioOnly
+      transcodes just the audio to AAC (a music/voice file whose codec Chromium
+      can't decode). */
   requestProxy(path: string, duration: number,
-    opts?: { alpha?: boolean; codec?: string }): Promise<string>
+    opts?: { alpha?: boolean; codec?: string; audioOnly?: boolean }): Promise<string>
   onProxyProgress(cb: (p: { path: string; progress: number }) => void): () => void
   /** Full-resolution intermediate for sources Chromium cannot decode
       (e.g. HEVC without VAAPI, ProRes): H.264, or VP9+alpha WebM for alpha
@@ -988,6 +1001,8 @@ export interface KadrApi {
   onFragmentProgress(cb: (p: { id: string; phase: string; progress: number }) => void): () => void
 
   /** Mix the request's audio to a temp wav and run Whisper over it. */
+  /** whisper model pre-bundled in the packaged app ('' if none); subtitles default to it */
+  defaultWhisperModel: string
   transcribe(req: TranscribeRequest): Promise<TranscribeResult>
   transcribeCancel(): Promise<void>
   onTranscribeProgress(cb: (p: { progress: number; text: string }) => void): () => void
@@ -1043,4 +1058,32 @@ export interface KadrApi {
   claudeClose(): Promise<void>
   onClaudeData(cb: (data: string) => void): () => void
   onClaudeExit(cb: (code: number) => void): () => void
+
+  /** WebGL powerPreference hint derived from the persisted GPU choice
+      ('default' | 'high-performance' | 'low-power'); '' when unset. */
+  defaultGpuPower: string
+  /** True when NVIDIA hardware H.264 encoding (NVENC) is usable — an NVIDIA
+      device is present and ffmpeg has h264_nvenc. */
+  nvencAvailable(): Promise<boolean>
+  /** Enumerate selectable GPUs (DRM render nodes). */
+  gpuList(): Promise<GpuInfo[]>
+  /** Confirm the current GPU trial works (only reachable if the window renders);
+      makes the choice stick instead of reverting to auto next launch. */
+  gpuConfirm(): void
+  /** Relaunch the app so a new GPU choice takes effect. */
+  relaunchApp(): void
+}
+
+/** A user-selectable GPU (one DRM render node). */
+export interface GpuInfo {
+  /** DRM render node path, e.g. /dev/dri/renderD129 */
+  node: string
+  /** kernel driver: i915 / nvidia / amdgpu / … */
+  driver: string
+  vendorId: string
+  deviceId: string
+  /** friendly vendor: NVIDIA / Intel / AMD (or driver name) */
+  vendor: string
+  /** primary display adapter (laptop iGPU) vs a discrete card */
+  integrated: boolean
 }

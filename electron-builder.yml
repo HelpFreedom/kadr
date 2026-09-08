@@ -1,0 +1,67 @@
+# electron-builder config for the self-contained Linux archive.
+# Run via scripts/pack.sh (inside a distrobox with a build toolchain), which
+# stages runtime/ and kadr-fragments-seed/ before invoking electron-builder.
+appId: com.blacktriangle.kadr
+productName: Kadr
+copyright: © Black Triangle — GPL-3.0
+
+directories:
+  output: dist
+  buildResources: build
+
+# node/python/npx read these files by real on-disk path (app.getAppPath()),
+# and external processes can't read inside an asar — so ship unpacked.
+asar: false
+
+# Whitelist the app payload. electron-builder always adds production
+# node_modules (pruned of devDependencies) on top of this, which mcp-bridge.cjs
+# needs at runtime (@modelcontextprotocol/sdk).
+files:
+  - out/**/*
+  - electron/mcp-bridge.cjs
+  # every one of these is read from disk at runtime by app.getAppPath(), so a
+  # build without them starts fine and then fails the feature: the Claude panel
+  # cannot sync its skill ("skill sync failed: ENOENT"), and voice-defect
+  # detection has no driver, no package and no model. 2.2 MB in total, of which
+  # 1.9 MB is python/models.
+  - electron/kadr-skill.md
+  - scripts/transcribe.py
+  - scripts/ttsqc_run.py
+  - python/**/*
+  - package.json
+
+# Bundled runtime + Remotion seed land under resources/ (process.resourcesPath).
+# Both dirs are produced by scripts/pack.sh; guarded there so a "lite" build can
+# omit kadr-fragments-seed.
+extraResources:
+  - from: runtime
+    to: runtime
+  - from: kadr-fragments-seed
+    to: kadr-fragments-seed
+
+linux:
+  target:
+    - tar.gz
+    - AppImage
+  category: AudioVideo
+  icon: build/icon.png
+  synopsis: GPU-accelerated multi-track video editor
+  artifactName: ${name}-${version}-linux-${arch}.${ext}
+  # WM_CLASS of the Electron window — lets KDE/GNOME match the running window
+  # to this launcher (correct task-bar icon, grouping).
+  desktop:
+    entry:
+      StartupWMClass: Kadr
+      Categories: AudioVideo;AudioVideoEditing;Video;
+
+# The AppImage is self-contained (its icon + .desktop are embedded — integrate
+# it with Gearlever/appimaged). The tar.gz is just files, so ship a one-shot
+# helper + icon at the archive root that registers a menu entry per-user.
+extraFiles:
+  - from: scripts/install-desktop.sh
+    to: install.sh
+  - from: build/icon.png
+    to: kadr.png
+
+# node-pty is rebuilt against the bundled Electron's ABI at pack time.
+npmRebuild: true

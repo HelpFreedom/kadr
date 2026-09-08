@@ -17,7 +17,8 @@ export function CaptionsDialog() {
   const range = useEditor((s) => s.range)
   const [style, setStyle] = useState<CaptionStyle>({ ...CAPTION_DEFAULTS })
   const [maxWords, setMaxWords] = useState(3)
-  const [model, setModel] = useState('large-v3')
+  const bundledModel = window.kadr.defaultWhisperModel
+  const [model, setModel] = useState(bundledModel || 'large-v3')
   const [language, setLanguage] = useState('auto')
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -91,6 +92,9 @@ export function CaptionsDialog() {
       <label className="insp-field">
         <span>{t('trModel')}</span>
         <select value={model} disabled={running} onChange={(e) => setModel(e.target.value)}>
+          {bundledModel && !['large-v3', 'medium'].includes(bundledModel) && (
+            <option value={bundledModel}>{bundledModel}</option>
+          )}
           <option value="large-v3">large-v3 — {t('trBest')}</option>
           <option value="medium">medium — {t('trFaster')}</option>
         </select>

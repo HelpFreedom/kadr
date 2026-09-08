@@ -1,6 +1,8 @@
 node_modules/
 out/
 dist/
+runtime/
+kadr-fragments-seed/
 *.log
 .claude/
 *.autosave.kadr

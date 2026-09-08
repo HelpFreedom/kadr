@@ -30,8 +30,10 @@ export function mediaCacheKey(
 export const proxySuffix = (alpha?: boolean) => (alpha ? ':a' : '')
 
 /** decoded: packed colour+matte, plain alpha, or neither */
+// ':p2' — packed-matte generation: intermediates packed before the matte
+// range fix (double pc→tv compression) must miss the cache and re-pack.
 export const decodedSuffix = (opts?: { alpha?: boolean; packed?: boolean }) =>
-  opts?.packed ? ':p' : opts?.alpha ? ':a' : ''
+  opts?.packed ? ':p2' : opts?.alpha ? ':a' : ''
 
 /** reversed: the same source cut differently is a different render */
 export const reverseSuffix = (start: number, duration: number) =>

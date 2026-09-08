@@ -2060,6 +2060,7 @@ div.tr-error {
   touch-action: none;
 }
 .mask-shape.ellipse { border-radius: 50%; }
+.mask-shape.roundrect { border-radius: 14px; }
 .mask-shape.triangle {
   clip-path: polygon(50% 0, 100% 100%, 0 100%);
   border: none;

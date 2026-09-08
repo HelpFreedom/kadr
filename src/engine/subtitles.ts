@@ -272,7 +272,7 @@ async function freePath(base: string, ext: string, takenOk: string[]): Promise<s
 export async function transcribeFlow(opts: TranscribeFlowOpts): Promise<TranscribeFlowResult> {
   const st = () => useEditor.getState()
   const project = st().project
-  const model = opts.model || 'large-v3'
+  const model = opts.model || window.kadr.defaultWhisperModel || 'large-v3'
   const language = opts.language || 'auto'
 
   let audioSegments: AudioSegment[]

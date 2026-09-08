@@ -44,9 +44,11 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
     width: video?.width || 0,
     height: video?.height || 0,
     fps: fps || 30,
-    hasAudio: !!audio
+    hasAudio: !!audio,
+    audioCodec: audio?.codec_name
   }
   if (kind === 'video' && video?.codec_name) asset.codec = video.codec_name
+  try { asset.mtimeMs = Math.round((await fsp.stat(path)).mtimeMs) } catch { /* stat optional */ }
   if (kind === 'video') {
     // alpha travels two ways: an alpha pixel format (yuva…, rgba, prores
     // 4444) or WebM's container-level alpha_mode tag (vp8/vp9 alpha planes —
@@ -144,9 +146,19 @@ export function makeProxy(
   out: string,
   duration: number,
   onProgress?: (p: number) => void,
-  opts?: { alpha?: boolean; codec?: string }
+  opts?: { alpha?: boolean; codec?: string; audioOnly?: boolean }
 ): Promise<void> {
-  const args = opts?.alpha ? [
+  // audioOnly: the source has no usable video (a music/voice file) but an audio
+  // codec Chromium can't decode (ac3/dts/…) — transcode just the audio to AAC
+  // so the preview element has sound. alpha: a VP9+alpha WebM keeps the
+  // transparency. Otherwise a normal 540p video+AAC proxy.
+  const args = opts?.audioOnly ? [
+    '-y', '-v', 'error', '-progress', 'pipe:1',
+    '-i', src,
+    '-vn', '-c:a', 'aac', '-b:a', '160k',
+    '-movflags', '+faststart',
+    out
+  ] : opts?.alpha ? [
     '-y', '-v', 'error', '-progress', 'pipe:1',
     ...alphaInputArgs(opts.codec),
     '-i', src,
@@ -334,7 +346,14 @@ export async function makeDecoded(
     `[c]format=yuv420p,scale=in_color_matrix=${opts.matrix || 'bt601'}:out_color_matrix=bt709[col];` +
     // the matte rides in the luma plane, mapped into the same limited range
     // the decoder will expand back — verified to round-trip bit-exactly
-    '[a]alphaextract,format=yuv420p,scale=in_range=pc:out_range=tv[m];' +
+    // Range-compress the matte BEFORE format=yuv420p. Newer swscale already
+    // maps gray→yuv420p into limited range, so a scale=pc→tv placed after it
+    // compressed the matte TWICE (255 → 235 → 218): every opaque area of an
+    // alpha source composited at ~92 % (a 255 red came out at 229). With the
+    // explicit scale first, format= sees a tv-tagged input and leaves it alone
+    // on new swscale, while old swscale (a plain copy) still gets the one
+    // compression it needs — 235/127/71 for α 255/129/64 on both.
+    '[a]alphaextract,scale=in_range=pc:out_range=tv,format=yuv420p[m];' +
     '[col][m]vstack=inputs=2[v]',
     '-map', '[v]', '-an',
     '-c:v', 'libx264', '-preset', 'veryfast', '-qp', '0', '-pix_fmt', 'yuv420p',
@@ -644,6 +663,11 @@ export class ExportMuxer {
         const outDur = s.duration / speed // timeline-domain length after atempo
         const chain = [
           'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+          // Normalize the start PTS to 0 (a lavfi source already is). Defensive:
+          // some containers hand filter_complex a non-zero first PTS after an
+          // input seek. NOTE this alone does NOT fix the "clip jumps to t=0" bug —
+          // see the pad below for the actual cause.
+          'asetpts=PTS-STARTPTS',
           `volume=${s.gain.toFixed(4)}`,
           ...(Math.abs(speed - 1) > 1e-4 ? atempoChain(speed) : []),
           ...(s.fadeIn > 0.001 ? [`afade=t=in:st=0:d=${Math.min(s.fadeIn, outDur).toFixed(3)}`] : []),
@@ -651,8 +675,16 @@ export class ExportMuxer {
             ? [`afade=t=out:st=${Math.max(0, outDur - s.fadeOut).toFixed(3)}:d=${Math.min(s.fadeOut, outDur).toFixed(3)}`]
             : []),
           `adelay=${ms}|${ms}`,
-          'apad',
-          `atrim=0:${job.duration.toFixed(3)}`
+          // Pad each stream to exactly job.duration with a BOUNDED pad so amix
+          // (duration=longest) reaches EOF — instead of an unbounded `apad`
+          // followed by `atrim=0:job.duration`. That trailing atrim is the real
+          // cause of the audio-collapse bug: on an input-seeked segment
+          // (`-ss inPoint -i file`, i.e. inPoint > 0) it throws the delayed audio
+          // back to t=0 and leaves its slot silent — even with PTS re-zeroed
+          // (verified: asetpts=N/SR/TB + atrim still collapses; any chain without
+          // the trailing atrim places the clip correctly). Segments are already
+          // range-bounded, so nothing here can exceed job.duration.
+          `apad=whole_dur=${job.duration.toFixed(3)}`
         ]
         filters.push(`[${idx}:a]${chain.join(',')}[a${i}]`)
         labels.push(`[a${i}]`)

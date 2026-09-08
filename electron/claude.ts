@@ -5,11 +5,12 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { createServer, type Server } from 'http'
 import { randomBytes } from 'crypto'
-import { execFile } from 'child_process'
-import { promises as fs } from 'fs'
-import { join } from 'path'
-import { tmpdir } from 'os'
+import { constants as fsConstants, promises as fs } from 'fs'
+import { delimiter, extname, join } from 'path'
+import { homedir, tmpdir } from 'os'
 import type { IPty } from 'node-pty'
+
+const WIN = process.platform === 'win32'
 
 // The session inherits this process's environment MINUS the markers of any
 // Claude session that launched the editor (see SESSION_MARKERS). Anything extra the
@@ -185,12 +186,73 @@ function startBridge(
   })
 }
 
-function which(cmd: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile('/bin/sh', ['-c', `command -v ${cmd}`], (err, stdout) => {
-      resolve(err ? null : stdout.trim() || null)
-    })
-  })
+function expandHome(p: string): string {
+  return p === '~' || p.startsWith('~/') || (WIN && p.startsWith('~\\'))
+    ? join(homedir(), p.slice(2))
+    : p
+}
+
+/** the value of an environment variable, by Windows' rules if need be (names are case-insensitive there) */
+function envVar(env: Record<string, string>, name: string): string | undefined {
+  if (!WIN) return env[name]
+  const key = Object.keys(env).find((k) => k.toLowerCase() === name.toLowerCase())
+  return key === undefined ? undefined : env[key]
+}
+
+async function isFile(p: string): Promise<boolean> {
+  try {
+    return (await fs.stat(p)).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Where the CLI is. Resolved here rather than by asking a shell: there is no
+ * /bin/sh on Windows, and the shell never knew more than we do — a
+ * non-interactive sh reads no rc file, so its PATH was ours.
+ *
+ * A name with a separator is a path (`~` expanded). A bare name is walked
+ * along the session's PATH — the user may have extended it in claude-env.json
+ * precisely so that claude is found — with PATHEXT on Windows, which is how
+ * every installer's launcher turns up: npm's `claude.cmd` shim, the native
+ * installer's `claude.exe`, bun/pnpm/volta shims. (CreateProcess alone would
+ * try `.exe` and nothing else, and `where claude` lists npm's extensionless
+ * sh-script shim first — a file ConPTY cannot start.) Then ~/.local/bin, the
+ * native installer's directory on every platform, for an editor launched
+ * from a desktop entry whose PATH has not caught up with the install.
+ */
+async function resolveCommand(
+  cmd: string,
+  env: Record<string, string>
+): Promise<string | null> {
+  const exts = WIN
+    ? (envVar(env, 'PATHEXT') ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+    : []
+  const runnable = async (p: string): Promise<string | null> => {
+    if (WIN) {
+      // a name with a known extension is taken as is; anything else gets one
+      const ownExt = extname(p).toUpperCase()
+      const tries = exts.some((e) => e.toUpperCase() === ownExt) ? [p] : exts.map((e) => p + e)
+      for (const t of tries) if (await isFile(t)) return t
+      return null
+    }
+    try {
+      await fs.access(p, fsConstants.X_OK)
+      return (await isFile(p)) ? p : null
+    } catch {
+      return null
+    }
+  }
+  const name = expandHome(cmd)
+  if (/[\\/]/.test(name)) return runnable(name)
+  const dirs = (envVar(env, 'PATH') ?? '').split(delimiter).filter(Boolean)
+  dirs.push(join(homedir(), '.local', 'bin'))
+  for (const dir of dirs) {
+    const hit = await runnable(join(dir, name))
+    if (hit) return hit
+  }
+  return null
 }
 
 /**
@@ -236,7 +298,17 @@ const SESSION_MARKERS = [
 function sessionEnv(extra?: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = { ...process.env } as Record<string, string>
   for (const key of SESSION_MARKERS) delete env[key]
-  return { ...env, ...extra }
+  for (const [key, value] of Object.entries(extra ?? {})) {
+    // Windows variable names are case-insensitive: a `PATH` override next to
+    // the inherited `Path` would hand CreateProcess two spellings of one
+    // variable, and which of them the child sees is not defined
+    if (WIN) {
+      const clash = Object.keys(env).find((k) => k !== key && k.toLowerCase() === key.toLowerCase())
+      if (clash) delete env[clash]
+    }
+    env[key] = value
+  }
+  return env
 }
 
 interface ClaudeConfig {
@@ -262,8 +334,17 @@ async function spawnSession(
 ): Promise<{ ok: boolean; port?: number; error?: string }> {
   killSession() // a reopen without a close in between
   const cfg = await userConfig()
+  const env = sessionEnv(cfg.env)
   const cmdName = process.env.KADR_CLAUDE_CMD || cfg.command || 'claude'
-  const bin = (await which(cmdName)) ?? cmdName
+  const bin = await resolveCommand(cmdName, env)
+  if (!bin) {
+    return {
+      ok: false,
+      error:
+        `"${cmdName}" not found on PATH (nor in ~/.local/bin) — install the Claude Code CLI, ` +
+        `or set "command" in ${join(app.getPath('userData'), 'claude-env.json')}`
+    }
+  }
 
   let bridge: { server: Server; port: number; token: string }
   try {
@@ -315,13 +396,30 @@ async function spawnSession(
     const wrapper =
       `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
       `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
-    const p = pty.spawn('/bin/bash', ['-c', wrapper, bin, ...args], {
-      name: 'xterm-256color',
-      cols: Math.max(20, cols),
-      rows: Math.max(5, rows),
-      cwd: dir,
-      env: sessionEnv(cfg.env)
-    })
+    // On Windows the console itself is the watchdog. The pseudoconsole is a
+    // handle of THIS process: when it dies, however hard, the console host
+    // goes with it and every process attached to that console receives
+    // CTRL_CLOSE_EVENT and is terminated — claude and the MCP children it
+    // spawned alike. So the launcher is started directly, no wrapper.
+    // Mind the launcher: a `.cmd` (npm's shim) is run by CreateProcess
+    // through cmd.exe, whose parser rewrites `%VAR%`, `^` and unquoted
+    // `& | < >` on the way. The built-in args carry none of those; keep it
+    // so, and on Windows keep any `args` override in claude-env.json equally
+    // plain — or point `command` at the `.exe` the shim wraps.
+    const p = WIN
+      ? pty.spawn(bin, args, {
+          cols: Math.max(20, cols),
+          rows: Math.max(5, rows),
+          cwd: dir,
+          env
+        })
+      : pty.spawn('/bin/bash', ['-c', wrapper, bin, ...args], {
+          name: 'xterm-256color',
+          cols: Math.max(20, cols),
+          rows: Math.max(5, rows),
+          cwd: dir,
+          env
+        })
     // publish BEFORE wiring the handlers: data emitted between spawn and the
     // assignment would otherwise be dropped by the identity guard below
     const mine: Session = { pty: p, server: bridge.server, port: bridge.port }
@@ -351,20 +449,27 @@ function killSession() {
   if (!session) return
   const s = session
   session = null
-  // HUP the whole process group (claude + its MCP server children), then
-  // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
-  const pid = s.pty.pid
-  try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
-  setTimeout(() => {
-    try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
-  }, 1500)
+  if (WIN) {
+    // node-pty's ConPTY kill enumerates the console's process list and
+    // terminates every member (claude + its MCP server children), then
+    // closes the pseudoconsole; there are no process groups to signal
+    try { s.pty.kill() } catch { /* dead */ }
+  } else {
+    // HUP the whole process group (claude + its MCP server children), then
+    // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
+    const pid = s.pty.pid
+    try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
+    setTimeout(() => {
+      try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
+    }, 1500)
+  }
   s.server.close()
 }
 
 /**
  * Open and close run ONE AT A TIME, and every request takes a generation.
  *
- * `spawnSession` is async (config read, `which`, the node-pty import) while a
+ * `spawnSession` is async (config read, `resolveCommand`, the node-pty import) while a
  * close is instant, so a close that overtook an in-flight open used to find
  * `session` still null, do nothing, and let the pending spawn install itself
  * afterwards — an orphaned claude nobody could reach or kill. React StrictMode

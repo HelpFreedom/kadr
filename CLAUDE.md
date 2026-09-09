@@ -90,11 +90,16 @@ mixes audio and muxes/transcodes per preset.
   the Electron process, so a hard death of Electron takes the console host
   and every attached process with it (verified with taskkill /F on main:
   claude.exe and its cmd.exe were gone within seconds), and node-pty's
-  ConPTY kill terminates the console's whole process list. One caveat: a
-  `.cmd` launcher runs through cmd.exe, whose parser rewrites `%VAR%`, `^`
-  and unquoted `& | < >` — the built-in args avoid those (verified: quotes
-  and non-ASCII reach claude.exe intact) and a user `args` override on
-  Windows has to as well.
+  ConPTY kill terminates the console's whole process list. A `.cmd`
+  launcher (npm's shim) is started through `%ComSpec% /d /s /c "<line>"`
+  by `winLaunch`: `/d` skips the registry AutoRun, and `/s` plus the outer
+  quotes keep a launcher path with a space in one piece — a bare
+  `cmd /c "shim" args` (PR #7's route) stops at `C:\Users\Jane` because
+  cmd strips the first and last quote of its command. Verified with a
+  shim in a directory with a space. The caveat that remains: cmd's parser
+  rewrites `%VAR%`, `^` and unquoted `& | < >` — the built-in args avoid
+  those (verified: quotes and non-ASCII reach claude.exe intact) and a
+  user `args` override on Windows has to as well.
   Open and close are SERIALIZED through one promise chain and carry a
   generation: spawning is async (config read, `which`, the node-pty import)
   while a close is instant, so a close that overtakes an in-flight open would

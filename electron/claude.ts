@@ -255,6 +255,35 @@ async function resolveCommand(
   return null
 }
 
+/** One argument quoted by the MSVCRT rules every CreateProcess-started program parses by. */
+function quoteArg(arg: string): string {
+  if (arg !== '' && !/[\s"]/.test(arg)) return arg
+  return '"' + arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"'
+}
+
+/**
+ * How the launcher is started on Windows. An `.exe` takes the arguments as
+ * they are. A `.cmd`/`.bat` — npm's shim — needs cmd.exe. CreateProcess
+ * would supply one by itself, but the explicit route is worth having:
+ * `/d` keeps the registry's AutoRun (clink, conda hooks) from running and
+ * printing into the panel, and the quoting is ours to get right. `/s` plus
+ * an outer pair of quotes is what keeps a launcher path with a space in it
+ * (`C:\Users\Jane Doe\AppData\Roaming\npm\claude.cmd`) in one piece: cmd
+ * strips the first and the last quote of its command when the first
+ * character is one, so a bare `/c "shim" args` loses the quotes around the
+ * path and stops at `C:\Users\Jane`. Verified with a shim in a directory
+ * with a space, both routes, inner quotes and non-ASCII arriving intact.
+ */
+function winLaunch(
+  bin: string,
+  args: string[],
+  env: Record<string, string>
+): [file: string, args: string | string[]] {
+  if (!/\.(cmd|bat)$/i.test(bin)) return [bin, args]
+  const line = [bin, ...args].map(quoteArg).join(' ')
+  return [envVar(env, 'ComSpec') ?? 'cmd.exe', `/d /s /c "${line}"`]
+}
+
 /**
  * Markers a Claude Code session puts in the environment of everything it
  * spawns. They have to go before the panel's own session starts.
@@ -401,13 +430,13 @@ async function spawnSession(
     // goes with it and every process attached to that console receives
     // CTRL_CLOSE_EVENT and is terminated — claude and the MCP children it
     // spawned alike. So the launcher is started directly, no wrapper.
-    // Mind the launcher: a `.cmd` (npm's shim) is run by CreateProcess
-    // through cmd.exe, whose parser rewrites `%VAR%`, `^` and unquoted
-    // `& | < >` on the way. The built-in args carry none of those; keep it
-    // so, and on Windows keep any `args` override in claude-env.json equally
-    // plain — or point `command` at the `.exe` the shim wraps.
+    // Mind the launcher: a `.cmd` (npm's shim) goes through cmd.exe (see
+    // winLaunch), whose parser rewrites `%VAR%`, `^` and unquoted `& | < >`
+    // on the way. The built-in args carry none of those; keep it so, and on
+    // Windows keep any `args` override in claude-env.json equally plain —
+    // or point `command` at the `.exe` the shim wraps.
     const p = WIN
-      ? pty.spawn(bin, args, {
+      ? pty.spawn(...winLaunch(bin, args, env), {
           cols: Math.max(20, cols),
           rows: Math.max(5, rows),
           cwd: dir,

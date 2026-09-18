@@ -19,7 +19,8 @@ mixes audio and muxes/transcodes per preset.
 - Pure node checks — no app, no network:
   `node scripts/check-envelope.mjs` (loudness envelope),
   `check-ttstext.mjs` (text splitting), `check-proxy.mjs` (proxy choice),
-  `check-voicemap.mjs` (time remapping after a splice); plus
+  `check-voicemap.mjs` (time remapping after a splice); `check-mixdown.mjs`
+  wants ffmpeg too (every segment lands at its own timeline position); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
 - `node scripts/gen-icons.mjs [dir]` — regenerate `src/components/icons.tsx`
   from lucide (see the header for the two-line fetch); never hand-edit the
@@ -71,9 +72,16 @@ mixes audio and muxes/transcodes per preset.
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
   render of a clip's source range, RAM-bounded chunks), `ExportMuxer`
-  (per-segment `volume,atempo*,afade,adelay,apad,atrim` → `amix` with
-  exact level compensation), `RawVideoEncoder` (fallback raw-frame
+  (per-segment `volume,atempo*,afade,adelay,asetpts,apad,atrim` → `amix`
+  with exact level compensation), `RawVideoEncoder` (fallback raw-frame
   encoder; the primary one is spawned by the preload).
+  THE `asetpts` AFTER `adelay` IS LOAD-BEARING: on some builds (seen on
+  gyan.dev git 2025-01-08, Windows) `adelay` stamps its padding NOPTS when
+  the input is an A/V file opened with `-ss`, the `atrim` then throws the
+  padding away, and EVERY segment lands at t=0 — an export whose audio is
+  all of the timeline piled onto the first seconds and silence after the
+  longest clip. Recounting pts from the sample position is version-neutral
+  and costs nothing. Test: `node scripts/check-mixdown.mjs`.
 - `electron/claude.ts` — embedded Claude Code: node-pty PTY running the
   user's `claude` CLI inside a watchdog wrapper (kills its process group
   if Electron dies hard), per-session HTTP bridge (POST /eval →

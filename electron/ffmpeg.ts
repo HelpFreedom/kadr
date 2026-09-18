@@ -651,6 +651,10 @@ export class ExportMuxer {
             ? [`afade=t=out:st=${Math.max(0, outDur - s.fadeOut).toFixed(3)}:d=${Math.min(s.fadeOut, outDur).toFixed(3)}`]
             : []),
           `adelay=${ms}|${ms}`,
+          // some builds (gyan.dev git 2025-01) stamp adelay's padding with
+          // NOPTS when the input is a seeked A/V file; atrim then drops the
+          // delay and every clip lands on t=0. Recount pts from samples.
+          'asetpts=N/SR/TB',
           'apad',
           `atrim=0:${job.duration.toFixed(3)}`
         ]

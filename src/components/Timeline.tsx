@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
+import { create } from 'zustand'
 import type { AudioDefect, Clip, MediaAsset, Track } from '@shared/types'
 import {
   useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM
@@ -17,6 +18,7 @@ import { useNeonWaveUi } from './NeonWaveDialog'
 import { useTtsUi } from './TtsDialog'
 import { evalAnim } from '@/engine/anim'
 import { spanToProject, projectToSrc, type VisibleSpan } from '@/engine/voiceDefects'
+import { clipsInSpan, clipsBetween, unlocked } from '@/engine/timelineSelect'
 import { useVoiceUi, setVerdict, clearVerdict, addUserDefect, setDefectsHidden } from '@/engine/voiceCheck'
 import { confirmDefect } from '@/engine/voiceRegen'
 import { useDefectsUi, targetRun } from './DefectsDialog'
@@ -99,10 +101,15 @@ function windowDrag(
   const onUp = () => {
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
+    // a cancelled gesture (pen/touch, a window manager stealing the drag)
+    // never sends pointerup — without this the drag's overlay stays on screen
+    // and every later mouse move keeps driving it with no button held
+    window.removeEventListener('pointercancel', onUp)
     done?.()
   }
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +164,99 @@ function startScrubOrRange(e: React.PointerEvent<HTMLDivElement>, lane: HTMLElem
   windowDrag(e, (_dx, ev) => {
     useEditor.getState().setPlayhead(timeAt(ev.clientX))
   })
+}
+
+/** The rubber band being dragged, in .tl-content pixels. Its own store so a
+    move repaints the rectangle alone instead of every lane and clip. */
+const useBand = create<{ box: { x: number; y: number; w: number; h: number } | null }>(
+  () => ({ box: null })
+)
+
+function BandBox() {
+  const box = useBand((s) => s.box)
+  if (!box) return null
+  return (
+    <div
+      className="band-box"
+      style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
+    />
+  )
+}
+
+/** Rubber-band selection from an empty spot on a lane: every clip the
+    rectangle covers, on every lane it reaches. Ctrl ADDS to what is already
+    selected. A press that never moves is not a band — it falls through to
+    `click`, which is how Ctrl+click still closes a gap and a plain click
+    still parks the playhead. */
+function startBand(
+  e: React.PointerEvent<HTMLDivElement>,
+  lane: HTMLElement,
+  click: () => void
+) {
+  const content = lane.closest('.tl-content') as HTMLElement | null
+  const scroll = content?.parentElement
+  if (!content || !scroll) {
+    click()
+    return
+  }
+  const base = e.ctrlKey ? useEditor.getState().selection : null
+  const x0 = e.clientX
+  const y0 = e.clientY
+  // the anchor is kept as a TIME and as an offset inside the content, not as
+  // a screen position: the timeline can be scrolled and zoomed mid-drag (the
+  // wheel does both), and a client-pixel anchor would then sit at a different
+  // moment than the one the user grabbed
+  const cr0 = content.getBoundingClientRect()
+  const anchorT = Math.max(0, (x0 - cr0.left - HEADER_W) / useEditor.getState().zoom)
+  const anchorY = y0 - cr0.top
+  let moved = false
+  let lastKey = ''
+  windowDrag(
+    e,
+    (_dx, ev) => {
+      if (!moved && Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) <= 3) return
+      moved = true
+      const cr = content.getBoundingClientRect()
+      // the sticky track headers float over the lane while it is scrolled —
+      // the band stops at their edge instead of quietly taking clips nobody
+      // can see underneath
+      const wall = scroll.getBoundingClientRect().left + HEADER_W
+      const ax = cr.left + HEADER_W + anchorT * useEditor.getState().zoom
+      const left = Math.max(wall, Math.min(ax, ev.clientX))
+      const right = Math.max(left, Math.max(ax, ev.clientX))
+      const top = Math.min(cr.top + anchorY, ev.clientY)
+      const bottom = Math.max(cr.top + anchorY, ev.clientY)
+      useBand.setState({
+        box: { x: left - cr.left, y: top - cr.top, w: right - left, h: bottom - top }
+      })
+      const trackIds: string[] = []
+      for (const el of content.querySelectorAll<HTMLElement>('[data-lane]')) {
+        const r = el.getBoundingClientRect()
+        if (r.bottom > top && r.top < bottom) trackIds.push(el.dataset.lane!)
+      }
+      const s = useEditor.getState()
+      const ids = unlocked(s.project, withLinked(
+        s.project,
+        clipsInSpan(
+          s.project,
+          trackIds,
+          (left - cr.left - HEADER_W) / s.zoom,
+          (right - cr.left - HEADER_W) / s.zoom
+        )
+      ))
+      const next = base ? [...new Set([...base, ...ids])] : ids
+      // the panels that read the selection redraw on every set — don't make
+      // them do it for a pointermove that changed nothing
+      const key = next.join()
+      if (key === lastKey) return
+      lastKey = key
+      s.select(next)
+    },
+    () => {
+      useBand.setState({ box: null })
+      if (!moved) click()
+    }
+  )
 }
 
 interface MenuState {
@@ -339,6 +439,7 @@ export function Timeline({ height }: { height: number }) {
             />
           ))}
           <RangeOverlay />
+          <BandBox />
           <KfMarker />
           <Markers />
           <Playhead />
@@ -551,7 +652,10 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
             className="danger"
             onClick={() => {
               const st = useEditor.getState()
-              st.select(withLinked(st.project, [menu.clipId!]))
+              // a right-click inside a group deletes the group, not one clip
+              if (!st.selection.includes(menu.clipId!)) {
+                st.select(withLinked(st.project, [menu.clipId!]))
+              }
               st.deleteSelection()
               onClose()
             }}
@@ -766,16 +870,26 @@ function TrackRow({
     }
   }
 
+  // Empty space on a lane is where clips are SELECTED — the playhead is
+  // dragged on the ruler above. Shift still drags the in/out range (the
+  // transcribe / neon-wave / defect-mark gesture), so nothing is taken away.
   const onLaneDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.target !== e.currentTarget) return
-    if (e.ctrlKey) {
-      const rect = e.currentTarget.getBoundingClientRect()
-      const time = (e.clientX - rect.left) / useEditor.getState().zoom
-      useEditor.getState().closeGapAt(track.id, time)
+    if (e.target !== e.currentTarget || e.button !== 0) return
+    if (e.shiftKey) {
+      startScrubOrRange(e, e.currentTarget)
       return
     }
-    if (!e.shiftKey) useEditor.getState().select([])
-    startScrubOrRange(e, e.currentTarget)
+    const rect = e.currentTarget.getBoundingClientRect()
+    const time = (e.clientX - rect.left) / useEditor.getState().zoom
+    if (e.ctrlKey) {
+      startBand(e, e.currentTarget, () => useEditor.getState().closeGapAt(track.id, time))
+      return
+    }
+    startBand(e, e.currentTarget, () => {
+      const s = useEditor.getState()
+      s.select([])
+      s.setPlayhead(time)
+    })
   }
 
   // drag the header vertically to reorder tracks
@@ -1326,7 +1440,20 @@ function ClipView({
     if (track.locked || e.button !== 0) return
     e.stopPropagation()
     const st = useEditor.getState()
-    const linkedIds = withLinked(st.project, [clip.id])
+    // a locked A/V twin is left out: the store would refuse to move it, and
+    // half a pair that follows the drag is worse than a pair that does not
+    const linkedIds = unlocked(st.project, withLinked(st.project, [clip.id]))
+    if (e.shiftKey) {
+      // Explorer's Shift+click: from the FIRST clip of the current selection
+      // to this one — the tracks between them, over the time they cover
+      const anchor = st.selection[0]
+      st.select(
+        anchor && anchor !== clip.id
+          ? unlocked(st.project, withLinked(st.project, clipsBetween(st.project, anchor, clip.id)))
+          : linkedIds
+      )
+      return
+    }
     if (e.ctrlKey) {
       // Ctrl+drag near EITHER edge = speed (Vegas-style time stretch) —
       // the same gesture as the extend handles, but forgiving about where
@@ -1452,7 +1579,11 @@ function ClipView({
           }
         }
         if (d.group) {
-          const delta = ns - d.origStart
+          // the group keeps its shape at the left wall: setClipStarts clamps
+          // each clip at 0 on its own, which would pile the whole selection
+          // onto t=0 instead of stopping it there
+          const floor = Math.min(...d.group.map((g) => g.start))
+          const delta = Math.max(ns - d.origStart, -floor)
           // shift the whole group across tracks by the grabbed clip's offset
           // within its own track kind (audio partners move in parallel)
           const tracks = s.project.tracks
@@ -1500,7 +1631,14 @@ function ClipView({
       drag.current = null
       // a plain click (no drag) parks the playhead at the click position;
       // dragging keeps the red cursor where it was so clips can snap to it
-      if (!moved && mode === 'move') useEditor.getState().setPlayhead(grabTime)
+      if (!moved && mode === 'move') {
+        const s = useEditor.getState()
+        s.setPlayhead(grabTime)
+        // …and it drops the rest of a group selection, the way clicking one
+        // file in Explorer does. Without this a band selection could only be
+        // narrowed by clicking empty space first.
+        if (s.selection.length > linkedIds.length) s.select(linkedIds)
+      }
     }
     window.addEventListener('pointermove', onMoveTracked)
     window.addEventListener('pointerup', onUp)

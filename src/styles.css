@@ -1385,8 +1385,19 @@ div.tr-error {
   pointer-events: none;
 }
 
-.lane { position: relative; background: var(--c-bg-0); }
+/* empty lane = the selection surface (the playhead is dragged on the ruler) */
+.lane { position: relative; background: var(--c-bg-0); cursor: crosshair; }
 .lane.audio { background: var(--c-lane-audio); }
+
+/* the rubber band itself */
+.band-box {
+  position: absolute;
+  z-index: 2;
+  background: var(--c-accent-soft);
+  border: 1px solid var(--c-accent);
+  border-radius: var(--r1);
+  pointer-events: none;
+}
 
 .tl-marker {
   position: absolute;

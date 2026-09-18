@@ -220,6 +220,14 @@ mixes audio and muxes/transcodes per preset.
   worth knowing: `getExtension` returns null on a LOST context (take the
   `WEBGL_lose_context` handle while it is alive), and `restoreContext()`
   is ignored when called from inside the lost event — defer it a turn.
+  THE CONTEXT IS NOT `desynchronized`, and must not become one again: on
+  Windows that flag puts the canvas in front-buffer mode, where the screen
+  can catch a frame between `begin()`'s clear and the layers drawn over it.
+  Measured on a real edit with a screencast of the composited page, 12 s of
+  playback: 131 black frames out of 916 with the flag, 0 out of 645 without
+  it. The canvas content was never black in either run — only what reached
+  the screen — so this is invisible to anything that reads back pixels. The
+  flag buys at most one frame of latency in return.
 - `src/gl/transitions.ts` / `src/gl/edges.ts` / `src/gl/glow.ts` — GLSL
   registries: 14 overlap transitions, 12 edge (tip) transitions, the smoky
   outer-glow effect.

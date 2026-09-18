@@ -313,8 +313,9 @@ export class Compositor {
     const gl = canvas.getContext('webgl2', {
       alpha: false,
       antialias: false,
-      preserveDrawingBuffer: true,
-      desynchronized: true
+      preserveDrawingBuffer: true
+      // NOT desynchronized: on Windows it renders into the front buffer, and
+      // the screen catches it between clear() and the layers — black flicker
     }) as WebGL2RenderingContext | null
     if (!gl) throw new Error('WebGL2 is not available')
     this.gl = gl

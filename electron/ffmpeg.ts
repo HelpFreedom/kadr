@@ -809,6 +809,10 @@ export class ExportMuxer {
         const chain = [
           ...segmentChain(s),
           `adelay=${ms}|${ms}`,
+          // some builds (gyan.dev git 2025-01) stamp adelay's padding with
+          // NOPTS when the input is a seeked A/V file; atrim then drops the
+          // delay and every clip lands on t=0. Recount pts from samples.
+          'asetpts=N/SR/TB',
           'apad',
           `atrim=0:${job.duration.toFixed(3)}`
         ]

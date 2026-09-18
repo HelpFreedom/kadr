@@ -208,6 +208,19 @@ export interface Project {
   voiceRuns?: VoiceRun[]
   /** defect regions found in a voice-over, or placed there by the user */
   defects?: AudioDefect[]
+  /** Claude Code session ids of the chats held about this project */
+  claudeChats?: string[]
+  /** their transcripts (jsonl) — present ONLY in the file on disk: main embeds
+   *  them on save and takes them out on open (electron/chats.ts) */
+  claudeTranscripts?: Record<string, string>
+}
+
+/** one of a project's Claude chats, as the panel's picker lists it */
+export interface ClaudeChatInfo {
+  id: string
+  title: string
+  /** last activity, ms since epoch */
+  updated: number
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,9 +1048,13 @@ export interface KadrApi {
   /** mtime in ms, or null when missing — used to pick up external edits */
   statFile(path: string): Promise<number | null>
 
-  /** Embedded Claude Code terminal session (PTY in main + MCP bridge). */
-  claudeOpen(cols: number, rows: number, cwd: string | null):
-    Promise<{ ok: boolean; port?: number; error?: string }>
+  /** Embedded Claude Code terminal session (PTY in main + MCP bridge).
+      chatId resumes that chat; without it a new one starts. chatId in the
+      reply is the session now running (absent under an args override). */
+  claudeOpen(cols: number, rows: number, cwd: string | null, chatId?: string | null):
+    Promise<{ ok: boolean; port?: number; chatId?: string; error?: string }>
+  /** the given chats that have a transcript to resume, newest first */
+  claudeChats(ids: string[]): Promise<ClaudeChatInfo[]>
   claudeInput(data: string): void
   claudeResize(cols: number, rows: number): void
   claudeClose(): Promise<void>

@@ -1156,7 +1156,14 @@ div.tr-error {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.claude-close {
+.claude-chat {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fz-sm);
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.claude-close, .claude-new {
   background: none;
   border: none;
   color: var(--c-text-3);
@@ -1165,6 +1172,7 @@ div.tr-error {
   min-height: 22px;
 }
 .claude-close:hover:not(:disabled) { background: var(--c-danger-soft); color: var(--c-danger); }
+.claude-new:hover:not(:disabled) { background: var(--c-accent-soft); color: var(--c-accent-hi); }
 .claude-term { flex: 1; min-height: 0; padding: var(--s2) 0 var(--s2) var(--s3); }
 .claude-term .xterm { height: 100%; }
 .claude-btn.active {

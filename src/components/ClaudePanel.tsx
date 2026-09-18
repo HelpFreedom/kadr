@@ -7,6 +7,7 @@ import { dirOf } from '@shared/paths'
 import { activity } from '@/engine/autosave'
 import { useT } from '@/i18n'
 import { token } from '@/theme'
+import type { ClaudeChatInfo } from '@shared/types'
 import { Icon } from './icons'
 
 // panel position/size, persisted across launches; null = the default CSS
@@ -71,7 +72,7 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
   }
 
   const startMove = (e: React.PointerEvent) => {
-    if (e.button !== 0 || (e.target as HTMLElement).tagName === 'BUTTON') return
+    if (e.button !== 0 || (e.target as HTMLElement).closest('button, select')) return
     trackDrag(e, (dx, dy, r0) => ({ ...r0, x: r0.x + dx, y: r0.y + dy }))
   }
 
@@ -91,11 +92,30 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       })
     }
 
+  // The project's chats (Project.claudeChats; the transcripts travel in the
+  // .kadr file). `want` is the chat the terminal runs — null starts a new one,
+  // and every new object restarts the session; undefined = still listing.
+  const [chats, setChats] = useState<ClaudeChatInfo[]>([])
+  const [current, setCurrent] = useState<string | null>(null)
+  const [want, setWant] = useState<{ id: string | null }>()
+  const listChats = () => window.kadr.claudeChats(useEditor.getState().project.claudeChats ?? [])
+
+  // open on the project's latest chat, or a new one when it has none
+  useEffect(() => {
+    let gone = false
+    void listChats().then((list) => {
+      if (gone) return
+      setChats(list)
+      setWant({ id: list[0]?.id ?? null })
+    })
+    return () => { gone = true }
+  }, [])
+
   // NB: the effect must be fully re-entrant — React StrictMode mounts it
   // twice in dev (mount → cleanup → mount), and a one-shot guard would
   // leave the panel attached to a session the cleanup already killed
   useEffect(() => {
-    if (!holder.current) return
+    if (!holder.current || !want) return
     activity.claude = true
     const term = new Terminal({
       fontSize: 13,
@@ -124,16 +144,26 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
     // Electron has no context menu: right-click copies a selection or pastes,
     // as in Windows Terminal
     const el = holder.current
+    // the chat joins the project on the user's first key or paste — not at
+    // spawn: a panel opened and closed again leaves no empty chat behind
+    let chatId: string | undefined
+    let noted = false
+    const note = () => {
+      if (!chatId || noted) return
+      noted = true
+      useEditor.getState().noteClaudeChat(chatId)
+    }
     const onContext = (e: MouseEvent) => {
       e.preventDefault()
       if (term.hasSelection()) {
         void navigator.clipboard.writeText(term.getSelection())
         term.clearSelection()
       } else {
-        void navigator.clipboard.readText().then((s) => { if (s) term.paste(s) })
+        void navigator.clipboard.readText().then((s) => { if (s) { note(); term.paste(s) } })
       }
     }
     el.addEventListener('contextmenu', onContext)
+    el.addEventListener('keydown', note, true) // capture: xterm stops the keydown's propagation
 
     const ro = new ResizeObserver(() => {
       fit.fit()
@@ -144,11 +174,13 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
     const projectPath = useEditor.getState().projectPath
     const cwd = projectPath ? dirOf(projectPath) : null
     let dead = false
-    window.kadr.claudeOpen(term.cols, term.rows, cwd).then((r) => {
+    window.kadr.claudeOpen(term.cols, term.rows, cwd, want.id).then((r) => {
       if (dead) return
       if (!r.ok) {
         term.write(`\x1b[31m${t('claudeFailed')}: ${r.error ?? ''}\x1b[0m\r\n`)
       } else {
+        chatId = r.chatId
+        setCurrent(r.chatId ?? null)
         term.focus()
       }
     })
@@ -159,6 +191,7 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       activity.claude = false
       ro.disconnect()
       el.removeEventListener('contextmenu', onContext)
+      el.removeEventListener('keydown', note, true)
       onData.dispose()
       offData()
       offExit()
@@ -166,7 +199,14 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       term.dispose()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [want])
+
+  const fmt = (ms: number) =>
+    new Date(ms).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+  // a chat started just now has no transcript until its first message
+  const options = current && !chats.some((c) => c.id === current)
+    ? [{ id: current, title: '', updated: 0 }, ...chats]
+    : chats
 
   return (
     <div
@@ -176,9 +216,31 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
         ? { left: rect.x, top: rect.y, width: rect.w, height: rect.h, right: 'auto', bottom: 'auto' }
         : undefined}
     >
-      <div className="claude-head" onPointerDown={startMove}>
+      <div className="claude-head" onPointerDown={startMove} title={t('claudeHint')}>
         <span><Icon name="bot" size={15} /> Claude Code</span>
-        <span className="dim claude-hint">{t('claudeHint')}</span>
+        <select
+          className="claude-chat"
+          title={t('claudeChats')}
+          aria-label={t('claudeChats')}
+          value={current ?? ''}
+          disabled={!options.length}
+          onFocus={() => void listChats().then(setChats)}
+          onChange={(e) => setWant({ id: e.target.value })}
+        >
+          {options.map((c) => (
+            <option key={c.id} value={c.id}>
+              {(c.title || t('claudeNewChat')) + (c.updated ? ` · ${fmt(c.updated)}` : '')}
+            </option>
+          ))}
+        </select>
+        <button
+          className="claude-new"
+          title={t('claudeNewChat')}
+          aria-label={t('claudeNewChat')}
+          onClick={() => setWant({ id: null })}
+        >
+          <Icon name="plus" size={15} />
+        </button>
         <button
           className="claude-close"
           title={t('claudeClose')}

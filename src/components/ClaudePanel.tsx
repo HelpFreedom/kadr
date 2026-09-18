@@ -118,6 +118,22 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       term.write(`\r\n\x1b[90m${t('claudeExited')}\x1b[0m\r\n`)
     })
     const onData = term.onData((data) => window.kadr.claudeInput(data))
+    // Ctrl+V: xterm would send ^V; let the browser paste into xterm's textarea
+    // instead — xterm's paste listener forwards it (bracketed paste included)
+    term.attachCustomKeyEventHandler((e) => !(e.type === 'keydown' && e.ctrlKey && e.code === 'KeyV'))
+    // Electron has no context menu: right-click copies a selection or pastes,
+    // as in Windows Terminal
+    const el = holder.current
+    const onContext = (e: MouseEvent) => {
+      e.preventDefault()
+      if (term.hasSelection()) {
+        void navigator.clipboard.writeText(term.getSelection())
+        term.clearSelection()
+      } else {
+        void navigator.clipboard.readText().then((s) => { if (s) term.paste(s) })
+      }
+    }
+    el.addEventListener('contextmenu', onContext)
 
     const ro = new ResizeObserver(() => {
       fit.fit()
@@ -142,6 +158,7 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       dead = true
       activity.claude = false
       ro.disconnect()
+      el.removeEventListener('contextmenu', onContext)
       onData.dispose()
       offData()
       offExit()

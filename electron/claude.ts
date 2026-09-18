@@ -7,7 +7,7 @@ import { createServer, type Server } from 'http'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
-import { join } from 'path'
+import { join, isAbsolute } from 'path'
 import { tmpdir } from 'os'
 import type { IPty } from 'node-pty'
 
@@ -185,8 +185,21 @@ function startBridge(
   })
 }
 
+const WIN = process.platform === 'win32'
+
 function which(cmd: string): Promise<string | null> {
   return new Promise((resolve) => {
+    if (WIN) {
+      if (isAbsolute(cmd)) return resolve(cmd)
+      // `where` also lists npm's extensionless sh shims, which CreateProcess
+      // cannot run — keep the first hit with a runnable extension (claude.cmd)
+      const exts = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').toLowerCase().split(';').filter(Boolean)
+      execFile('where', [cmd], (err, stdout) => {
+        const hit = err ? undefined : stdout.split(/\r?\n/).find((p) => exts.some((e) => p.toLowerCase().endsWith(e)))
+        resolve(hit || null)
+      })
+      return
+    }
     execFile('/bin/sh', ['-c', `command -v ${cmd}`], (err, stdout) => {
       resolve(err ? null : stdout.trim() || null)
     })
@@ -315,7 +328,10 @@ async function spawnSession(
     const wrapper =
       `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
       `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
-    const p = pty.spawn('/bin/bash', ['-c', wrapper, bin, ...args], {
+    // Windows has no bash and no process groups: claude runs directly and
+    // killSession takes its tree with taskkill; a hard Electron death closes
+    // the pseudoconsole, which ends everything attached to it.
+    const p = pty.spawn(WIN ? bin : '/bin/bash', WIN ? args : ['-c', wrapper, bin, ...args], {
       name: 'xterm-256color',
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
@@ -354,6 +370,14 @@ function killSession() {
   // HUP the whole process group (claude + its MCP server children), then
   // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
   const pid = s.pty.pid
+  if (WIN) {
+    // the whole tree: the .cmd shim's cmd.exe → claude → its MCP servers
+    execFile('taskkill', ['/pid', String(pid), '/t', '/f'], () => {
+      try { s.pty.kill() } catch { /* dead */ }
+    })
+    s.server.close()
+    return
+  }
   try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
   setTimeout(() => {
     try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }

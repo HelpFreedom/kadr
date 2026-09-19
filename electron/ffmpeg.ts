@@ -3,6 +3,7 @@ import { execFile, spawn, ChildProcess } from 'child_process'
 import { promisify } from 'util'
 import { promises as fsp } from 'fs'
 import { join, basename } from 'path'
+import { tmpdir } from 'os'
 import type { ProbeResult, ExportJob, ExportProgress, WaveformData, AudioSegment } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
 
@@ -612,6 +613,102 @@ export class RawVideoEncoder {
   }
 }
 
+/** per-segment filter chain shared by the single-graph mix and the premix */
+function segmentChain(s: AudioSegment): string[] {
+  const speed = s.speed || 1
+  const outDur = s.duration / speed // timeline-domain length after atempo
+  return [
+    'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+    `volume=${s.gain.toFixed(4)}`,
+    ...(Math.abs(speed - 1) > 1e-4 ? atempoChain(speed) : []),
+    ...(s.fadeIn > 0.001 ? [`afade=t=in:st=0:d=${Math.min(s.fadeIn, outDur).toFixed(3)}`] : []),
+    ...(s.fadeOut > 0.001
+      ? [`afade=t=out:st=${Math.max(0, outDur - s.fadeOut).toFixed(3)}:d=${Math.min(s.fadeOut, outDur).toFixed(3)}`]
+      : [])
+  ]
+}
+
+/** above this many segments the mix leaves the ffmpeg filter graph (see premixSegments) */
+export const PREMIX_THRESHOLD = 64
+const MIX_RATE = 48000
+const MIX_CH = 2
+
+/**
+ * Sum many AudioSegments into one float WAV. One ffmpeg filter graph with N
+ * padded inputs + amix is fine for a few dozen clips, but its scheduler cost
+ * grows ~quadratically with the input count: a timeline with ~1000 SFX clips
+ * mixed at a quarter of realtime (80 min for a 19-min video) — and its argv
+ * did not even fit (E2BIG). Here every segment is decoded on its own (same
+ * per-segment chain: volume, atempo, fades) to f32 PCM and added into a
+ * buffer at its timeline offset, which is linear in the total clip length.
+ * amix scaled each input by 1/N and `volume=N` undid it, so plain summing
+ * gives the same levels.
+ */
+export async function premixSegments(
+  segs: AudioSegment[],
+  duration: number,
+  outPath: string,
+  onProgress?: (done: number, total: number) => void,
+  isCancelled?: () => boolean
+): Promise<void> {
+  const totalFrames = Math.ceil(duration * MIX_RATE)
+  const mix = new Float32Array(totalFrames * MIX_CH)
+  const PAR = 4
+  let next = 0
+  let done = 0
+  const worker = async () => {
+    while (next < segs.length) {
+      if (isCancelled?.()) throw new Error('cancelled')
+      const s = segs[next++]
+      const offset = Math.round(s.start * MIX_RATE) * MIX_CH
+      const room = mix.length - offset
+      if (room <= 0) { done++; continue }
+      const args = [
+        '-v', 'error', '-nostdin', '-ss', String(s.inPoint), '-t', String(s.duration), '-i', s.path,
+        '-af', segmentChain(s).join(','), '-f', 'f32le', '-ac', String(MIX_CH), '-ar', String(MIX_RATE), 'pipe:1'
+      ]
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+        let err = ''
+        let pos = offset
+        let carry: Buffer | null = null // f32le sample split across chunks
+        child.stdout!.on('data', (c: Buffer) => {
+          if (carry) { c = Buffer.concat([carry, c]); carry = null }
+          const usable = c.length - (c.length % 4)
+          if (usable < c.length) carry = c.subarray(usable)
+          const n = Math.min(usable / 4, mix.length - pos)
+          for (let i = 0; i < n; i++) mix[pos + i] += c.readFloatLE(i * 4)
+          pos += n
+        })
+        child.stderr!.on('data', (c) => { err += c })
+        child.on('error', reject)
+        child.on('close', (code) => {
+          if (code === 0) resolve()
+          else reject(new Error(`premix ${basename(s.path)} @${s.start.toFixed(2)}s: ffmpeg exited ${code}: ${err.slice(0, 300)}`))
+        })
+      })
+      onProgress?.(++done, segs.length)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(PAR, segs.length) }, worker))
+
+  // WAVE_FORMAT_IEEE_FLOAT (3) — ffmpeg reads it back as pcm_f32le
+  const dataBytes = mix.length * 4
+  const header = Buffer.alloc(44)
+  header.write('RIFF', 0); header.writeUInt32LE(36 + dataBytes, 4); header.write('WAVE', 8)
+  header.write('fmt ', 12); header.writeUInt32LE(16, 16); header.writeUInt16LE(3, 20)
+  header.writeUInt16LE(MIX_CH, 22); header.writeUInt32LE(MIX_RATE, 24)
+  header.writeUInt32LE(MIX_RATE * MIX_CH * 4, 28); header.writeUInt16LE(MIX_CH * 4, 32); header.writeUInt16LE(32, 34)
+  header.write('data', 36); header.writeUInt32LE(dataBytes, 40)
+  const fh = await fsp.open(outPath, 'w')
+  try {
+    await fh.write(header)
+    await fh.write(Buffer.from(mix.buffer, mix.byteOffset, dataBytes))
+  } finally {
+    await fh.close()
+  }
+}
+
 export class ExportMuxer {
   private child: ChildProcess | null = null
   private cancelled = false
@@ -624,10 +721,34 @@ export class ExportMuxer {
   /**
    * @param videoTemp path to the renderer-produced video-only mp4 ('' for audio-only)
    */
-  run(job: ExportJob, videoTemp: string, onProgress: (p: ExportProgress) => void): Promise<void> {
+  async run(job: ExportJob, videoTemp: string, onProgress: (p: ExportProgress) => void): Promise<void> {
     const args: string[] = ['-y', '-v', 'error', '-progress', 'pipe:1']
-    const segs = job.audioSegments
+    // Linux caps a single argv string at 128 KB (MAX_ARG_STRLEN): a timeline
+    // with ~1000 SFX clips builds a filter graph past that and spawn() fails
+    // with E2BIG. The graph goes through a script file instead of argv.
+    let filterScript: string | null = null
+    let segs = job.audioSegments
     const hasVideo = !job.preset.audioOnly
+
+    // big timelines: sum the clips ourselves, then mux that one stream
+    let premix: string | null = null
+    if (segs.length > PREMIX_THRESHOLD) {
+      premix = join(tmpdir(), `kadr-premix-${process.pid}-${Date.now()}.wav`)
+      try {
+        await premixSegments(segs, job.duration, premix,
+          (done, total) => onProgress({ phase: 'mux', progress: 0.5 * (done / total) }),
+          () => this.cancelled)
+      } catch (err) {
+        await fsp.unlink(premix).catch(() => { /* never written */ })
+        throw err
+      }
+      segs = [{ path: premix, inPoint: 0, duration: job.duration, start: 0, gain: 1, speed: 1, fadeIn: 0, fadeOut: 0 }]
+    }
+    const muxBase = premix ? 0.5 : 0 // mux progress after a premix continues from its half
+    const cleanupTemps = () => {
+      if (filterScript) fsp.unlink(filterScript).catch(() => { /* already gone */ })
+      if (premix) fsp.unlink(premix).catch(() => { /* already gone */ })
+    }
 
     if (hasVideo) args.push('-i', videoTemp)
     for (const s of segs) {
@@ -640,16 +761,8 @@ export class ExportMuxer {
       segs.forEach((s, i) => {
         const idx = i + (hasVideo ? 1 : 0)
         const ms = Math.round(s.start * 1000)
-        const speed = s.speed || 1
-        const outDur = s.duration / speed // timeline-domain length after atempo
         const chain = [
-          'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
-          `volume=${s.gain.toFixed(4)}`,
-          ...(Math.abs(speed - 1) > 1e-4 ? atempoChain(speed) : []),
-          ...(s.fadeIn > 0.001 ? [`afade=t=in:st=0:d=${Math.min(s.fadeIn, outDur).toFixed(3)}`] : []),
-          ...(s.fadeOut > 0.001
-            ? [`afade=t=out:st=${Math.max(0, outDur - s.fadeOut).toFixed(3)}:d=${Math.min(s.fadeOut, outDur).toFixed(3)}`]
-            : []),
+          ...segmentChain(s),
           `adelay=${ms}|${ms}`,
           'apad',
           `atrim=0:${job.duration.toFixed(3)}`
@@ -666,7 +779,9 @@ export class ExportMuxer {
           `${labels.join('')}amix=inputs=${segs.length}:dropout_transition=0,volume=${segs.length}[aout]`
         )
       }
-      args.push('-filter_complex', filters.join(';'))
+      filterScript = join(tmpdir(), `kadr-filter-${process.pid}-${Date.now()}.txt`)
+      await fsp.writeFile(filterScript, filters.join(';\n'))
+      args.push('-filter_complex_script', filterScript)
     }
 
     if (hasVideo) {
@@ -698,14 +813,18 @@ export class ExportMuxer {
           const m = line.match(/^out_time_us=(\d+)/)
           if (m) {
             const t = Number(m[1]) / 1e6
-            onProgress({ phase: 'mux', progress: Math.min(1, t / job.duration) })
+            onProgress({ phase: 'mux', progress: muxBase + (1 - muxBase) * Math.min(1, t / job.duration) })
           }
         }
       })
       child.stderr!.on('data', (c) => { err += c })
-      child.on('error', reject)
+      child.on('error', (e) => {
+        cleanupTemps()
+        reject(e)
+      })
       child.on('close', (code) => {
         this.child = null
+        cleanupTemps()
         if (this.cancelled) reject(new Error('cancelled'))
         else if (code === 0) resolve()
         else reject(new Error(`ffmpeg exited ${code}: ${err.slice(0, 800)}`))

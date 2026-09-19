@@ -908,14 +908,18 @@ function registerIpc() {
         : st.job
       await st.muxer.run(job, st.videoTemp, sendProgress)
       sendProgress({ phase: 'done', progress: 1 })
-    } catch (err: any) {
-      sendProgress({
-        phase: err?.message === 'cancelled' ? 'cancelled' : 'error',
-        progress: 0,
-        message: String(err?.message ?? err)
-      })
-    } finally {
       await cleanupExport()
+    } catch (err: any) {
+      const cancelled = err?.message === 'cancelled'
+      // the video stream took hours to render; a failed mux must not throw it
+      // away — keep the temp file and tell the user where it is
+      const keep = !cancelled && !st.job.preset.audioOnly
+      sendProgress({
+        phase: cancelled ? 'cancelled' : 'error',
+        progress: 0,
+        message: String(err?.message ?? err) + (keep ? ` (video kept at ${st.videoTemp})` : '')
+      })
+      await cleanupExport(keep)
     }
   })
 
@@ -929,12 +933,14 @@ function registerIpc() {
   })
 }
 
-async function cleanupExport() {
+async function cleanupExport(keepVideo = false) {
   if (!exportState) return
   const st = exportState
   exportState = null
   st.raw?.kill()
   st.rawWss?.close()
   try { await st.fh?.close() } catch { /* already closed */ }
-  try { await fs.unlink(st.videoTemp) } catch { /* never created */ }
+  if (!keepVideo) {
+    try { await fs.unlink(st.videoTemp) } catch { /* never created */ }
+  }
 }

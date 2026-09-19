@@ -74,6 +74,25 @@ mixes audio and muxes/transcodes per preset.
   (per-segment `volume,atempo*,afade,adelay,apad,atrim` → `amix` with
   exact level compensation), `RawVideoEncoder` (fallback raw-frame
   encoder; the primary one is spawned by the preload).
+  TWO LIMITS A BIG TIMELINE WALKS INTO, both met on a real 19-minute edit
+  carrying ~1000 SFX clips. One graph with N padded inputs costs the ffmpeg
+  scheduler roughly QUADRATICALLY in N: that mix ran at a quarter of realtime —
+  80 minutes of muxing for 19 minutes of video. Past `PREMIX_THRESHOLD` (64)
+  segments, `premixSegments` decodes each segment separately through the SAME
+  chain (`segmentChain`: volume, atempo, fades) to f32 PCM and sums it into one
+  buffer at its timeline offset — linear in total clip length instead of
+  quadratic in clip count — and the muxer then sees a single input. Levels are
+  identical by construction: amix divided every input by N and the following
+  `volume=N` undid it, so a plain sum lands in the same place. NB that buffer is
+  held whole in main: 48 kHz stereo f32 is ~23 MB per minute of timeline.
+  The other limit is argv: Linux caps ONE argument at 128 KB (MAX_ARG_STRLEN),
+  and that many clips build a `-filter_complex` past it — spawn failed with
+  E2BIG. The graph is written to a file and passed as `-filter_complex_script`,
+  on every export rather than only the big ones.
+  A FAILED MUX NO LONGER BINS THE VIDEO: the stream is rendered first and can
+  take hours, and the mux ran with that temp file scheduled for deletion in
+  `finally`. A non-cancelled failure that has video keeps it, and the error
+  message says where it is.
 - `electron/claude.ts` — embedded Claude Code: node-pty PTY running the
   user's `claude` CLI inside a watchdog wrapper (kills its process group
   if Electron dies hard), per-session HTTP bridge (POST /eval →

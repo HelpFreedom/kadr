@@ -11,6 +11,7 @@ import {
 import { mediaCacheKey, proxySuffix, decodedSuffix, reverseSuffix } from './cacheKeys'
 import { registerStorageIpc } from './storage'
 import { registerClaudeIpc } from './claude'
+import { takeTranscripts, withTranscripts } from './chats'
 import { registerTranscribeIpc } from './transcribe'
 import { registerTtsIpc } from './tts'
 import { registerVoiceIpc } from './voice'
@@ -774,11 +775,11 @@ function registerIpc() {
   })
 
   ipcMain.handle('project:read', async (_e, path: string): Promise<Project> => {
-    return JSON.parse(await fs.readFile(path, 'utf-8'))
+    return takeTranscripts(JSON.parse(await fs.readFile(path, 'utf-8')))
   })
 
   ipcMain.handle('project:write', async (_e, path: string, project: Project) => {
-    await fs.writeFile(path, JSON.stringify(project, null, 1), 'utf-8')
+    await fs.writeFile(path, JSON.stringify(await withTranscripts(project), null, 1), 'utf-8')
   })
 
   // periodic safety net: <name>.autosave.kadr next to the saved project
@@ -791,7 +792,7 @@ function registerIpc() {
       : (project.name || 'Untitled').replace(/[^\p{L}\p{N}._ -]/gu, '').trim() || 'Untitled'
     const out = join(dir, `${base}.autosave.kadr`)
     const tmp = `${out}.tmp`
-    await fs.writeFile(tmp, JSON.stringify(project, null, 1), 'utf-8')
+    await fs.writeFile(tmp, JSON.stringify(await withTranscripts(project), null, 1), 'utf-8')
     await fs.rename(tmp, out)
     return out
   })

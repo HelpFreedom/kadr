@@ -371,7 +371,8 @@ export default function App() {
       <TtsSettingsDialog />
       <SpeakDialog />
       <DefectsDialog />
-      {claudeOpen && <ClaudePanel onClose={() => setClaudeOpen(false)} />}
+      {/* keyed by project: another project brings up ITS chats */}
+      {claudeOpen && <ClaudePanel key={project.id} onClose={() => setClaudeOpen(false)} />}
       {debugOpen && <DebugPanel onClose={() => setDebugOpen(false)} />}
       {storageOpen && <StoragePanel onClose={() => setStorageOpen(false)} />}
       {/* The preview renders into one host div for the whole session; popping

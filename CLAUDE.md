@@ -19,7 +19,8 @@ mixes audio and muxes/transcodes per preset.
 - Pure node checks — no app, no network:
   `node scripts/check-envelope.mjs` (loudness envelope),
   `check-ttstext.mjs` (text splitting), `check-proxy.mjs` (proxy choice),
-  `check-voicemap.mjs` (time remapping after a splice); plus
+  `check-voicemap.mjs` (time remapping after a splice),
+  `check-chats.mjs` (Claude chats round-tripping through the .kadr); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
 - `node scripts/gen-icons.mjs [dir]` — regenerate `src/components/icons.tsx`
   from lucide (see the header for the two-line fetch); never hand-edit the
@@ -120,6 +121,29 @@ mixes audio and muxes/transcodes per preset.
   send the request — and a flat refusal of any request carrying an `Origin`.
   The token reaches the MCP server as argv[3] of the generated config; the
   liveness ping on `GET /` stays open.
+  On Windows there is no bash and no process groups: the command is found
+  with `where` (npm's extensionless sh shim is skipped), claude runs directly
+  in the pty, and a close kills its tree with `taskkill /t`.
+- `electron/chats.ts` — the project's Claude chats. `Project.claudeChats`
+  holds session ids; the panel resumes the newest (`--resume`) or starts one
+  with a known id (`--session-id`), and its header picks between them. Both
+  project writers embed the transcripts as `claudeTranscripts: {id: jsonl}`;
+  `project:read` takes them out again and keeps them in main — THEY NEVER
+  REACH THE RENDERER, whose project is deep-copied on every edit. Claude Code
+  only resumes from `<config>/projects/<slug of cwd>/<id>.jsonl`, so right
+  before a resume the longest known copy (any slug folder, or the opened
+  file) is written there — a chat begun in an unsaved project (cwd = home)
+  or on another machine resumes in the project's folder. Transcripts only
+  grow: between two copies the longer wins. A chat joins the project on the
+  user's first key or paste in that session (`noteClaudeChat`, always a new
+  project object — the unsaved dot and autosave must see that the file's
+  transcript is behind); ids with no transcript are dropped on save. Undo/
+  redo carry the CURRENT chat list over, since a chat is not an edit. The
+  panel is keyed by project id, so opening another project brings up ITS
+  chats. An args override in claude-env.json runs something that may not be
+  claude, so it gets no chat flags and its sessions are not tracked. NOT
+  TRACKED either: a session switched inside the TUI (`/clear`, `/resume`) —
+  claude gives it an id the panel never sees; «New chat» is the way.
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
   via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
   kadr_snapshot / kadr_export / kadr_transcribe / kadr_fragment_create /

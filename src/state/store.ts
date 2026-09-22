@@ -98,6 +98,7 @@ export function sanitizeProject(p: Project): Project {
   if (!Number.isFinite(p.height) || p.height <= 0) p.height = 1080
   if (!Number.isFinite(p.fps) || p.fps <= 0) p.fps = 30
   p.assets ??= []
+  p.claudeChats = (p.claudeChats ?? []).filter((id) => typeof id === 'string' && id.length > 0)
   p.markers = (p.markers ?? []).filter(
     (m) => m && typeof m.id === 'string' && Number.isFinite(m.time)
   )
@@ -448,6 +449,10 @@ interface EditorState {
 
   setProject(p: Project, path?: string | null): void
   setProjectPath(path: string | null): void
+  /** a Claude chat of this project was just talked to: record it, last = latest.
+   *  Always a new project object, so the unsaved dot and autosave see that the
+   *  transcript in the file is behind. No undo entry: a chat is not an edit. */
+  noteClaudeChat(id: string): void
   /** Snapshot current project; call once before a discrete edit or drag. */
   pushHistory(label: string): void
   undo(): void
@@ -631,6 +636,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       selection: [], playhead: 0, playing: false, range: null
     }),
   setProjectPath: (projectPath) => set({ projectPath }),
+  noteClaudeChat: (id) =>
+    set((s) => ({
+      project: { ...s.project, claudeChats: [...(s.project.claudeChats ?? []).filter((c) => c !== id), id] }
+    })),
 
   pushHistory: (label) =>
     set((s) => ({
@@ -644,7 +653,8 @@ export const useEditor = create<EditorState>((set, get) => ({
       const entry = past.pop()!
       return {
         past,
-        project: entry.project,
+        // chats are not an edit: undoing the clip before one must not drop it
+        project: { ...entry.project, claudeChats: s.project.claudeChats },
         future: [{ project: cloneProject(s.project), label: entry.label }, ...s.future],
         selection: []
       }
@@ -655,7 +665,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       const [entry, ...future] = s.future
       return {
         future,
-        project: entry.project,
+        project: { ...entry.project, claudeChats: s.project.claudeChats },
         past: [...s.past, { project: cloneProject(s.project), label: entry.label }],
         selection: []
       }

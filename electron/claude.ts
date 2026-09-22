@@ -4,12 +4,13 @@
 // (mcp-bridge.cjs, spawned by claude itself) talks to.
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { createServer, type Server } from 'http'
-import { randomBytes } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
-import { join } from 'path'
+import { join, isAbsolute } from 'path'
 import { tmpdir } from 'os'
 import type { IPty } from 'node-pty'
+import { ensureInStore, listChats } from './chats'
 
 // The session inherits this process's environment MINUS the markers of any
 // Claude session that launched the editor (see SESSION_MARKERS). Anything extra the
@@ -185,8 +186,21 @@ function startBridge(
   })
 }
 
+const WIN = process.platform === 'win32'
+
 function which(cmd: string): Promise<string | null> {
   return new Promise((resolve) => {
+    if (WIN) {
+      if (isAbsolute(cmd)) return resolve(cmd)
+      // `where` also lists npm's extensionless sh shims, which CreateProcess
+      // cannot run — keep the first hit with a runnable extension (claude.cmd)
+      const exts = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').toLowerCase().split(';').filter(Boolean)
+      execFile('where', [cmd], (err, stdout) => {
+        const hit = err ? undefined : stdout.split(/\r?\n/).find((p) => exts.some((e) => p.toLowerCase().endsWith(e)))
+        resolve(hit || null)
+      })
+      return
+    }
     execFile('/bin/sh', ['-c', `command -v ${cmd}`], (err, stdout) => {
       resolve(err ? null : stdout.trim() || null)
     })
@@ -258,9 +272,10 @@ async function spawnSession(
   win: BrowserWindow,
   cols: number,
   rows: number,
-  cwd: string | null
-): Promise<{ ok: boolean; port?: number; error?: string }> {
-  killSession() // a reopen without a close in between
+  cwd: string | null,
+  chatId: string | null
+): Promise<{ ok: boolean; port?: number; chatId?: string; error?: string }> {
+  await killSession() // a reopen without a close in between
   const cfg = await userConfig()
   const cmdName = process.env.KADR_CLAUDE_CMD || cfg.command || 'claude'
   const bin = (await which(cmdName)) ?? cmdName
@@ -297,12 +312,16 @@ async function spawnSession(
     }, null, 1)
   )
 
-  const args = cfg.args ?? [
-    '--mcp-config', mcpCfgPath,
-    '--append-system-prompt', SYSTEM_HINT
-  ]
   let dir = cwd || app.getPath('home')
   try { await fs.access(dir) } catch { dir = app.getPath('home') }
+  // chats: electron/chats.ts; an args override may not run claude, so no chat flags
+  const chat = cfg.args ? undefined : chatId ?? randomUUID()
+  if (chat && chatId) await ensureInStore(chatId, dir)
+  const args = cfg.args ?? [
+    '--mcp-config', mcpCfgPath,
+    '--append-system-prompt', SYSTEM_HINT,
+    ...(chatId ? ['--resume', chatId] : ['--session-id', chat as string])
+  ]
 
   try {
     // lazy import: node-pty is native — a load failure must not break the app
@@ -315,7 +334,10 @@ async function spawnSession(
     const wrapper =
       `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
       `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
-    const p = pty.spawn('/bin/bash', ['-c', wrapper, bin, ...args], {
+    // Windows has no bash and no process groups: claude runs directly and
+    // killSession takes its tree with taskkill; a hard Electron death closes
+    // the pseudoconsole, which ends everything attached to it.
+    const p = pty.spawn(WIN ? bin : '/bin/bash', WIN ? args : ['-c', wrapper, bin, ...args], {
       name: 'xterm-256color',
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
@@ -340,25 +362,35 @@ async function spawnSession(
         session = null
       }
     })
-    return { ok: true, port: bridge.port }
+    return { ok: true, port: bridge.port, chatId: chat }
   } catch (err) {
     bridge.server.close()
     return { ok: false, error: String(err) }
   }
 }
 
-function killSession() {
-  if (!session) return
+function killSession(): Promise<void> {
+  if (!session) return Promise.resolve()
   const s = session
   session = null
   // HUP the whole process group (claude + its MCP server children), then
   // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
   const pid = s.pty.pid
+  if (WIN) {
+    s.server.close()
+    // the whole tree: the .cmd shim's cmd.exe → claude → its MCP servers.
+    // Waited for: a resume of the same chat must not race its old writer.
+    return new Promise((done) => execFile('taskkill', ['/pid', String(pid), '/t', '/f'], () => {
+      try { s.pty.kill() } catch { /* dead */ }
+      done()
+    }))
+  }
   try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
   setTimeout(() => {
     try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
   }, 1500)
   s.server.close()
+  return Promise.resolve()
 }
 
 /**
@@ -379,12 +411,13 @@ function openSession(
   win: BrowserWindow,
   cols: number,
   rows: number,
-  cwd: string | null
-): Promise<{ ok: boolean; port?: number; error?: string }> {
+  cwd: string | null,
+  chatId: string | null
+): Promise<{ ok: boolean; port?: number; chatId?: string; error?: string }> {
   const gen = ++sessionGen
   const job = sessionChain.then(() =>
     gen === sessionGen
-      ? spawnSession(win, cols, rows, cwd)
+      ? spawnSession(win, cols, rows, cwd, chatId)
       : { ok: false, error: 'superseded' }
   )
   sessionChain = job.catch(() => undefined)
@@ -422,11 +455,12 @@ async function syncSkill(): Promise<void> {
 export function registerClaudeIpc(getWin: () => BrowserWindow | null) {
   void sweepStaleSessions() // leftovers from a hard-killed previous run
   void syncSkill()
-  ipcMain.handle('claude:open', (_e, cols: number, rows: number, cwd: string | null) => {
+  ipcMain.handle('claude:open', (_e, cols: number, rows: number, cwd: string | null, chatId?: string | null) => {
     const win = getWin()
     if (!win) return { ok: false, error: 'no window' }
-    return openSession(win, cols, rows, cwd)
+    return openSession(win, cols, rows, cwd, chatId ?? null)
   })
+  ipcMain.handle('claude:chats', (_e, ids: string[]) => listChats(ids))
   ipcMain.on('claude:input', (_e, data: string) => session?.pty.write(data))
   ipcMain.on('claude:resize', (_e, cols: number, rows: number) => {
     try { session?.pty.resize(Math.max(20, cols), Math.max(5, rows)) } catch { /* dying */ }

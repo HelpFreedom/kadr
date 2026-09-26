@@ -4,11 +4,11 @@
 // iteration); `remotion render` runs exactly once per fragment content hash
 // at export time.
 import { app, ipcMain, BrowserWindow } from 'electron'
-import { spawn, ChildProcess } from 'child_process'
+import { spawn, execFileSync, ChildProcess } from 'child_process'
 import { promises as fs, existsSync, readdirSync, statSync } from 'fs'
 import { join, basename, dirname } from 'path'
 import { createHash } from 'crypto'
-import { homedir } from 'os'
+import { homedir, tmpdir } from 'os'
 import type { FragmentSpec, FragmentInfo } from '@shared/types'
 
 export const WORKSPACE = process.env.KADR_FRAGMENTS_DIR || join(homedir(), 'kadr-fragments')
@@ -51,9 +51,53 @@ const PKG_JSON = `{
 
 const VITE_CONFIG = `import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { readdirSync, lstatSync, realpathSync } from 'fs'
+import { join, sep } from 'path'
+
+// Project-owned fragments are symlinks into src/fragments. chokidar does not
+// follow a symlinked folder that appears AFTER the server started — which is
+// every fragment created in a saved project — so edits there were never seen:
+// the preview kept serving the first transform of the file forever. Watch the
+// real folders ourselves and replay their events on the symlinked path, the
+// one the module graph knows (preserveSymlinks below).
+function followProjectFragments() {
+  return {
+    name: 'kadr-follow-project-fragments',
+    configureServer(server) {
+      const root = join(server.config.root, 'src', 'fragments')
+      const linked = new Map()
+      const scan = () => {
+        let names = []
+        try { names = readdirSync(root) } catch { return }
+        for (const n of names) {
+          const link = join(root, n)
+          try {
+            if (!lstatSync(link).isSymbolicLink()) continue
+            const real = realpathSync(link)
+            if (linked.get(real) === link) continue
+            linked.set(real, link)
+            server.watcher.add(real)
+          } catch { /* a dangling link: nothing to watch */ }
+        }
+      }
+      scan()
+      const timer = setInterval(scan, 1500)
+      if (timer.unref) timer.unref()
+      const relay = (ev) => (file) => {
+        for (const [real, link] of linked) {
+          if (file.startsWith(real + sep)) {
+            server.watcher.emit(ev, link + file.slice(real.length))
+            return
+          }
+        }
+      }
+      for (const ev of ['change', 'add', 'unlink']) server.watcher.on(ev, relay(ev))
+    }
+  }
+}
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), followProjectFragments()],
   clearScreen: false,
   // project-owned fragments live behind symlinks: keep module ids at the
   // symlinked (in-root) paths so the file watcher sees edits and hot reload
@@ -497,6 +541,27 @@ async function relocateFragments(projectDir: string, ids: string[]): Promise<str
   return changed
 }
 
+/**
+ * Write one generated file into a fragment's folder (through the workspace
+ * link, so a project-owned fragment gets it in its real home). The name must be
+ * a plain file name: the page may never pick a path, only a file inside a
+ * folder this module already owns. Only the generated kinds are accepted.
+ */
+async function writeFragmentFile(id: string, name: string, content: string): Promise<string> {
+  assertId(id)
+  if (typeof name !== 'string' || !/^[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(json|ts|tsx)$/.test(name) || name.includes('..')) {
+    throw new Error('bad fragment file name')
+  }
+  if (typeof content !== 'string') throw new Error('fragment file content must be a string')
+  const dir = await fs.realpath(join(FRAG_DIR(), id))
+  const path = join(dir, name)
+  // write-then-rename: vite's watcher must never see a half-written module
+  const tmp = `${path}.part-${process.pid}`
+  await fs.writeFile(tmp, content)
+  await fs.rename(tmp, path)
+  return path
+}
+
 /** Content hash of a fragment folder (names + mtimes + sizes). */
 function fragmentHash(id: string): string {
   const h = createHash('sha1')
@@ -515,6 +580,59 @@ function fragmentHash(id: string): string {
 
 const renderDir = () => join(app.getPath('userData'), 'fragment-renders')
 let renderChain: Promise<unknown> = Promise.resolve()
+let activeRender: ChildProcess | null = null
+let renderCancelled = false
+
+/** remotion's frame scratch dirs (PNG per frame — gigabytes on a long render) */
+const RENDER_SCRATCH = /^react-motion-render/
+const scratchDirs = () => {
+  try { return new Set(readdirSync(tmpdir()).filter((n) => RENDER_SCRATCH.test(n))) } catch { return new Set<string>() }
+}
+let scratchBefore = new Set<string>()
+
+/** every process below `root`, whatever group or session it put itself in */
+function processTree(root: number): number[] {
+  let table: string
+  try { table = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8' }) } catch { return [root] }
+  const kids = new Map<number, number[]>()
+  for (const line of table.split('\n')) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number)
+    if (!pid) continue
+    kids.set(ppid, [...(kids.get(ppid) ?? []), pid])
+  }
+  const out: number[] = []
+  const walk = (p: number) => { out.push(p); for (const k of kids.get(p) ?? []) walk(k) }
+  walk(root)
+  return out
+}
+
+/**
+ * Stop the running fragment render and everything under it. The whole TREE is
+ * killed at once with SIGKILL, not the group with a polite TERM first — both
+ * measured: remotion starts its headless Chrome in a process group of its own,
+ * so a group kill never reached it, and on SIGTERM remotion launched a FRESH
+ * Chrome on its way out, which was reparented to init and stayed. A snapshot of
+ * the descendants killed in one pass leaves nothing able to spawn anything.
+ * Its frame scratch dir is removed too (the one that appeared during this
+ * render — a remotion render run by hand from a terminal is left alone).
+ * Renders still queued behind it refuse to start until the next export clears
+ * the flag.
+ */
+export function cancelFragmentRenders() {
+  renderCancelled = true
+  const child = activeRender
+  if (!child?.pid) return
+  if (process.platform === 'win32') {
+    try { execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F']) } catch { /* already gone */ }
+    return
+  }
+  for (const pid of processTree(child.pid)) {
+    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  }
+  for (const name of scratchDirs()) {
+    if (!scratchBefore.has(name)) void fs.rm(join(tmpdir(), name), { recursive: true, force: true })
+  }
+}
 
 async function renderFragment(
   id: string,
@@ -562,25 +680,44 @@ async function renderFragment(
       return true // another caller rendered it while we waited in the queue
     } catch { /* still missing */ }
     try {
+      if (renderCancelled) throw new Error('cancelled')
       await new Promise<void>((resolve, reject) => {
+        // remotion runs chrome AND its own ffmpeg under this; a cancel kills
+        // the whole tree (cancelFragmentRenders) — killing only npx once left
+        // that ffmpeg encoding for minutes as an orphan nobody could reach
         const child = spawn('npx', args, {
           cwd: WORKSPACE,
           env: { ...process.env, ...extraEnv },
-          stdio: ['ignore', 'pipe', 'pipe']
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32'
         })
-        let all = ''
+        activeRender = child
+        scratchBefore = scratchDirs()
+        // only the tail is parsed: the whole output re-scanned on every chunk
+        // grew quadratically over a few thousand progress lines
+        let tail = ''
+        let rendered = 0
+        let encoded = 0
         const onData = (c: Buffer) => {
-          all += c
-          // remotion prints e.g. "Rendered 120/300"
-          const m = all.match(/Rendered (\d+)\/(\d+)(?![\s\S]*Rendered \d+\/\d+)/)
-          if (m) onProgress(Math.min(0.99, Number(m[1]) / Math.max(1, Number(m[2]))))
+          tail = (tail + c).slice(-4000)
+          // remotion prints "Rendered 120/300" while drawing frames and
+          // "Stitched 80/300" ("Encoded" in some versions) while encoding them
+          // into the video — that second phase went unreported, and on a heavy
+          // transparent fragment the export sat on one number for many minutes
+          const r = [...tail.matchAll(/Rendered (\d+)\/(\d+)/g)].pop()
+          const e = [...tail.matchAll(/(?:Stitched|Encoded) (\d+)\/(\d+)/g)].pop()
+          if (r) rendered = Math.max(rendered, Number(r[1]) / Math.max(1, Number(r[2])))
+          if (e) encoded = Math.max(encoded, Number(e[1]) / Math.max(1, Number(e[2])))
+          onProgress(Math.min(0.99, 0.75 * rendered + 0.25 * encoded))
         }
         child.stdout!.on('data', onData)
         child.stderr!.on('data', onData)
         child.on('error', reject)
         child.on('close', (code) => {
-          if (code === 0) resolve()
-          else reject(new Error(`remotion render exited ${code}: ${all.slice(-800)}`))
+          if (activeRender === child) activeRender = null
+          if (renderCancelled) reject(new Error('cancelled'))
+          else if (code === 0) resolve()
+          else reject(new Error(`remotion render exited ${code}: ${tail.slice(-800)}`))
         })
       })
       await fs.rename(tmp, out)
@@ -687,9 +824,13 @@ export function registerFragmentIpc(getWin: () => BrowserWindow | null) {
   ipcMain.handle('fragment:delete', (_e, id: string) => deleteFragment(id))
   ipcMain.handle('fragment:relocate', (_e, projectDir: string, ids: string[]) =>
     relocateFragments(projectDir, ids))
-  ipcMain.handle('fragment:render', (_e, id: string, opts?: { transparent?: boolean }) =>
-    renderFragment(id, opts, (p) => send(id, 'render', p))
-  )
+  ipcMain.handle('fragment:write-file', (_e, id: string, name: string, content: string) =>
+    writeFragmentFile(id, name, content))
+  ipcMain.handle('fragment:render', (_e, id: string, opts?: { transparent?: boolean }) => {
+    renderCancelled = false
+    return renderFragment(id, opts, (p) => send(id, 'render', p))
+  })
+  ipcMain.handle('fragment:cancel-render', () => cancelFragmentRenders())
   ipcMain.handle('fragment:capture-start', (_e, id: string, url: string, w: number, h: number, fps: number) =>
     captureStart(getWin, id, url, w, h, fps)
   )

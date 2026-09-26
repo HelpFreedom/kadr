@@ -164,6 +164,21 @@ export interface Clip {
   transitionIn?: Transition
   transitionOut?: Transition
   label?: string
+  /**
+   * remotion clips: the sound under the clip was baked into the fragment
+   * (audio.json next to its entry) by «Реакция на звук». `hash` fingerprints
+   * what was baked — the clip's placement and every audio segment under it —
+   * so the Inspector can say «устарело» and an export can re-bake it.
+   */
+  audioBake?: AudioBake
+}
+
+export interface AudioBake {
+  hash: string
+  /** 'mix' = everything audible, otherwise the id of the one track listened to */
+  source: string
+  /** epoch ms */
+  at: number
 }
 
 export type TrackKind = 'video' | 'audio'
@@ -185,8 +200,17 @@ export interface TimelineMarker {
   id: string
   /** project seconds; markers float above all tracks */
   time: number
-  /** short label shown in the flag — auto-numbered 1, 2, 3… */
+  /** short label shown in the flag — auto-numbered 1, 2, 3…; empty for beats */
   label: string
+  /**
+   * absent = the user's own marker (green flag); 'beat' = a detected musical
+   * beat (thin line, no flag). Both are snap targets.
+   */
+  kind?: 'beat'
+  /** beats: strength 0..1 (brag's cue intensity) */
+  strength?: number
+  /** beats: an accent — among the strongest beats of the piece */
+  strong?: boolean
 }
 
 export interface Project {
@@ -330,6 +354,96 @@ export interface EnvelopeRequest {
   /** follower attack/release in seconds; defaults = Blender's sound bake (0.005 / 0.2) */
   attack?: number
   release?: number
+}
+
+/** Music analysis of a mixed range (shared/audioAnalysis.ts). */
+export interface AnalyzeRequest {
+  /** segments in range coordinates (start at 0), as for transcription */
+  audioSegments: AudioSegment[]
+  duration: number
+}
+
+export interface AnalyzedBeat {
+  /** seconds from the start of the range */
+  time: number
+  /** 0..1 */
+  intensity: number
+  strong: boolean
+}
+
+export interface AudioAnalysisResult {
+  duration: number
+  /** curve samples per second */
+  frameRate: number
+  /** BPM, 0 = nothing rhythmic found */
+  tempo: number
+  beats: AnalyzedBeat[]
+  /** strongest phase for every-2nd / every-4th grids (heuristic downbeat) */
+  accentPhase: { 2: number; 4: number }
+  /** 0..1 energies at frameRate, t = 0 at index 0 */
+  curves: { rms: number[]; bass: number[]; mid: number[]; treble: number[] }
+  /**
+   * Set when librosa's grid sat systematically off the audible attacks and was
+   * moved onto them (shared/audioAnalysis.ts alignBeatsToAttacks): the median
+   * offset in ms (negative = the grid was late) and how many beats went exactly
+   * onto their own attack.
+   */
+  attack?: { band: 'low' | 'full'; shiftMs: number; snapped: number; total: number }
+}
+
+/** One sound of the library: bundled (resources/sfx) or the user's own (userData/sfx). */
+export interface SfxEntry {
+  /**
+   * stable id: the path relative to its sfx folder, e.g.
+   * "impact/impactSoft_medium_001.ogg"; the user's own sounds are prefixed
+   * "user:" ("user:mine/boom.mp3") so they can never collide with a bundled one
+   */
+  id: string
+  /** absolute path */
+  path: string
+  /** folder: impact | casino | interface | ui | keyboard, or a user folder (mine…) */
+  family: string
+  origin: 'bundled' | 'user'
+  duration: number
+  /**
+   * seconds from the file start to the attack of its main hit — placing a
+   * sound "at t" puts this moment at t (a whoosh peaks ~0.5 s in, a boom with a
+   * lead-in 1.5 s in)
+   */
+  hit: number
+  brightness?: 'warm' | 'balanced' | 'bright'
+  /** how sharp/fatiguing it gets when repeated */
+  hfRisk?: 'low' | 'medium' | 'high'
+  envelope?: 'transient' | 'textured' | 'continuous'
+  /** 'brag' = /brag's own labels; 'kadr' = computed by shared/sfxFeatures.ts */
+  labelledBy: 'brag' | 'kadr'
+  tags: string[]
+  /** suggested uses, English keys ("major reveal", "button press", "typing"…) */
+  uses: string[]
+  /** a short human description, when someone wrote one */
+  note?: string
+}
+
+export interface MusicEntry {
+  id: string
+  path: string
+  name: string
+  descRu: string
+  descEn: string
+  duration: number
+  tempo: number
+  author: string
+  license: string
+}
+
+export interface SoundLibrary {
+  root: string
+  /** the user's own sound folder (userData/sfx): one subfolder per family */
+  userRoot: string
+  sfx: SfxEntry[]
+  music: MusicEntry[]
+  /** absolute path of resources/CREDITS.md */
+  credits: string
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +887,11 @@ export interface ExportJob {
   duration: number
   /** flattened audio segments for the ffmpeg mix */
   audioSegments: AudioSegment[]
+  /**
+   * master stage (peak limiter, shared/audioMaster.ts); undefined = on.
+   * false for analysis mixdowns, which must see the mix unaltered.
+   */
+  master?: boolean
 }
 
 export interface AudioSegment {
@@ -937,6 +1056,18 @@ export interface KadrApi {
   meanVolume(path: string, start: number, duration: number): Promise<{ mean: number; max: number }>
   /** Blender-compatible loudness envelope of a mixed range, one value per frame (see shared/envelope.ts). */
   audioEnvelope(req: EnvelopeRequest): Promise<number[]>
+  /** Tempo, beat grid and band energies of a mixed range (see shared/audioAnalysis.ts). */
+  audioAnalyze(req: AnalyzeRequest): Promise<AudioAnalysisResult>
+  /**
+   * The bundled sound effects and music (resources/) plus the user's own
+   * sounds (userData/sfx/<family>/). `rescan` re-reads the user folder and
+   * analyses what is new or changed.
+   */
+  soundLibrary(rescan?: boolean): Promise<SoundLibrary>
+  /** Describe one of the user's own sounds (id "user:…"): uses, tags, a note. */
+  soundSetMeta(id: string, meta: { uses?: string[]; tags?: string[]; note?: string }): Promise<SfxEntry>
+  /** Write one generated file (plain name, no folders) into a fragment's folder; returns its path. */
+  fragmentWriteFile(id: string, name: string, content: string): Promise<string>
 
   exportDialog(defaultName: string, ext: string): Promise<string | null>
   exportBegin(job: ExportJob): Promise<void>
@@ -985,6 +1116,8 @@ export interface KadrApi {
   fragmentCaptureSync(id: string, msg: unknown): void
   onFragmentFrame(cb: (p: { id: string; w: number; h: number; data: Uint8Array }) => void): () => void
   fragmentRender(id: string, opts?: { transparent?: boolean }): Promise<{ path: string; cached: boolean }>
+  /** stops the running fragment render (its whole process tree) */
+  fragmentCancelRender(): Promise<void>
   onFragmentProgress(cb: (p: { id: string; phase: string; progress: number }) => void): () => void
 
   /** Mix the request's audio to a temp wav and run Whisper over it. */

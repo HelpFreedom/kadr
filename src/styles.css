@@ -65,6 +65,7 @@
   --c-fragment: #8b6cf0;
   --c-handle: #6fd3ff;        /* speed / extend grips */
   --c-mask: #ff8a5c;
+  --c-beat: #ff6fb5;           /* detected musical beats: 7.6:1 on the canvas */
 
   --clip-video: #2b3f63;
   --clip-video-2: #22334f;
@@ -104,6 +105,7 @@
   --rgb-handle: 111 211 255;
   --rgb-audio-level: 255 214 90;
   --rgb-mask: 220 60 60;
+  --rgb-beat: 255 111 181;
 
   /* --- fills that are one colour and nothing else ----------------------- */
   --c-on-solid: #ffffff;          /* text on a filled accent/danger button */
@@ -1414,6 +1416,36 @@ div.tr-error {
   cursor: ew-resize;
   user-select: none;
   pointer-events: auto;
+}
+
+/* Detected beats: a thin line through every lane plus a tick on the ruler.
+   Passive like the markers' line — a drag aimed at a clip goes straight
+   through (pointer-events: none); they matter as SNAP targets, not as things to
+   grab. Accents are brighter and get the longer tick. */
+.tl-beat {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgb(var(--rgb-beat) / 0.22);
+  z-index: 1;
+  pointer-events: none;
+}
+.tl-beat::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -1px;
+  width: 3px;
+  height: 7px;
+  background: rgb(var(--rgb-beat) / 0.75);
+}
+.tl-beat.strong { background: rgb(var(--rgb-beat) / 0.5); }
+.tl-beat.strong::before { height: 12px; background: var(--c-beat); }
+.tl-toolbar .beat-snap[aria-pressed="true"] {
+  color: var(--c-beat);
+  border-color: rgb(var(--rgb-beat) / 0.6);
+  background: rgb(var(--rgb-beat) / 0.12);
 }
 
 .playhead {
@@ -2777,3 +2809,70 @@ div.tr-error {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---- «Звуки»: the bundled sound library ------------------------------- */
+.modal.sounds-dialog { width: 720px; }
+.snd-tabs { padding: 0; margin-bottom: var(--s2); }
+.snd-filters { display: flex; flex-direction: column; gap: var(--s2); }
+.snd-chips { display: flex; flex-wrap: wrap; gap: var(--s1); }
+.snd-chips .chip {
+  padding: 2px var(--s3);
+  border-radius: var(--r-full);
+  font-size: var(--fz-sm);
+}
+.snd-chips .chip.on {
+  color: var(--c-accent-hi);
+  border-color: var(--c-accent-line);
+  background: var(--c-accent-soft);
+}
+.snd-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+.snd-filter-row input[type="search"] { flex: 1; min-width: 140px; }
+.snd-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  border: 1px solid var(--c-line-2);
+  border-radius: var(--r2);
+  background: var(--c-bg-1);
+}
+.snd-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--s2);
+  padding: 3px var(--s2);
+  border-bottom: 1px solid var(--c-line);
+}
+.snd-row:last-child { border-bottom: none; }
+.snd-row:hover { background: var(--c-bg-2); }
+.snd-row .icon-only { width: 26px; height: 24px; }
+.snd-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snd-row.music .snd-name { white-space: normal; }
+.snd-desc { display: block; font-size: var(--fz-sm); }
+.snd-dur { font-variant-numeric: tabular-nums; font-size: var(--fz-sm); }
+.snd-tags { display: flex; gap: var(--s1); justify-content: flex-end; flex-wrap: wrap; }
+.snd-tag {
+  padding: 0 var(--s2);
+  border-radius: var(--r-full);
+  border: 1px solid var(--c-line-2);
+  color: var(--c-text-2);
+  font-size: var(--fz-micro);
+  line-height: 16px;
+  white-space: nowrap;
+}
+.snd-tag.b-warm { color: var(--c-warn); border-color: rgb(var(--rgb-warn) / 0.4); }
+.snd-tag.b-bright { color: var(--c-handle); border-color: rgb(var(--rgb-handle) / 0.4); }
+.snd-tag.r-low { color: var(--c-ok); border-color: rgb(var(--rgb-ok) / 0.4); }
+.snd-tag.r-high { color: var(--c-danger-text); border-color: rgb(var(--rgb-danger) / 0.5); }
+.snd-credits { font-size: var(--fz-micro); }
+
+/* ---- «Реакция на звук» in the Inspector ------------------------------- */
+.ar-state { font-size: var(--fz-sm); }
+.ar-state.fresh { color: var(--c-ok); }
+.ar-state.stale { color: var(--c-warn); }
+.snd-tag.hit { color: var(--c-beat); border-color: rgb(var(--rgb-beat) / 0.45); }
+.snd-row.user .snd-name { color: var(--c-text); white-space: normal; }

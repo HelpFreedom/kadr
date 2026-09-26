@@ -1,7 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
-import { useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, newClipDefaults } from './state/store'
+import { useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, newClipDefaults, snapPoints } from './state/store'
 import { PRESETS } from './presets'
 import { startExport } from './engine/exporter'
 import { evalAnim } from './engine/anim'
@@ -11,7 +11,7 @@ import {
   transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues
 } from './engine/subtitles'
 import { createFragment, ensureFragmentServer, deleteFragment, syncProjectFragments } from './engine/fragments'
-import { wireFragmentCapture } from './engine/fragmentCapture'
+import { wireFragmentCapture, fragmentNeedsCapture } from './engine/fragmentCapture'
 import './styles.css'
 
 import { wireAutosave, autosaveNow, activity } from './engine/autosave'
@@ -31,6 +31,10 @@ import { srcToProject, spanToProject, projectToSrc, placeDefects } from './engin
 import { regenerateDefects, confirmDefect } from './engine/voiceRegen'
 import { flushVerdicts, flushAllVerdicts, learnStatus, retrain } from './engine/voiceLearn'
 import { scanVoiceVersions, pruneVoiceVersions } from './engine/voiceVersions'
+import { detectBeats, clearBeats, beatTimes, useBeatsUi } from './engine/beats'
+import { bakeAudio, bakeState, bakePlan, refreshStaleBakes } from './engine/audioReact'
+import { loadSoundLibrary, findSfx, addSound, setSoundMeta, sfxFamilies, SFX_FAMILIES, SFX_USES } from './engine/sounds'
+import { useSoundsUi } from './components/SoundsDialog'
 
 wireLog()   // first: everything below may want to report a failure
 wireProxies()
@@ -45,7 +49,7 @@ wireDropDiagnostics()
   useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, newClipDefaults,
   PRESETS, startExport, evalAnim,
   transcribe: transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues,
-  createFragment, ensureFragmentServer, deleteFragment, autoCaptions, captionsTsx, autosaveNow, activity,
+  createFragment, ensureFragmentServer, deleteFragment, fragmentNeedsCapture, autoCaptions, captionsTsx, autosaveNow, activity,
   reverseClip, importFiles, snapshotFrame, normalizeClip, syncProjectFragments,
   usePopout, openPreviewWindow, dockPreviewWindow, togglePreviewWindow,
   neonWave, neonWaveTsx, NEON_WAVE_DEFAULTS,
@@ -56,6 +60,11 @@ wireDropDiagnostics()
   regenerateDefects, confirmDefect,
   flushVerdicts, flushAllVerdicts, learnStatus, retrain,
   scanVoiceVersions, pruneVoiceVersions,
+  // music: beats as snap-able markers, the sound under a fragment baked into it,
+  // and the bundled sound library (resources/, credits in resources/CREDITS.md)
+  detectBeats, clearBeats, beatTimes, useBeatsUi, snapPoints,
+  bakeAudio, bakeState, bakePlan, refreshStaleBakes,
+  loadSoundLibrary, findSfx, addSound, setSoundMeta, sfxFamilies, SFX_FAMILIES, SFX_USES, useSoundsUi,
   // the session log, so the embedded Claude can answer "почему не сработало?"
   // by reading what actually failed instead of guessing
   useLog, logInfo, logWarn, logError, logAsText, clearLog

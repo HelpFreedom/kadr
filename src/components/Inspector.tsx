@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Anim, Clip, Effect, FxPreset, TextStyle } from '@shared/types'
 import { useEditor, useFxPresets, findClip, uid } from '@/state/store'
 import { GLOW_DEFAULTS } from '@/gl/glow'
 import { useT } from '@/i18n'
+import { bakeAudio, bakeState, bakePlan } from '@/engine/audioReact'
+import { audibleTracksInRange } from '@/engine/subtitles'
 import { CtxMenu } from './CtxMenu'
-import { Icon } from './icons'
+import { Icon, Spinner } from './icons'
 
 function Num({
   label, value, step = 1, min, max, onChange
@@ -135,7 +137,75 @@ function ClipProps({ clip }: { clip: Clip }) {
         <input type="checkbox" checked={clip.muted}
           onChange={(e) => update({ muted: e.target.checked })} />
       </label>
+      {clip.kind === 'remotion' && <AudioReactSection clip={clip} />}
       <EffectsSection clip={clip} />
+    </>
+  )
+}
+
+/**
+ * «Реакция на звук»: bake the sound under a fragment into its folder
+ * (audio.json + audio.ts, see src/engine/audioReact.ts) so the composition can
+ * move with the music. Shows whether the bake still matches what is under the
+ * clip — a moved clip or an edited track makes it stale.
+ */
+function AudioReactSection({ clip }: { clip: Clip }) {
+  const t = useT()
+  const project = useEditor((s) => s.project)
+  const [source, setSource] = useState(clip.audioBake?.source ?? 'mix')
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState('')
+  const [error, setError] = useState('')
+  useEffect(() => {
+    setSource(clip.audioBake?.source ?? 'mix')
+    setNote('')
+    setError('')
+  }, [clip.id])
+  const plan = useMemo(() => bakePlan(project, clip, 'mix'), [project, clip])
+  const tracks = useMemo(
+    // the tracks heard under the composition itself, not in the analysis context around it
+    () => (plan ? audibleTracksInRange(project, Math.max(0, plan.t0), plan.t0 + plan.frames * plan.step) : []),
+    [project, plan]
+  )
+  const state = bakeState(project, clip)
+  const src = source === 'mix' || tracks.some((tr) => tr.id === source) ? source : 'mix'
+
+  const bake = async () => {
+    setBusy(true)
+    setError('')
+    setNote('')
+    try {
+      const r = await bakeAudio(clip.id, { source: src })
+      setNote(r.audible
+        ? t('arDone').replace('{bpm}', r.bpm.toFixed(1)).replace('{n}', String(r.beats))
+        : t('arSilent'))
+    } catch (err) {
+      setError(String((err as Error)?.message ?? err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="insp-section"><Icon name="reactive" size={13} /> {t('arTitle')}</div>
+      <div className={`ar-state ${state}`} data-ar-state={state}>
+        {state === 'none' ? t('arNone') : state === 'fresh' ? t('arFresh') : t('arStale')}
+      </div>
+      <label className="insp-field">
+        <span>{t('arSource')}</span>
+        <select value={src} disabled={busy} onChange={(e) => setSource(e.target.value)} data-act="ar-source">
+          <option value="mix">{t('arMix')}</option>
+          {tracks.map((tr) => <option key={tr.id} value={tr.id}>{tr.name}</option>)}
+        </select>
+      </label>
+      <button data-act="ar-bake" disabled={busy} onClick={bake}>
+        {busy ? <Spinner /> : <Icon name="reactive" />}{' '}
+        {busy ? t('arWorking') : state === 'none' ? t('arBake') : t('arRebake')}
+      </button>
+      {note && <div className="dim">{note}</div>}
+      {error && <div className="tr-error"><Icon name="alert" size={15} /><span>{error}</span></div>}
+      <div className="dim ar-hint">{t('arHint')}</div>
     </>
   )
 }

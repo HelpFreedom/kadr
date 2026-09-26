@@ -1,0 +1,54 @@
+{
+  "tracks": [
+    {
+      "file": "happy-beats-business-moves-vol-1-by-ende-dot-app.mp3",
+      "name": "Happy Beats vol. 1",
+      "descRu": "Самый энергичный, полный трек",
+      "descEn": "The most energetic, full track",
+      "duration": 163.99,
+      "tempo": 120.19,
+      "author": "ende.app",
+      "license": "CC BY 4.0"
+    },
+    {
+      "file": "happy-beats-business-moves-vol-9-by-ende-dot-app.mp3",
+      "name": "Happy Beats vol. 9",
+      "descRu": "Средняя энергия, чуть расслабленнее",
+      "descEn": "Mid-energy, slightly laid-back",
+      "duration": 113.66,
+      "tempo": 114.84,
+      "author": "ende.app",
+      "license": "CC BY 4.0"
+    },
+    {
+      "file": "happy-beats-business-moves-vol-10-by-ende-dot-app.mp3",
+      "name": "Happy Beats vol. 10",
+      "descRu": "Короткая плотная петля",
+      "descEn": "Compact punchy loop",
+      "duration": 60.02,
+      "tempo": 109.96,
+      "author": "ende.app",
+      "license": "CC BY 4.0"
+    },
+    {
+      "file": "happy-beats-business-moves-vol-11-by-ende-dot-app.mp3",
+      "name": "Happy Beats vol. 11",
+      "descRu": "Тёплый, деловой",
+      "descEn": "Warm and business-like",
+      "duration": 87.62,
+      "tempo": 114.84,
+      "author": "ende.app",
+      "license": "CC BY 4.0"
+    },
+    {
+      "file": "happy-beats-business-moves-vol-12-by-ende-dot-app.mp3",
+      "name": "Happy Beats vol. 12",
+      "descRu": "Ровный и чистый, для спокойных роликов",
+      "descEn": "Steady and clean, for calmer edits",
+      "duration": 117.38,
+      "tempo": 109.96,
+      "author": "ende.app",
+      "license": "CC BY 4.0"
+    }
+  ]
+}

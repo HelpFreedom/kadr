@@ -14,6 +14,8 @@ import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/medi
 import { useTextUi } from './TextTools'
 import { useCaptionsUi } from './CaptionsDialog'
 import { useNeonWaveUi } from './NeonWaveDialog'
+import { useSoundsUi } from './SoundsDialog'
+import { useBeatsUi } from '@/engine/beats'
 import { useTtsUi } from './TtsDialog'
 import { evalAnim } from '@/engine/anim'
 import { spanToProject, projectToSrc, type VisibleSpan } from '@/engine/voiceDefects'
@@ -294,6 +296,11 @@ export function Timeline({ height }: { height: number }) {
         >
           <Icon name="glow" /> {t('capButton')}
         </button>
+        <BeatButtons />
+        <button data-act="sounds" title={t('soundsButtonHint')}
+                onClick={() => useSoundsUi.getState().setOpen(true)}>
+          <Icon name="sfx" /> {t('soundsButton')}
+        </button>
         <NeonWaveButton />
         <button data-act="tts" title={t('ttsButtonHint')}
                 onClick={() => useTtsUi.getState().openSettings()}>
@@ -340,6 +347,7 @@ export function Timeline({ height }: { height: number }) {
           ))}
           <RangeOverlay />
           <KfMarker />
+          <BeatLines view={view} />
           <Markers />
           <Playhead />
         </div>
@@ -598,10 +606,12 @@ function Playhead() {
 /** Track-independent user markers: M adds one at the playhead, the flag
     drags along the timeline (snapping), right-click removes. */
 function Markers() {
-  const markers = useEditor((s) => s.project.markers)
+  const all = useEditor((s) => s.project.markers)
   const zoom = useEditor((s) => s.zoom)
   const t = useT()
-  if (!markers?.length) return null
+  // beats are drawn by BeatLines; only the user's own markers get a flag
+  const markers = useMemo(() => (all ?? []).filter((m) => m.kind !== 'beat'), [all])
+  if (!markers.length) return null
   return (
     <>
       {markers.map((m) => (
@@ -614,7 +624,9 @@ function Markers() {
             e.stopPropagation()
             const st = useEditor.getState()
             st.pushHistory('hMarkerMove')
-            const points = snapPoints(st.project, '', st.playhead)
+            // not its own spot: markers are snap targets now, and a marker
+            // would otherwise stick to where it started
+            const points = snapPoints(st.project, m.id, st.playhead)
             const startX = e.clientX
             const t0 = m.time
             windowDrag(e, (_dx, ev) => {
@@ -631,6 +643,55 @@ function Markers() {
           <span className="tl-marker-flag" title={t('markerTip')}>{m.label}</span>
         </div>
       ))}
+    </>
+  )
+}
+
+/**
+ * Detected beats: a thin pink line each, accents brighter. Only the visible
+ * stretch is drawn, and when they crowd closer than 5 px only the accents are —
+ * at that zoom every beat would just paint the lanes pink. Passive: they are
+ * snap targets, not handles.
+ */
+function BeatLines({ view }: { view: ViewWindow }) {
+  const markers = useEditor((s) => s.project.markers)
+  const zoom = useEditor((s) => s.zoom)
+  const beats = useMemo(() => (markers ?? []).filter((m) => m.kind === 'beat'), [markers])
+  if (!beats.length) return null
+  const margin = 50 / zoom
+  const visible = beats.filter((b) => b.time >= view.start - margin && b.time <= view.end + margin)
+  let gap = Infinity
+  for (let i = 1; i < beats.length; i++) gap = Math.min(gap, beats[i].time - beats[i - 1].time)
+  const shown = gap * zoom < 5 ? visible.filter((b) => b.strong) : visible
+  return (
+    <>
+      {shown.map((b) => (
+        <div key={b.id} className={b.strong ? 'tl-beat strong' : 'tl-beat'}
+             style={{ left: HEADER_W + b.time * zoom }} />
+      ))}
+    </>
+  )
+}
+
+/** «Биты» — opens the beat dialog; the magnet next to it toggles snapping to them. */
+function BeatButtons() {
+  const t = useT()
+  const busy = useBeatsUi((s) => s.busy)
+  const hasBeats = useEditor((s) => (s.project.markers ?? []).some((m) => m.kind === 'beat'))
+  const snap = useSettings((s) => s.snapBeats)
+  return (
+    <>
+      <button data-act="beats" title={t('beatsButtonHint')}
+              onClick={() => useBeatsUi.getState().setOpen(true)}>
+        {busy ? <Spinner /> : <Icon name="beat" />} {t('beatsButton')}
+      </button>
+      {hasBeats && (
+        <button className="icon-only beat-snap" data-act="beat-snap"
+                title={t('beatSnap')} aria-label={t('beatSnap')} aria-pressed={snap}
+                onClick={() => useSettings.getState().setSnapBeats(!snap)}>
+          <Icon name="magnet" />
+        </button>
+      )}
     </>
   )
 }

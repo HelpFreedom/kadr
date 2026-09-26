@@ -94,7 +94,9 @@ server.registerTool('kadr_state', {
     'video track (drawn last). Clip: {id, kind: media|text, assetId, start, duration, inPoint, ' +
     'speed, gain, muted, transform, mask?, maskShapes?, effects[], transitionIn/Out?, fadeIn/Out?}. ' +
     'project.markers are the user\'s free-floating timeline markers ({id, time, label}) — use ' +
-    'them as anchors the user set for you (\u00abfrom marker 2 to marker 3\u00bb). ' +
+    'them as anchors the user set for you (\u00abfrom marker 2 to marker 3\u00bb). Markers with ' +
+    'kind:"beat" are DETECTED MUSICAL BEATS ({time, strength 0..1, strong}) laid down by kadr_beats — ' +
+    'cut and time animations on them; they are snap targets, not the user\'s anchors. ' +
     'project.texts lists transcript/subtitle documents (TextDoc {id, name, path, format: srt|txt, ' +
     'assetId?, offset?}) — path is a real file you can Read/Edit; see kadr_transcribe to create them. ' +
     'project.voiceRuns are ElevenLabs voice-overs ({id, assetId, scriptPath, scriptHash, tempo, runDir?}) ' +
@@ -290,21 +292,203 @@ server.registerTool('kadr_fragment_create', {
     'compositor (glibc >= 2.32) and dies on older systems with "GLIBC_2.3x not found"\n' +
     '- the module must keep exporting `fragment = { component, meta }`\n' +
     '- subtitle data: read SRT files from kadr_state project.texts and bake the cues into the ' +
-    'composition (e.g. as a const array) for word-precise animated captions',
+    'composition (e.g. as a const array) for word-precise animated captions\n' +
+    '- SOUND: when anything is audible under [start, end) the sound is baked into the fragment ' +
+    'right away (audio:true is the default): audio.ts in the folder gives ' +
+    '`import { useAudio, beats } from "./audio"` → per-frame level/bass/mid/treble (0..1, smoothed), ' +
+    'beat/accent pulses and the beat list in COMPOSITION seconds. Use it — reveals on the beats, ' +
+    'subtle breathing on the bass — see kadr_audio_react for the taste rules.',
   inputSchema: {
     name: z.string().describe('short human name, e.g. "intro-title"'),
     start: z.number().describe('clip start, project seconds'),
     end: z.number().describe('clip end, project seconds'),
-    transparent: z.boolean().optional().describe('default true (alpha overlay)')
+    transparent: z.boolean().optional().describe('default true (alpha overlay)'),
+    audio: z.boolean().optional().describe('bake the sound under the clip into audio.json/audio.ts (default true)')
   }
-}, async ({ name, start, end, transparent }) => {
+}, async ({ name, start, end, transparent, audio }) => {
   try {
     return asText(await editorEval(`
-      const r = await window.kadrEditor.createFragment(${JSON.stringify({ name, start, end, transparent })})
+      const E = window.kadrEditor
+      const r = await E.createFragment(${JSON.stringify({ name, start, end, transparent })})
       let playerUrl = null
-      try { playerUrl = (await window.kadrEditor.ensureFragmentServer()) + '/?comp=' + r.id } catch {}
+      try { playerUrl = (await E.ensureFragmentServer()) + '/?comp=' + r.id } catch {}
+      let sound = null
+      if (${audio !== false}) {
+        try {
+          const b = await E.bakeAudio(r.clipId)
+          sound = b.audible
+            ? { files: b.files, bpm: b.bpm, beats: b.beats,
+                usage: "import { useAudio, beats } from './audio'; const a = useAudio()" }
+            : { files: b.files, note: 'nothing audible under the clip — the data is zeros; ' +
+                're-bake with kadr_audio_react after the music is placed' }
+        } catch (err) { sound = { error: String(err && err.message || err) } }
+      }
       return { fragmentId: r.id, clipId: r.clipId, dir: r.dir, entryFile: r.entry,
-               meta: r.meta, playerUrl }`))
+               meta: r.meta, playerUrl, sound }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_beats', {
+  description:
+    'Find the BEATS of the music and lay them on the timeline as beat markers (thin pink lines; ' +
+    'accents brighter). Clips, the range and markers SNAP to them while dragging, and you should ' +
+    'use them for every music-driven edit: cuts on beats, a reveal on an accent, sequential items ' +
+    'on consecutive beats. The analysis is librosa\'s beat_track ported to the editor (verified ' +
+    'beat-for-beat against librosa). Earlier beat markers inside the same span are replaced; the ' +
+    'user\'s own markers are never touched. Listen to specific clips (clipIds — a linked video half ' +
+    'brings its audio), one track (trackId), or the whole mix of [start, end) (default: the whole ' +
+    'project). grid: "all" every beat, "half" every 2nd, "bar" every 4th (from the strongest ' +
+    'phase — a heuristic downbeat), "strong" accents only. READING RULE: text a viewer must read ' +
+    'needs ~0.3 s per word on screen — above ~110 BPM beats come every <0.55 s, so reveal TEXT on ' +
+    '"half" or "bar", keep "all" for non-text accents. clear:true removes beat markers instead. ' +
+    'Returns the tempo and the placed beat times (timeline seconds).',
+  inputSchema: {
+    clipIds: z.array(z.string()).optional().describe('listen to these clips only'),
+    trackId: z.string().optional().describe('listen to this track only'),
+    start: z.number().optional().describe('span start, timeline seconds'),
+    end: z.number().optional().describe('span end, timeline seconds'),
+    grid: z.enum(['all', 'half', 'bar', 'strong']).optional().describe('default "all"'),
+    clear: z.boolean().optional().describe('remove beat markers in the span (or all) instead')
+  }
+}, async ({ clipIds, trackId, start, end, grid, clear }) => {
+  try {
+    const range = start != null && end != null ? { start, end } : undefined
+    if (clear) {
+      return asText(await editorEval(`
+        return { removed: window.kadrEditor.clearBeats(${JSON.stringify(range ?? null)} || undefined) }`))
+    }
+    const opts = { clipIds, trackId, range, grid }
+    return asText(await editorEval(`
+      const E = window.kadrEditor
+      const r = await E.detectBeats(${JSON.stringify(opts)})
+      const p = E.useEditor.getState().project
+      const inSpan = (p.markers || []).filter(m => m.kind === 'beat' &&
+        m.time >= r.range.start - 1e-6 && m.time <= r.range.end + 1e-6)
+      return { tempo: r.tempo, found: r.found, placed: r.placed, range: r.range, listenedTo: r.source,
+               beats: inSpan.slice(0, 400).map(m => ({ t: +m.time.toFixed(3), s: +(m.strength || 0).toFixed(2),
+                 strong: !!m.strong })),
+               truncated: inSpan.length > 400 }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_audio_react', {
+  description:
+    'Bake the sound under a Remotion fragment clip INTO the fragment, so the composition moves ' +
+    'with the music. Writes audio.json + audio.ts next to its entry TSX; in the composition: ' +
+    '`import { useAudio, beats, bpm } from "./audio"`, `const a = useAudio()` → a.level, a.bass, ' +
+    'a.mid, a.treble (0..1, normalised over the clip, attack/release smoothed), a.beat / a.accent ' +
+    '(1 on a beat / an accented beat, decaying to 0 in ~0.15 s; useAudio(0.3) for a slower decay), ' +
+    'a.beatIndex, a.sinceBeat; `beats` = [{time (composition s), strength, strong}]. ' +
+    'kadr_fragment_create already bakes by default — call this after the music under the clip ' +
+    'changes or the clip moves (kadr_state shows clip.audioBake; an export re-bakes stale ones by ' +
+    'itself, the live preview does not). source: "mix" (default) or a trackId to listen to one ' +
+    'track (e.g. only the music, not the voice-over). TASTE (from /brag): make EXISTING elements ' +
+    'breathe — glow, a few percent of scale, background warmth, depth — never an equaliser, ' +
+    'waveform bars or musical notes, never strobing, never text pulsing so hard it cannot be read.',
+  inputSchema: {
+    clipId: z.string().describe('a remotion clip id'),
+    source: z.string().optional().describe('"mix" (default) or a track id')
+  }
+}, async ({ clipId, source }) => {
+  try {
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.bakeAudio(${JSON.stringify(clipId)}, ${JSON.stringify({ source })})
+      return r`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_sounds', {
+  description:
+    'Search the sound library: 260 bundled effects (Kenney + a keyboard set, CC0), 5 music beds ' +
+    '(ende.app, CC BY 4.0 — never register them with Content ID) and the USER\'S OWN sounds ' +
+    '(origin "user", ids "user:<folder>/<file>", family = their folder, e.g. "mine" — prefer these ' +
+    'when they fit: the user chose them). Every effect carries brightness (warm/balanced/bright), ' +
+    'hfRisk (low/medium/high — how sharp and fatiguing it gets when repeated), suggested uses, and ' +
+    'HIT: seconds from the file start to its main attack (a whoosh ~0.5 s, a boom with a lead-in ' +
+    '~1.5 s) — kadr_sound_add puts that moment on the time you give. note = a human description. ' +
+    'Results come gentlest first. Uses: major reveal, hard transition, soft reveal, logo payoff, ' +
+    'success, reveal confirmation, button press, selection, simulated user action, toggle, mode ' +
+    'change, card reveal, sequential item, swipe, panel opening, typing, general accent, tiny ' +
+    'accent only, chaotic accent, comedic interruption, ambience, dissolve.',
+  inputSchema: {
+    kind: z.enum(['sfx', 'music']).optional().describe('default: both'),
+    family: z.string().optional(),
+    use: z.string().optional(),
+    soft: z.boolean().optional().describe('leave out hfRisk "high"'),
+    query: z.string().optional().describe('substring of the name, a tag or the note'),
+    origin: z.enum(['bundled', 'user']).optional().describe('only bundled or only the user\'s own'),
+    rescan: z.boolean().optional().describe('re-read the user folder first (new files get analysed)'),
+    limit: z.number().optional().describe('default 40 effects')
+  }
+}, async ({ kind, family, use, soft, query, origin, rescan, limit }) => {
+  try {
+    const q = { family, use, soft, text: query }
+    return asText(await editorEval(`
+      const E = window.kadrEditor
+      const L = await E.loadSoundLibrary(${rescan ? 'true' : 'false'})
+      const out = { userFolder: L.userRoot }
+      if (${JSON.stringify(kind ?? '')} !== 'music') {
+        const hits = E.findSfx(L.sfx, ${JSON.stringify(q)})
+          .filter(s => !${JSON.stringify(origin ?? '')} || s.origin === ${JSON.stringify(origin ?? '')})
+        out.sfx = hits.slice(0, ${Number(limit ?? 40)}).map(s => ({ id: s.id, origin: s.origin, family: s.family,
+          duration: s.duration, hit: s.hit, brightness: s.brightness, hfRisk: s.hfRisk, envelope: s.envelope,
+          uses: s.uses, tags: s.tags, note: s.note }))
+        out.sfxMatching = hits.length
+        out.sfxTotal = L.sfx.length
+      }
+      if (${JSON.stringify(kind ?? '')} !== 'sfx') {
+        out.music = L.music.map(m => ({ id: m.id, name: m.name, description: m.descEn,
+          duration: m.duration, bpm: m.tempo, license: m.license }))
+      }
+      return out`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_sound_add', {
+  description:
+    'Put a library sound (id from kadr_sounds) on the timeline so that its HIT lands at `at` ' +
+    '(default: the playhead) — the clip starts `hit` seconds earlier (alignHit:false to start the ' +
+    'file at `at`; music always starts at `at`). ' +
+    'It goes on the first audio track that is FREE over its length, or a new track — never on top ' +
+    'of existing audio (an overlap on one track would crossfade into the music). Music gets its ' +
+    'beat markers straight away (beats:false to skip). MIX, per /brag: effects sit UNDER the ' +
+    'music, never harsh — start sound effects around gain 0.5-0.8 against music at 1, prefer ' +
+    'low/medium hfRisk for anything repeated, place an effect 0-0.1 s BEFORE the visual it ' +
+    'accompanies lands, and use fewer, better-timed cues rather than one per movement. One undo ' +
+    'entry per call. Returns start (clip start) and hitAt.',
+  inputSchema: {
+    id: z.string().describe('sfx id like "impact/impactSoft_medium_001.ogg" / "user:mine/boom.mp3", or a music id'),
+    at: z.number().optional().describe('timeline seconds where the HIT lands; default = playhead'),
+    alignHit: z.boolean().optional().describe('default true for effects'),
+    gain: z.number().optional().describe('clip gain 0..2, default 1'),
+    beats: z.boolean().optional().describe('music: lay beat markers (default true)'),
+    grid: z.enum(['all', 'half', 'bar', 'strong']).optional().describe('music beat grid, default "all"')
+  }
+}, async ({ id, at, alignHit, gain, beats, grid }) => {
+  try {
+    return asText(await editorEval(`
+      return await window.kadrEditor.addSound(${JSON.stringify(id)}, ${JSON.stringify({ at, alignHit, gain, beats, grid })})`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_sound_label', {
+  description:
+    'Describe one of the USER\'S OWN sounds (id "user:…" from kadr_sounds): what it is good for ' +
+    '(uses, same vocabulary as kadr_sounds), tags, and a short note in the user\'s language ' +
+    '("низкий удар после 1.5 с подводки"). Brightness, hfRisk, envelope and hit are measured by the ' +
+    'editor and cannot be set. Survives re-analysis of the file. Bundled sounds cannot be edited. ' +
+    'Listen-free rule of thumb: base uses on the measured numbers (hit, duration, envelope, ' +
+    'brightness) and the file name, and say that you did.',
+  inputSchema: {
+    id: z.string().describe('"user:<folder>/<file>"'),
+    uses: z.array(z.string()).optional(),
+    tags: z.array(z.string()).optional(),
+    note: z.string().optional()
+  }
+}, async ({ id, uses, tags, note }) => {
+  try {
+    return asText(await editorEval(`
+      return await window.kadrEditor.setSoundMeta(${JSON.stringify(id)}, ${JSON.stringify({ uses, tags, note })})`))
   } catch (e) { return asError(e) }
 })
 

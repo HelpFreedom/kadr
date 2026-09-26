@@ -102,8 +102,15 @@ export function sanitizeProject(p: Project): Project {
     (m) => m && typeof m.id === 'string' && Number.isFinite(m.time)
   )
   for (const m of p.markers) {
-    if (typeof m.label !== 'string' || !m.label) m.label = '•'
+    // a beat is the one marker that legitimately has no label
+    if (m.kind !== undefined && m.kind !== 'beat') delete m.kind
+    if (typeof m.label !== 'string' || (!m.label && m.kind !== 'beat')) m.label = m.kind === 'beat' ? '' : '•'
     if (m.time < 0) m.time = 0
+    if (m.strength !== undefined) {
+      if (!Number.isFinite(m.strength)) delete m.strength
+      else m.strength = Math.min(1, Math.max(0, m.strength))
+    }
+    if (m.strong !== undefined && typeof m.strong !== 'boolean') m.strong = !!m.strong
   }
   // a voice-over is meaningless without its asset and its script; tempo must be
   // a real factor or a regenerated phrase would be stretched by NaN
@@ -159,6 +166,8 @@ export function sanitizeProject(p: Project): Project {
       c.transform = { ...newClipDefaults().transform, ...(c.transform ?? {}) }
       c.gain = anim(c.gain, 1)
       c.effects ??= []
+      if (c.audioBake !== undefined && !(c.audioBake && typeof c.audioBake.hash === 'string' &&
+          typeof c.audioBake.source === 'string')) delete c.audioBake
       forEachAnim(c, (a) => anim(a, Number.isFinite((a as Anim)?.value) ? (a as Anim).value : 0))
     }
   }
@@ -237,8 +246,18 @@ export function withLinked(p: Project, ids: string[]): string[] {
   return [...out]
 }
 
-/** Edges of all clips plus the playhead — snap targets for dragging. */
-export function snapPoints(p: Project, exclude: string | string[], playhead: number): number[] {
+/**
+ * Snap targets for dragging: edges of all clips, the playhead, the user's
+ * markers, and — unless switched off (the magnet next to «Биты») — the detected
+ * beats. `exclude` takes clip AND marker ids (a dragged marker must not stick
+ * to where it started).
+ */
+export function snapPoints(
+  p: Project,
+  exclude: string | string[],
+  playhead: number,
+  beats: boolean = useSettings.getState().snapBeats
+): number[] {
   const ex = Array.isArray(exclude) ? exclude : [exclude]
   const pts = [0, playhead]
   for (const t of p.tracks) {
@@ -247,6 +266,11 @@ export function snapPoints(p: Project, exclude: string | string[], playhead: num
       pts.push(c.start, c.start + c.duration)
     }
   }
+  for (const m of p.markers ?? []) {
+    if (ex.includes(m.id)) continue
+    if (m.kind === 'beat' && !beats) continue
+    pts.push(m.time)
+  }
   return pts
 }
 
@@ -254,13 +278,17 @@ interface SettingsState {
   lang: 'ru' | 'en'
   /** uniform lane height for all tracks, px */
   trackH: number
+  /** clips, the range and markers snap to detected beats (default on) */
+  snapBeats: boolean
   setLang(l: 'ru' | 'en'): void
   setTrackH(h: number): void
+  setSnapBeats(v: boolean): void
 }
 
 export const useSettings = create<SettingsState>((set) => ({
   lang: (localStorage.getItem('kadr.lang') as 'ru' | 'en') || 'ru',
   trackH: Math.min(140, Math.max(32, Number(localStorage.getItem('kadr.trackh')) || 56)),
+  snapBeats: localStorage.getItem('kadr.snapBeats') !== '0',
   setLang: (lang) => {
     localStorage.setItem('kadr.lang', lang)
     set({ lang })
@@ -269,6 +297,10 @@ export const useSettings = create<SettingsState>((set) => ({
     const trackH = Math.min(140, Math.max(32, h))
     localStorage.setItem('kadr.trackh', String(trackH))
     set({ trackH })
+  },
+  setSnapBeats: (snapBeats) => {
+    localStorage.setItem('kadr.snapBeats', snapBeats ? '1' : '0')
+    set({ snapBeats })
   }
 }))
 
@@ -509,6 +541,25 @@ interface EditorState {
   addMarker(time: number): string
   moveMarker(id: string, time: number): void
   removeMarker(id: string): void
+  /**
+   * Replace the beat markers inside [range.start, range.end] with `beats`
+   * (project seconds) — one undo entry. The user's own markers are never
+   * touched. Returns how many were placed.
+   */
+  setBeatMarkers(beats: { time: number; strength: number; strong: boolean }[],
+    range: { start: number; end: number }): number
+  /** Remove beat markers (inside `range`, or all of them) — one undo entry; returns the count. */
+  clearBeatMarkers(range?: { start: number; end: number }): number
+  /**
+   * Put an audio asset on the timeline at `at` WITHOUT touching anything that
+   * is already there: the first unlocked audio track that is free over the
+   * clip's span, or a new one. (insertClipsFromAssets drops it onto the first
+   * audio track regardless — and overlapping audio on one track crossfades,
+   * which would quietly duck the music under a click.) The asset is reused when
+   * one with the same path is already in the bin. One undo entry.
+   */
+  placeAudio(asset: Omit<MediaAsset, 'id'>, at: number,
+    opts?: { gain?: number; label?: string; history?: string }): { clipId: string; trackId: string; assetId: string }
   updateClip(clipId: string, patch: Partial<Clip>): void
   /** Change speed/duration, rescaling keyframes and fades to stay on content.
       Optional `start` moves the clip too (a speed drag from the LEFT edge
@@ -1017,6 +1068,80 @@ export const useEditor = create<EditorState>((set, get) => ({
       p.markers = (p.markers ?? []).filter((x) => x.id !== id)
       return { project: p }
     })
+  },
+
+  setBeatMarkers: (beats, range) => {
+    const ok = beats.filter((b) => Number.isFinite(b?.time) && b.time >= 0)
+    get().pushHistory('hBeats')
+    const lo = Math.min(range.start, range.end) - 1e-6
+    const hi = Math.max(range.start, range.end) + 1e-6
+    set((s) => {
+      const p = cloneProject(s.project)
+      const kept = (p.markers ?? []).filter((m) => m.kind !== 'beat' || m.time < lo || m.time > hi)
+      const added = ok.map((b) => ({
+        id: uid(),
+        time: b.time,
+        label: '',
+        kind: 'beat' as const,
+        strength: Math.min(1, Math.max(0, Number(b.strength) || 0)),
+        strong: !!b.strong
+      }))
+      p.markers = [...kept, ...added].sort((a, b) => a.time - b.time)
+      return { project: p }
+    })
+    return ok.length
+  },
+
+  clearBeatMarkers: (range) => {
+    const inRange = (t: number) => !range ||
+      (t >= Math.min(range.start, range.end) - 1e-6 && t <= Math.max(range.start, range.end) + 1e-6)
+    const doomed = (get().project.markers ?? []).filter((m) => m.kind === 'beat' && inRange(m.time)).length
+    if (!doomed) return 0
+    get().pushHistory('hBeatsClear')
+    set((s) => {
+      const p = cloneProject(s.project)
+      p.markers = (p.markers ?? []).filter((m) => m.kind !== 'beat' || !inRange(m.time))
+      return { project: p }
+    })
+    return doomed
+  },
+
+  placeAudio: (asset, at, opts) => {
+    get().pushHistory(opts?.history ?? 'hInsert')
+    let result = { clipId: '', trackId: '', assetId: '' }
+    set((s) => {
+      const p = cloneProject(s.project)
+      let a = p.assets.find((x) => x.path === asset.path)
+      if (!a) {
+        a = { ...asset, id: uid() } as MediaAsset
+        p.assets = [...p.assets, a]
+      }
+      const start = Math.max(0, at)
+      const end = start + Math.max(0.01, a.duration)
+      let track = p.tracks.find((t) => t.kind === 'audio' && !t.locked &&
+        !t.clips.some((c) => c.start < end - 1e-6 && c.start + c.duration > start + 1e-6))
+      if (!track) {
+        track = makeTrack(p, 'audio')
+        p.tracks.push(track)
+      }
+      const defaults = newClipDefaults()
+      const gain = opts?.gain
+      const clip: Clip = {
+        id: uid(),
+        assetId: a.id,
+        kind: 'media',
+        start,
+        duration: a.duration,
+        inPoint: 0,
+        label: opts?.label ?? a.name,
+        ...defaults,
+        gain: Number.isFinite(gain) ? { value: Math.min(2, Math.max(0, gain as number)) } : defaults.gain
+      }
+      track.clips.push(clip)
+      result = { clipId: clip.id, trackId: track.id, assetId: a.id }
+      return { project: p, selection: [clip.id] }
+    })
+    return result
   },
 
   addTrackNear: (refTrackId) => {

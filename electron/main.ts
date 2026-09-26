@@ -15,7 +15,8 @@ import { registerTranscribeIpc } from './transcribe'
 import { registerTtsIpc } from './tts'
 import { registerVoiceIpc } from './voice'
 import { registerEnvelopeIpc } from './envelope'
-import { registerFragmentIpc } from './fragments'
+import { registerSoundsIpc } from './sounds'
+import { registerFragmentIpc, cancelFragmentRenders } from './fragments'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -251,6 +252,7 @@ app.whenReady().then(() => {
   registerTtsIpc(() => win)
   registerVoiceIpc(() => win)
   registerEnvelopeIpc()
+  registerSoundsIpc()
   registerStorageIpc()
   registerFragmentIpc(() => win)
   createWindow()
@@ -271,6 +273,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   exportState?.muxer?.cancel()
+  cancelFragmentRenders()
   void cleanupExport()
 })
 

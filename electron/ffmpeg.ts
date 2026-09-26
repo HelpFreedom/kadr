@@ -1,4 +1,5 @@
 // ffmpeg/ffprobe helpers running in the main process.
+import { masterLimiterChain } from '@shared/audioMaster'
 import { execFile, spawn, ChildProcess } from 'child_process'
 import { promisify } from 'util'
 import { promises as fsp } from 'fs'
@@ -770,13 +771,19 @@ export class ExportMuxer {
         filters.push(`[${idx}:a]${chain.join(',')}[a${i}]`)
         labels.push(`[a${i}]`)
       })
+      // the master stage: a transparent-below-the-limit peak limiter on real
+      // exports (shared/audioMaster.ts) — a plain sum of a loud master and a
+      // few hits used to reach the encoder at +10 dBFS and be hard-clipped.
+      // Analysis mixdowns (job.master === false) stay untouched.
+      const master = job.master === false ? [] : masterLimiterChain()
+      const tail = master.length ? ',' + master.join(',') : ''
       if (segs.length === 1) {
-        filters.push(`${labels[0]}anull[aout]`)
+        filters.push(`${labels[0]}anull${tail}[aout]`)
       } else {
         // every padded stream is active for the whole duration, so amix scales
         // each by 1/N; volume=N restores the original levels
         filters.push(
-          `${labels.join('')}amix=inputs=${segs.length}:dropout_transition=0,volume=${segs.length}[aout]`
+          `${labels.join('')}amix=inputs=${segs.length}:dropout_transition=0,volume=${segs.length}${tail}[aout]`
         )
       }
       filterScript = join(tmpdir(), `kadr-filter-${process.pid}-${Date.now()}.txt`)
@@ -857,7 +864,9 @@ export async function mixdownWav(
       outputPath: outPath,
       width: 0, height: 0, fps: 0,
       duration,
-      audioSegments: segments
+      audioSegments: segments,
+      // analysis (beats, transcription, the wave) wants the mix as it is
+      master: false
     },
     '',
     () => { /* mixing is fast; callers report their own progress */ }

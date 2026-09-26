@@ -117,6 +117,9 @@ const api: KadrApi = {
   measureLoudness: (path, start, duration) => ipcRenderer.invoke('media:loudness', path, start, duration),
   meanVolume: (path, start, duration) => ipcRenderer.invoke('media:mean-volume', path, start, duration),
   audioEnvelope: (req) => ipcRenderer.invoke('audio:envelope', req),
+  audioAnalyze: (req) => ipcRenderer.invoke('audio:analyze', req),
+  soundLibrary: (rescan) => ipcRenderer.invoke('sounds:library', !!rescan),
+  soundSetMeta: (id, meta) => ipcRenderer.invoke('sounds:set-meta', id, meta),
   onProxyProgress: (cb) => {
     const handler = (_e: unknown, p: { path: string; progress: number }) => cb(p)
     ipcRenderer.on('proxy:progress', handler)
@@ -144,6 +147,7 @@ const api: KadrApi = {
   fragmentCreate: (spec, projectDir) => ipcRenderer.invoke('fragment:create', spec, projectDir),
   fragmentDelete: (id) => ipcRenderer.invoke('fragment:delete', id),
   fragmentRelocate: (projectDir, ids) => ipcRenderer.invoke('fragment:relocate', projectDir, ids),
+  fragmentWriteFile: (id, name, content) => ipcRenderer.invoke('fragment:write-file', id, name, content),
   fragmentCaptureStart: (id, url, w, h, fps) =>
     ipcRenderer.invoke('fragment:capture-start', id, url, w, h, fps),
   fragmentCaptureStop: (id) => ipcRenderer.invoke('fragment:capture-stop', id),
@@ -155,6 +159,7 @@ const api: KadrApi = {
     return () => ipcRenderer.removeListener('fragment:frame', handler)
   },
   fragmentRender: (id, opts) => ipcRenderer.invoke('fragment:render', id, opts),
+  fragmentCancelRender: () => ipcRenderer.invoke('fragment:cancel-render'),
   onFragmentProgress: (cb) => {
     const handler = (_e: unknown, p: { id: string; phase: string; progress: number }) => cb(p)
     ipcRenderer.on('fragment:progress', handler)

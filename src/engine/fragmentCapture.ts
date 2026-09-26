@@ -83,7 +83,31 @@ const animActive = (a?: Anim) =>
   !!a && (Math.abs(a.value) > 1e-6 || (a.keyframes?.length ?? 0) > 0)
 
 /** GL-only features on this clip — the iframe overlay can't show them. */
-export function fragmentNeedsCapture(track: Track, clip: Clip): boolean {
+export function fragmentNeedsCapture(track: Track, clip: Clip, project?: Project): boolean {
+  if (ownNeedsCapture(track, clip)) return true
+  if (!project) return false
+  // An iframe is DOM stacked OVER the GL canvas, so a fragment shown that way
+  // is drawn above everything the compositor draws — including clips on the
+  // tracks above it. An opaque background fragment under screencast cards hid
+  // the cards completely in the preview (the export, composited on the GPU,
+  // was right). Such a fragment goes through pixel capture, i.e. into the GL
+  // stack at its own track's depth. Fragments above that are iframes
+  // themselves are fine: FragmentOverlays stacks those in track order.
+  const idx = project.tracks.findIndex((t) => t.id === track.id)
+  const end = clip.start + clip.duration
+  for (let i = 0; i < idx; i++) {
+    const t = project.tracks[i]
+    if (t.kind !== 'video' || t.muted) continue
+    for (const c of t.clips) {
+      if (c.start >= end || c.start + c.duration <= clip.start) continue
+      if (c.kind !== 'remotion' || ownNeedsCapture(t, c)) return true
+    }
+  }
+  return false
+}
+
+/** what forces capture by the clip itself: GL-only features, blending transitions */
+function ownNeedsCapture(track: Track, clip: Clip): boolean {
   if ((clip.effects ?? []).some((e) => e.enabled)) return true
   const tr = clip.transform
   if (animActive(tr.rotX) || animActive(tr.rotY) || animActive(tr.z)) return true
@@ -108,7 +132,7 @@ function wanted(project: Project, t: number): Map<string, { clip: Clip; track: T
     for (const clip of track.clips) {
       if (clip.kind !== 'remotion' || !clip.fragmentId) continue
       if (t < clip.start - 2 || t >= clip.start + clip.duration + 0.75) continue
-      if (!forceAll && !fragmentNeedsCapture(track, clip)) continue
+      if (!forceAll && !fragmentNeedsCapture(track, clip, project)) continue
       out.set(clip.fragmentId, { clip, track })
     }
   }

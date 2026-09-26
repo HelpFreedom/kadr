@@ -10,6 +10,8 @@ import { ClaudePanel } from './components/ClaudePanel'
 import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
 import { CaptionsDialog } from './components/CaptionsDialog'
 import { NeonWaveDialog } from './components/NeonWaveDialog'
+import { BeatsDialog } from './components/BeatsDialog'
+import { SoundsDialog } from './components/SoundsDialog'
 import { TtsSettingsDialog, SpeakDialog, refreshTtsKey } from './components/TtsDialog'
 import { DefectsDialog } from './components/DefectsDialog'
 import { DebugPanel } from './components/DebugPanel'
@@ -368,6 +370,8 @@ export default function App() {
       <SubtitlePanel />
       <CaptionsDialog />
       <NeonWaveDialog />
+      <BeatsDialog />
+      <SoundsDialog />
       <TtsSettingsDialog />
       <SpeakDialog />
       <DefectsDialog />

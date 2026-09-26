@@ -1,6 +1,6 @@
 {
   "name": "kadr",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Kadr — GPU-accelerated multi-track video editor with AI integration",
   "main": "out/main/main.js",
   "author": "Black Triangle",

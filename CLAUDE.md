@@ -19,8 +19,19 @@ mixes audio and muxes/transcodes per preset.
 - Pure node checks — no app, no network:
   `node scripts/check-envelope.mjs` (loudness envelope),
   `check-ttstext.mjs` (text splitting), `check-proxy.mjs` (proxy choice),
-  `check-voicemap.mjs` (time remapping after a splice); plus
+  `check-voicemap.mjs` (time remapping after a splice),
+  `check-beats.mjs [resources/music]` (beat analysis; with the folder it is
+  compared beat for beat with librosa's own cues), and with ffmpeg
+  `check-limiter.mjs` (the export master limiter) and
+  `check-sfx-labels.mjs` (sound labels vs /brag's 228); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
+  `node scripts/gen-sfx-catalog.mjs` regenerates
+  `resources/sfx/kadr-sfx.json` after a bundled sound or
+  `SFX_ANALYSIS_VERSION` changes.
+- e2e44 (beats, audio-reactive bake, sound library) and e2e45 (fragment
+  preview stacking, hot reload of a late project-owned fragment) replace the
+  open project, so they REFUSE to run over one with clips unless
+  `KADR_E2E_FORCE=1`.
 - `node scripts/gen-icons.mjs [dir]` — regenerate `src/components/icons.tsx`
   from lucide (see the header for the two-line fetch); never hand-edit the
   paths.
@@ -139,6 +150,53 @@ mixes audio and muxes/transcodes per preset.
   with sc = 1/(1+max k), d = 1/(1+√(1−4k·r²)), per-channel k for
   dispersion). Empty segments short-circuit to zeros — ExportMuxer with
   no inputs builds an ffmpeg command without any `-i` and fails.
+- MUSIC — beats, audio-reactive fragments, the sound library (taken over
+  from /brag, latent-spaces/brag; bundled media and licences in
+  `resources/`, see `resources/CREDITS.md`).
+  `shared/audioAnalysis.ts` ports librosa 0.11's `beat_track` (onset
+  strength over 128 Slaney mel bands, autocorrelation tempogram with a
+  log-normal prior at 120 BPM, Ellis' DP, the 0.11 trim rule) and matches it
+  beat for beat on the bundled tracks. Traps encoded in check-beats: librosa
+  0.10 and 0.11 trim differently, `np.hanning(5)` is symmetric while
+  `get_window('hann', 5)` is periodic, Python's `round` is half-to-even, and
+  the onset envelope is shifted by 3 frames on purpose. Analysis runs at
+  44.1 kHz: at 22.05 the tempo is quantised too coarsely to report right.
+  THE GRID IS MOVED ONTO THE ATTACKS when librosa's is systematically off
+  (`alignBeatsToAttacks`): on a brickwalled track whose 808 starts out of a
+  sidechain gap, the onset-strength peak comes when the note is already
+  sounding, and every beat sat ~110 ms after the bass. The analyser keeps
+  1 ms energy envelopes (< 150 Hz and full band); per beat the attack is the
+  steepest rise in [−180, +60] ms at −6 dB of the level it rises to; the grid
+  moves only when ≥ 60 % of beats have one, their IQR ≤ 50 ms and the median
+  is beyond 25 ms. On the bundled tracks nothing moves, so the parity holds;
+  `analyzeBeats(a, { alignAttacks: false })` is the raw grid. Traps: a 5 ms
+  RMS of a 50 Hz note dips at every zero crossing (the low band needs
+  ≥ 20 ms), a smoothed envelope needs a rise span as wide as its window, and
+  a centred window of width W crosses −6 dB of a step W/4 early. Not fixed by
+  it: places where the tracker loses its phase outright.
+  Beats are markers (`TimelineMarker.kind = 'beat'`) drawn as thin lines;
+  `snapPoints` includes every marker (beats unless the magnet is off,
+  `useSettings.snapBeats`) and takes marker ids in `exclude`.
+  `src/engine/audioReact.ts` bakes the sound under a fragment into
+  `audio.json` + `audio.ts` in its folder (per composition frame; τ plays at
+  `clip.start + (τ − inPoint)/speed`; ±8 s of context for a steady tempo);
+  `clip.audioBake.hash` makes the Inspector say stale, and the exporter
+  re-bakes stale ones before rendering.
+  `electron/sounds.ts` + `shared/sfxFeatures.ts`: the library. Labels were
+  REVERSE-ENGINEERED from /brag's published ones (magnitude share in
+  4–16 kHz, frames within 18 dB of the loudest; depth-2 trees agree
+  96–99 %); inputs must be the channel MEAN (ffmpeg `-ac 1` scales stereo by
+  √2). A sound's HIT (attack of its loudest event) is what `addSound` puts
+  on the beat; a sound with no single event gets hit 0. The user's own
+  sounds live in `userData/sfx/<family>/`, analysed once and cached by
+  size+mtime+`SFX_ANALYSIS_VERSION`. `placeAudio` picks an audio track FREE
+  over the whole span (overlap on one track would crossfade the music).
+- `shared/audioMaster.ts` — the export master limiter: the mix used to reach
+  the encoder over full scale. alimiter at −1 dBFS; ffmpeg 4.3's alimiter
+  delays by its look-ahead (239 samples at 48 kHz / 5 ms) and never flushes
+  it, so the chain pads 239 samples in front and trims them after — bit
+  identical and the same length below the limit. Analysis mixdowns pass
+  `master: false`.
 - `electron/fragments.ts` — Remotion workspace (`~/kadr-fragments`):
   scaffold, vite dev server (watchdogged), fragment create/delete,
   `remotion render` once per content hash at near-lossless settings
@@ -156,6 +214,31 @@ mixes audio and muxes/transcodes per preset.
   transparent one, since a short WebM parses fine and just ends early.
   `sweepPartFiles` drops leftover sidecars at startup: nothing is building
   then, so any that exist are corpses.
+  Progress parses both remotion phases, "Rendered N/M" and "Stitched N/M"
+  (older versions say "Encoded"), on a bounded tail of the output: the
+  second phase used to be invisible, and a heavy transparent fragment sat
+  on one number for many minutes. `cancelFragmentRenders` (IPC
+  `fragment:cancel-render`, also called on quit and by the export's cancel)
+  SIGKILLs a snapshot of the whole process TREE — remotion starts Chrome in
+  a process group of its own, and on SIGTERM it launched a fresh Chrome that
+  was reparented to init and stayed — then removes the render's
+  `react-motion-render*` frame dir. Content trap: per-frame random noise
+  (film grain) in a transparent fragment makes every PNG and VP9 frame
+  incompressible (measured 119 MB / 144 s vs 3.6 MB / 40 s for 120 frames);
+  put grain on its own track as a short looped RGBA clip. Speed note:
+  remotion stitches with libvpx-vp9 and no speed flags (1.4 fps at 1080p);
+  `-row-mt 1` is bit-identical and 1.8× faster, `-cpu-used 4` 3.7× at
+  −0.1 dB — flags reach it only through `Config.overrideFfmpegCommand`.
+  Preview stacking: fragment iframes sit OVER the GL canvas, so they are
+  appended bottom track first, and `fragmentNeedsCapture(track, clip,
+  project)` sends a fragment through pixel capture whenever something
+  GL-drawn overlaps it in time on a track above — otherwise an opaque
+  fragment on a low track hid every ordinary clip over it (the export was
+  always right). Hot reload: chokidar does not follow a symlinked folder
+  that appears after the dev server started (every fragment created in a
+  saved project), so the generated vite config carries
+  `followProjectFragments`, which watches the real folders and replays their
+  events on the symlinked path.
 - `src/state/store.ts` — zustand store. Undo convention: callers invoke
   `pushHistory(labelKey)` once before a discrete edit; high-level actions
   push their own. `sanitizeProject` heals foreign/script-written projects
@@ -302,6 +385,12 @@ mixes audio and muxes/transcodes per preset.
   NOT reach this conversion (the scale filter's own `flags` default wins),
   so an A/B on those flags that compares output bytes proves nothing, and
   filter threading is already on by default.
+  ONE EXPORT AT A TIME: the preload's raw encoder is a single global ffmpeg
+  and main's export state and the fragment render queue are shared, so an
+  export started while another ran (a script's `startExport` plus the
+  dialog's) fed its frames into the other's encoder — both died at 100 %
+  («write after end» / «write ECANCELED»), and the second one looked frozen
+  until then. `startExport` refuses while `activity.exporting` is set.
 - `src/engine/subtitles.ts` / `captions.ts` — SRT parse/serialize,
   word-precise cue splitting (`segmentsToRichCues`), auto-captions
   fragment generator.

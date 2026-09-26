@@ -64,12 +64,14 @@ export function FragmentOverlays({ canvas }: { canvas: React.RefObject<HTMLCanva
 
   // keep iframes mounted a bit around the clip so entry is seamless;
   // clips that need GL features render through pixel capture instead
+  // BOTTOM track first: DOM order is stacking order, and tracks[0] is the top
+  // one — iterating it first put a background fragment over the title above it
   const near: { clip: Clip; track: Track }[] = []
-  for (const track of project.tracks) {
+  for (const track of [...project.tracks].reverse()) {
     if (track.kind !== 'video' || track.muted) continue
     for (const clip of track.clips) {
       if (clip.kind !== 'remotion' || !clip.fragmentId) continue
-      if (fragmentNeedsCapture(track, clip)) continue
+      if (fragmentNeedsCapture(track, clip, project)) continue
       if (playhead >= clip.start - 1.5 && playhead < clip.start + clip.duration + 0.5) {
         near.push({ clip, track })
       }

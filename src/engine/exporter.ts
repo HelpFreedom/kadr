@@ -17,7 +17,8 @@ import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
 import { activity } from './autosave'
 import { projectDuration } from '@/state/store'
-import { logWarn } from './log'
+import { logInfo, logWarn } from './log'
+import { refreshStaleBakes } from './audioReact'
 
 export interface ExportHandle {
   cancel(): void
@@ -109,9 +110,27 @@ export function startExport(
 ): ExportHandle {
   let cancelled = false
   const done = run()
-  return { cancel: () => { cancelled = true }, done }
+  return {
+    cancel: () => {
+      cancelled = true
+      // a fragment render runs in main and knows nothing of this flag: without
+      // this the render (and remotion's ffmpeg under it) went on for minutes
+      // after «Отмена»
+      void window.kadr.fragmentCancelRender?.()
+    },
+    done
+  }
 
   async function run(): Promise<void> {
+    // ONE export at a time. The raw encoder in the preload is a single global
+    // ffmpeg, and main's export state and the fragment render queue are shared
+    // too: a second export started while one ran (a script's and the dialog's,
+    // 2026-09-26) wrote its frames into the other's encoder — both failed at
+    // the very end («write after end» / «write ECANCELED»), and until then the
+    // second one sat on the first one's fragment renders looking frozen.
+    if (activity.exporting) {
+      throw new Error('уже идёт другой экспорт — дождитесь его или отмените')
+    }
     activity.exporting = true
     try {
       await runInner()
@@ -123,7 +142,8 @@ export function startExport(
   async function runInner(): Promise<void> {
     // remotion fragments render exactly once (content-hash cached) and turn
     // into ordinary media clips for the rest of the pipeline
-    project = await materializeFragments(project, onProgress)
+    project = await materializeFragments(project, onProgress, () => cancelled)
+    if (cancelled) throw new Error('cancelled')
     const width = preset.width === 'project' ? project.width : preset.width
     const height = preset.height === 'project' ? project.height : preset.height
     const fps = preset.fps === 'project' ? project.fps : preset.fps
@@ -671,10 +691,21 @@ function undecodableFallback(asset: MediaAsset): Promise<MediaAsset | null> {
  */
 async function materializeFragments(
   project: Project,
-  onProgress: (p: ExportProgress) => void
+  onProgress: (p: ExportProgress) => void,
+  isCancelled: () => boolean = () => false
 ): Promise<Project> {
   const hasFrags = project.tracks.some((t) => t.clips.some((c) => c.kind === 'remotion'))
   if (!hasFrags) return project
+  // a fragment that moves with the music must hear the edit as it is NOW: a
+  // clip moved or a track changed since the bake would otherwise render against
+  // the old sound. A failed re-bake is reported and the export goes on with the
+  // bake that is there — a dead export would be the worse outcome.
+  try {
+    const n = await refreshStaleBakes(project)
+    if (n) logInfo('экспорт', `звук под фрагментами обновлён перед рендером: ${n}`)
+  } catch (err) {
+    logWarn('экспорт', 'не удалось обновить звук под фрагментом — рендер с прежним', err)
+  }
   const p = JSON.parse(JSON.stringify(project)) as Project
   const rendered = new Map<string, string>() // fragmentId → assetId
   const todo = p.tracks.flatMap((t) => t.clips).filter((c) => c.kind === 'remotion' && c.fragmentId)
@@ -684,6 +715,7 @@ async function materializeFragments(
   })
   try {
     for (const clip of todo) {
+      if (isCancelled()) throw new Error('cancelled')
       let assetId = rendered.get(clip.fragmentId!)
       if (!assetId) {
         onProgress({ phase: 'fragments', progress: done / todo.length })
@@ -715,6 +747,7 @@ async function materializeFragments(
     })
     try {
       for (const a of alphaAssets) {
+        if (isCancelled()) throw new Error('cancelled')
         await alphaPackedFallback(a)
         n++
       }

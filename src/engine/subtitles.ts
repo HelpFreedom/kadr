@@ -175,6 +175,8 @@ export function cuesToTxt(cues: SubCue[]): string {
 export interface RangeAudioFilter {
   /** only these tracks contribute (the neon-wave "one track" mode) */
   trackIds?: string[]
+  /** only these clips contribute (beats of one music clip) */
+  clipIds?: string[]
 }
 
 export function collectRangeAudio(
@@ -189,6 +191,7 @@ export function collectRangeAudio(
     if (filter?.trackIds && !filter.trackIds.includes(track.id)) continue
     for (const clip of track.clips) {
       if (clip.kind !== 'media' || clip.muted) continue
+      if (filter?.clipIds && !filter.clipIds.includes(clip.id)) continue
       const asset = project.assets.find((a) => a.id === clip.assetId)
       if (!asset?.hasAudio) continue
       const speed = clip.speed || 1

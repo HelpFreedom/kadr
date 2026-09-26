@@ -55,6 +55,20 @@ captions to this part”, watch it happen live in the preview.
 - 🌊 **Neon wave** — an audio-reactive glowing line driven by the loudness
   of the selected range (whole mix or a single track); restyle it in the
   fragment's code, the envelope matches Blender's "Bake Sound" exactly.
+- 🥁 **Cutting to the music** — «Биты» (Beats) finds the beats of any sound
+  on the timeline (a port of librosa's `beat_track`, beat for beat) and lays
+  them down as thin marks that clips, edges and the playhead snap to. Where
+  librosa is systematically late — on a brickwalled track with an 808 it is
+  ~110 ms, six visible frames — the grid moves itself onto the real attacks.
+  Remotion fragments **hear the music**: the sound under a clip is baked
+  into its folder (level, bass, mid, treble, beat pulses), so letters and
+  light jump exactly on the bass, and a moved edit is re-baked before export.
+- 🔊 **Sound and music library** — 260 effects (CC0) and five music beds
+  (CC BY 4.0) right in the editor, plus your own sound folder. Every sound is
+  labelled (brightness, harshness, envelope) and knows the moment of its
+  **hit**, so an effect lands on the beat with its impact, not with its file
+  start — a boom with a lead-in can hit a second and a half in. Licences are
+  in [resources/CREDITS.md](resources/CREDITS.md).
 - 🗣️ **ElevenLabs voice-over** — any text (from the media bin, a file on
   disk, or typed into the dialog) becomes an audio clip on the timeline.
   Long text is cut at sentence boundaries under the model's limit and
@@ -103,7 +117,9 @@ captions to this part”, watch it happen live in the preview.
   iterating!), automatic pixel-capture mode when you put GL effects, 3D or
   transitions on a fragment, and exactly **one** real render at export
   (content-hash cached). Fragment sources live **in the project folder**,
-  so a project travels with its graphics.
+  so a project travels with its graphics. A fragment render reports both of
+  its phases (frames and encoding) and really stops on Cancel, with its
+  whole process tree.
 - 🪟 **Alpha video** — transparent WebM (VP8/VP9+alpha), MOV (ProRes 4444)
   and HEVC with alpha keep their transparency in both preview and export:
   lower tracks show through, masks and effects behave as usual.
@@ -120,8 +136,10 @@ captions to this part”, watch it happen live in the preview.
   preset's true bitrate (Chromium's built-in encoder ignored the bitrate
   and softened the picture — measured and replaced; frames reach ffmpeg
   with zero copies), 8-sample motion blur, automatic frame blending for
-  fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3, and a
-  short chime when the render is done.
+  fps-mismatched sources, presets for YouTube/Shorts/WebM/MP3, a master
+  limiter at −1 dBFS on the mix (a loud track under a hit no longer clips —
+  it measured +9.8 dBFS; everything below the limit passes bit for bit), and
+  a short chime when the render is done.
 - 🚀 **Fast on every source** — seeking a `<video>` element costs ~0.2 s
   per frame, so the exporter avoids it everywhere: alpha video (every
   transparent Remotion fragment included) is read through a **lossless**
@@ -171,7 +189,7 @@ proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
 ## How the AI integration works
 
 Kadr starts a local HTTP bridge into the renderer and hands Claude an MCP
-server with thirteen tools:
+server with its own set of tools:
 
 | Tool | What it does |
 |---|---|
@@ -182,6 +200,10 @@ server with thirteen tools:
 | `kadr_transcribe` | local Whisper over a file or a timeline range |
 | `kadr_fragment_create` | scaffold a Remotion composition as a timeline clip |
 | `kadr_neon_wave` | an audio-reactive wave over a range |
+| `kadr_beats` | find the beats of a sound and place beat marks (all / every other / bars / accents) |
+| `kadr_audio_react` | bake the sound under a fragment so it moves with the music |
+| `kadr_sounds` · `kadr_sound_add` | find an effect or music bed in the library · place it with its hit on a beat |
+| `kadr_sound_label` | describe one of your own sounds: uses, tags, a note |
 | `kadr_voice_speak` | synthesise text and drop the clip on the timeline |
 | `kadr_voice_check` | run the defect detector over a voice-over |
 | `kadr_voice_mark` · `kadr_voice_verdict` | place your own mark · rule on a finding |
@@ -208,20 +230,25 @@ autosave semantics, auto-captions, the design system (contrast, no emoji,
 focus, the dialog contract), the session log, the storage panel (the
 "wipe the proxies, open it a year later" promise is checked in pixels),
 the detached preview window, voice-over, marking and phrase
-regeneration, and the shape of the training corpus.
+regeneration, the shape of the training corpus, beats and the sound baked
+into fragments, the sound library (e2e44), fragment layering in the preview
+and hot reload of project-owned fragments (e2e45).
 
-Four more checks are pure maths — no app, no network:
+Seven more checks run without the app and without the network:
 
 ```bash
 node scripts/check-envelope.mjs   # loudness envelope (Blender's Bake Sound)
 node scripts/check-ttstext.mjs    # cutting long text at real boundaries
 node scripts/check-proxy.mjs      # which proxy is used, and how Chromium is told
 node scripts/check-voicemap.mjs   # remapping times after a phrase is spliced in
+node scripts/check-beats.mjs resources/music  # beats: librosa parity + attack alignment
+node scripts/check-limiter.mjs    # the master limiter is transparent below the limit (ffmpeg)
+node scripts/check-sfx-labels.mjs # sound labels against /brag's reference (ffmpeg)
 ```
 
 ## Documentation
 
-- [FEATURES.md](FEATURES.md) — the full feature guide (Russian, 1200+ lines).
+- [FEATURES.md](FEATURES.md) — the full feature guide (Russian, 1900+ lines).
 - [CLAUDE.md](CLAUDE.md) — architecture map (also read by Claude Code).
 
 ## Authors

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLog, clearLog, logAsText, logTime, markLogSeen, type LogEntry } from '@/engine/log'
 import { useT } from '@/i18n'
+import type { GpuInfo, GpuPref } from '@shared/types'
 import { Icon } from './icons'
 
 function Row({ e }: { e: LogEntry }) {
@@ -83,6 +84,7 @@ export function DebugPanel({ onClose }: { onClose: () => void }) {
           <Icon name="close" size={15} />
         </button>
       </div>
+      <GpuRow />
       <div
         className="log-body"
         ref={body}
@@ -95,6 +97,41 @@ export function DebugPanel({ onClose }: { onClose: () => void }) {
           ? <div className="hint">{t('logEmpty')}</div>
           : entries.map((e) => <Row key={e.id} e={e} />)}
       </div>
+    </div>
+  )
+}
+
+/** Which GPU draws the editor (electron/gpu.ts) — the choice needs a restart. */
+function GpuRow() {
+  const t = useT()
+  const [info, setInfo] = useState<GpuInfo | null>(null)
+  const [changed, setChanged] = useState(false)
+  useEffect(() => { void window.kadr.gpuGet?.().then(setInfo).catch(() => {}) }, [])
+  if (!info) return null
+  return (
+    <div className="gpu-row">
+      <span className="dim">{t('gpuLabel')}</span>
+      <span className="gpu-name" title={info.why}>{info.renderer || '—'}</span>
+      {info.available && (
+        <select
+          value={info.pref}
+          aria-label={t('gpuLabel')}
+          data-act="gpu-pref"
+          onChange={(e) => {
+            const pref = e.target.value as GpuPref
+            void window.kadr.gpuSet(pref).then(() => {
+              setChanged(true)
+              setInfo({ ...info, pref, fallback: null })
+            })
+          }}
+        >
+          <option value="auto">{t('gpuAuto')}</option>
+          <option value="discrete">{t('gpuDiscrete')}</option>
+          <option value="integrated">{t('gpuIntegrated')}</option>
+        </select>
+      )}
+      {changed && <span className="gpu-note">{t('gpuRestart')}</span>}
+      {!changed && info.fallback && <span className="gpu-note" title={info.fallback.reason}>{t('gpuFellBack')}</span>}
     </div>
   )
 }

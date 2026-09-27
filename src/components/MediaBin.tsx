@@ -7,6 +7,7 @@ import { useTtsUi } from './TtsDialog'
 import { useT } from '@/i18n'
 import { Icon, Spinner } from './icons'
 import { Modal } from './Modal'
+import { useModelsUi, insertModelFragment, prepareForFragment } from '@/engine/models'
 
 export function MediaBin() {
   const t = useT()
@@ -156,6 +157,20 @@ export function MediaBin() {
                 <Icon name="captions" size={13} />
               </button>
             )}
+            {a.kind === 'video' && (
+              <button
+                className="tr-badge frag-media-badge"
+                data-act="fragment-media"
+                title={t('fragmentMediaHint')}
+                aria-label={t('fragmentMediaHint')}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void prepareForFragment(a.id)
+                }}
+              >
+                <Icon name="film" size={13} />
+              </button>
+            )}
             <button
               className="bin-del"
               title={t('binDelete')}
@@ -171,6 +186,7 @@ export function MediaBin() {
           </div>
         ))}
       </div>
+      <ModelsSection />
       {confirmIds && (
         <Modal
           title={t('binConfirmTitle')}
@@ -240,5 +256,52 @@ export function MediaBin() {
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * The project's 3D models (kadr-lib/models): a tile per model with its
+ * thumbnail and real size; a double click (or the play badge) puts a ready 3D
+ * fragment on the timeline at the playhead. Fragments use them as
+ * `import m from '@lib/models/<name>.glb'` + useModel(m) from '@kadr/three'.
+ */
+function ModelsSection() {
+  const t = useT()
+  const models = useModelsUi((s) => s.models)
+  const busy = useModelsUi((s) => s.busy)
+  const [open, setOpen] = useState(() => localStorage.getItem('kadr.modelsOpen') !== '0')
+  const [err, setErr] = useState('')
+  if (!models.length && !busy) return null
+  const toggle = () => setOpen((v) => { localStorage.setItem('kadr.modelsOpen', v ? '0' : '1'); return !v })
+  const insert = (name: string) => {
+    setErr('')
+    insertModelFragment(name).catch((e) => setErr(String((e as Error)?.message ?? e)))
+  }
+  return (
+    <>
+      <div className="panel-head texts-head" onClick={toggle} title={open ? t('textsCollapse') : t('textsExpand')}>
+        <span>
+          <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} />
+          {t('models3d')} ({models.length}){busy > 0 && <> <Spinner size={10} /></>}
+        </span>
+      </div>
+      {open && (
+        <div className="bin-grid">
+          {models.map((m) => (
+            <div key={m.name} className="bin-item model" data-model={m.name}
+                 title={`${m.source}\n${m.parts.length} ${t('modelParts')} · ${m.trianglesOut} ${t('modelTris')}\nimport ${m.name.replace(/[^a-zA-Z0-9_$]/g, '_')} from '@lib/models/${m.file}'`}
+                 onDoubleClick={() => insert(m.name)}>
+              <img src={window.kadr.fileUrl(`${m.dir}/${m.thumb}`)} alt="" crossOrigin="anonymous" />
+              <button className="tr-badge" data-act="model-insert" title={t('modelInsert')} aria-label={t('modelInsert')}
+                      onClick={(e) => { e.stopPropagation(); insert(m.name) }}>
+                <Icon name="play" size={13} />
+              </button>
+              <div className="bin-name">{m.name} · {m.sizeMm.map((x) => Math.round(x)).join('×')} {t('mm')}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {err && <div className="tr-error"><Icon name="alert" size={15} /><span>{err}</span></div>}
+    </>
   )
 }

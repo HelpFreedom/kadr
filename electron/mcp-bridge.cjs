@@ -205,6 +205,134 @@ server.registerTool('kadr_snapshot', {
   } catch (e) { return asError(e) }
 })
 
+server.registerTool('kadr_sheet', {
+  description:
+    'A CONTACT SHEET: several WYSIWYG frames in one PNG, each labelled with its time (and bar.beat ' +
+    'when the timeline carries an analysed beat grid). Same rendering path as kadr_snapshot ' +
+    '(fragments through pixel capture at full width, originals decoded) — use it to check a ' +
+    'sequence in one look: the middle of every transition, both sides of every cut between ' +
+    'fragments, the key beats. Read the returned file to see it. Up to 48 frames; `width` is the ' +
+    'width of ONE frame in the sheet (default 480; 960 or the project width to read small text). ' +
+    'Never imported into the media bin. ~1–5 s per frame.',
+  inputSchema: {
+    times: z.array(z.number()).min(1).max(48).describe('project times in seconds, in sheet order'),
+    cols: z.number().int().min(1).max(12).optional().describe('frames per row (default min(4, count))'),
+    width: z.number().int().min(120).max(3840).optional().describe('width of one frame in px (default 480)')
+  }
+}, async ({ times, cols, width }) => {
+  try {
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.contactSheet(${JSON.stringify({ times, cols, width })})
+      return { path: r.path, width: r.width, height: r.height, frames: r.frames.map((f) => f.label) }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_model_import', {
+  description:
+    'Import 3D models (STL, 3MF, STEP, OBJ, GLB/glTF) into the project\'s kadr-lib/models — the project ' +
+    'must be saved. 3MF is read the way the slicer builds it (build items, components in other files ' +
+    'of the package, units), CAD Z-up becomes Y-up, heavy meshes are decimated to `budget` triangles ' +
+    '(default 200 000), each part gets its size and an oriented bounding box (mm). The result: ' +
+    '<name>.glb (metres) + <name>.json + a thumbnail. In a fragment: `import m from ' +
+    '\'@lib/models/<name>.glb\'`, `const model = useModel(m)` from \'@kadr/three\' → model.list / ' +
+    'model.parts[name] ({geometry, edges, box, size}), 1 scene unit = 10 cm, the model centred and ' +
+    'standing on y = 0. insert:{start,end} also puts a ready turntable fragment on the timeline. ' +
+    'Check the returned sizes against the real object before building a film on it.',
+  inputSchema: {
+    paths: z.array(z.string()).min(1).describe('absolute paths of the model files'),
+    name: z.string().optional().describe('model name (one file only; default: the file name)'),
+    budget: z.number().int().min(1000).optional().describe('triangles kept for the whole model (default 200000)'),
+    insert: z.object({ start: z.number(), end: z.number() }).optional().describe('also insert a turntable fragment of the (first) model')
+  }
+}, async ({ paths, name, budget, insert }) => {
+  try {
+    return asText(await editorEval(`
+      const E = window.kadrEditor
+      const infos = await E.importModels(${JSON.stringify(paths)}, ${JSON.stringify({ name, budget })})
+      let fragment = null
+      if (${JSON.stringify(!!insert)} && infos[0]) {
+        const f = await E.insertModelFragment(infos[0].name, ${JSON.stringify(insert ? { start: insert.start, duration: insert.end - insert.start } : {})})
+        fragment = { fragmentId: f.id, clipId: f.clipId, entryFile: f.entry }
+      }
+      return { models: infos.map((m) => ({ name: m.name, file: 'kadr-lib/models/' + m.file, sizeMm: m.sizeMm,
+        triangles: [m.trianglesIn, m.trianglesOut], parts: m.parts.map((p) => ({ name: p.name, bboxMm: p.bboxMm, obbHalfMm: p.obbMm.half })) })), fragment }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_fragment_media', {
+  description:
+    'Make a video from the bin usable inside a fragment\'s <Video>: a copy in the project\'s ' +
+    'kadr-lib/media that is UPRIGHT (a phone\'s rotation applied), SDR BT.709 (an HLG/PQ HDR ' +
+    'recording tone-mapped — played as it is it looks flat and grey), H.264 with a keyframe every ' +
+    '30 frames (a fragment seeks constantly; a phone\'s long GOP makes each seek decode seconds), ' +
+    'no bigger than the project. Returns the import to use: `import clip from \'@lib/media/<name>.mp4\'` ' +
+    '→ <Video src={clip} /> (Video, not OffthreadVideo). Rebuilt only when the source changes.',
+  inputSchema: { assetId: z.string().describe('a video asset id from kadr_state') }
+}, async ({ assetId }) => {
+  try {
+    return asText(await editorEval(`return await window.kadrEditor.prepareForFragment(${JSON.stringify(assetId)})`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_models', {
+  description: 'The 3D models already imported into this project (kadr-lib/models): names, sizes (mm), parts. See kadr_model_import.',
+  inputSchema: {}
+}, async () => {
+  try {
+    return asText(await editorEval(`
+      await window.kadrEditor.refreshModels()
+      return window.kadrEditor.useModelsUi.getState().models.map((m) => ({ name: m.name, import: "@lib/models/" + m.file, sizeMm: m.sizeMm,
+        parts: m.parts.map((p) => p.name), source: m.source }))`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_check', {
+  description:
+    'CHECK the motion piece against the music and the rules of readable motion, before showing it. ' +
+    'It reads what each fragment DECLARES about itself — export `inspect` with the fragment: ' +
+    '`export const fragment = { component, meta, inspect }` where inspect = { events: [{t, kind: ' +
+    '"big"|"small", label}], texts: [{from, to, text, sub?, role?: "title"|"note"|"caption", box?: ' +
+    '[x,y,w,h], color?, at?: (t) => [x,y]}], camera?: (t) => ({pos, target, fov}), continuous?: ' +
+    'true } (composition seconds / pixels; types in "@kadr/runtime": defineInspect, KadrInspect). ' +
+    'Warns about: an event off the beat (>40 ms), a BIG event not on the first beat of a bar, an ' +
+    'event inside a pause of the music, a caption shown shorter than its reading time (1–3 words ' +
+    '≥0.8 s, longer ≥ max(1.2 s, 0.3 s/word), a subtitle +0.7 s), a caption that moves while ' +
+    'readable (>20 px/s), two main captions at once or overlapping, a camera that jerks. Notes ' +
+    'first beats of bars with nothing on them. pixels:true also renders frames: caption contrast ' +
+    'against the real background (WCAG, titles ≥3:1, other text ≥4.5:1) and the seams between ' +
+    'butt-joined fragments (a warning when a fragment declares continuous: true and the cut shows). ' +
+    'Needs the music map on the timeline for the rhythm rules (kadr_beats first). Times returned ' +
+    'are TIMELINE seconds.',
+  inputSchema: {
+    clipIds: z.array(z.string()).optional().describe('check these fragment clips only (default: all)'),
+    pixels: z.boolean().optional().describe('also contrast and seams — renders frames, ~1–5 s each'),
+    collisions: z.boolean().optional().describe('also parts of the 3D kit (<Part> from @kadr/three) passing through each other: plays every fragment frame by frame (every 1/15 s) — slow; parts touching on every frame are reported as an assembly in contact, not an error')
+  }
+}, async ({ clipIds, pixels, collisions }) => {
+  try {
+    return asText(await editorEval(`
+      const r = await window.kadrEditor.runChecks(${JSON.stringify({ clipIds, pixels, collisions })})
+      return { checked: r.checked,
+        warnings: r.issues.filter((i) => i.level === 'warn').map((i) => ({ kind: i.kind, t: +i.t.toFixed(3), end: i.end != null ? +i.end.toFixed(3) : undefined, clipId: i.clipId, message: i.message })),
+        notes: r.issues.filter((i) => i.level === 'info').slice(0, 80).map((i) => ({ kind: i.kind, t: +i.t.toFixed(3), message: i.message })),
+        events: r.events.length }`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_typecheck', {
+  description:
+    'Type-check ONE fragment the way the preview and the render resolve it (its project\'s ' +
+    '\'@lib/…\', Kadr\'s \'@kadr/…\', three/r3f types) and return only the errors in that ' +
+    'fragment, its project\'s kadr-lib and Kadr\'s runtime. Run it after editing a fragment ' +
+    'instead of tsc over the whole workspace (hundreds of unrelated fragments live there). ' +
+    '~5–20 s.',
+  inputSchema: { fragmentId: z.string().describe('the fragment id (clip.fragmentId)') }
+}, async ({ fragmentId }) => {
+  try {
+    return asText(await editorEval(`return await window.kadr.fragmentTypecheck(${JSON.stringify(fragmentId)})`))
+  } catch (e) { return asError(e) }
+})
+
 server.registerTool('kadr_export', {
   description:
     'Render the current Kadr project (or a time range of it) to a file and wait for completion. ' +
@@ -288,6 +416,17 @@ server.registerTool('kadr_fragment_create', {
     'self-contained scene\n' +
     '- to use media/images, copy or write files INTO the fragment folder and import them ' +
     '(import bg from "./bg.jpg") — absolute paths will not survive the final render bundling\n' +
+    '- SHARED CODE AND ASSETS of a saved project live ONCE in <projectDir>/kadr-lib/ and every ' +
+    'fragment of the project imports them as \'@lib/…\' (preview and render; an edit there hot-reloads ' +
+    'all of them and invalidates their renders) — never copy a module into several fragments. ' +
+    'Fonts in kadr-lib/fonts/ are registered by Kadr (family = file name, "Inter-700.woff2" → Inter ' +
+    '700); 3D models go there with kadr_model_import, videos with kadr_fragment_media\n' +
+    '- \'@kadr/runtime\': defineInspect (what kadr_check reads), loadFont, and defineParams/useParams — ' +
+    'values the user tunes with sliders in the Inspector, live in the preview, saved in the ' +
+    'fragment\'s params.json (edit that file to set them; it hot-updates without a reload). ' +
+    '\'@kadr/three\': Kadr\'s 3D kit (useModel, Scene3D, Studio, Camera + cameraPath, Part, Layer, ' +
+    'Callout, Balloons, PortraitReveal…)\n' +
+    '- after editing, kadr_typecheck <fragmentId> (not tsc over the workspace)\n' +
     '- embed video with <Video>, NOT <OffthreadVideo>: the latter needs Remotion\'s native ' +
     'compositor (glibc >= 2.32) and dies on older systems with "GLIBC_2.3x not found"\n' +
     '- the module must keep exporting `fragment = { component, meta }`\n' +
@@ -330,18 +469,25 @@ server.registerTool('kadr_fragment_create', {
 
 server.registerTool('kadr_beats', {
   description:
-    'Find the BEATS of the music and lay them on the timeline as beat markers (thin pink lines; ' +
-    'accents brighter). Clips, the range and markers SNAP to them while dragging, and you should ' +
-    'use them for every music-driven edit: cuts on beats, a reveal on an accent, sequential items ' +
-    'on consecutive beats. The analysis is librosa\'s beat_track ported to the editor (verified ' +
-    'beat-for-beat against librosa). Earlier beat markers inside the same span are replaced; the ' +
-    'user\'s own markers are never touched. Listen to specific clips (clipIds — a linked video half ' +
-    'brings its audio), one track (trackId), or the whole mix of [start, end) (default: the whole ' +
-    'project). grid: "all" every beat, "half" every 2nd, "bar" every 4th (from the strongest ' +
-    'phase — a heuristic downbeat), "strong" accents only. READING RULE: text a viewer must read ' +
-    'needs ~0.3 s per word on screen — above ~110 BPM beats come every <0.55 s, so reveal TEXT on ' +
-    '"half" or "bar", keep "all" for non-text accents. clear:true removes beat markers instead. ' +
-    'Returns the tempo and the placed beat times (timeline seconds).',
+    'The MUSIC MAP: beats, BARS (meter and the "one" of every bar), the SONG\'S SECTIONS and its ' +
+    'PAUSES, laid on the timeline (thin pink lines, the first beat of a bar heavier with its bar ' +
+    'number; sections as a labelled band under the ruler; pauses hatched). Clips, the range and ' +
+    'markers SNAP to all of them. Run it FIRST on any music-driven project and show the user the ' +
+    'map (sections × bars → what happens there) before building. The beats are librosa\'s ' +
+    'beat_track ported to the editor (verified beat-for-beat), moved onto the kick attacks when ' +
+    'librosa sits systematically late. The "one" is the phase with the strongest kick (with the ' +
+    'bass line and harmonic change, minus the backbeat snare); `phaseConfidence` says how sure — ' +
+    'below ~0.2 check it by ear/eye. `kickOffsetMs` = where the kicks really sit against the grid ' +
+    '(e.g. −15: 15 ms before it — lead your visual accents by that). Sections: intro / build / ' +
+    'verse / chorus / break / outro with `energy` 0..1 — the labels are a heuristic of loudness and ' +
+    'repetition; `pauses` are where the music stops (drums out) — keep the picture still there. ' +
+    'Earlier analysis markers inside the span are replaced; the user\'s own markers are never ' +
+    'touched. Listen to specific clips (clipIds — the music clip, not the whole mix with a ' +
+    'voice-over), one track (trackId), or the whole mix of [start, end) (default: the project). ' +
+    'grid: "all" every beat (default), "half" beats 1 and 3, "bar" the first beat of each bar, ' +
+    '"strong" accents only. READING RULE: text needs ~0.3 s per word — above ~110 BPM reveal ' +
+    'TEXT on "half" or "bar". clear:true removes the analysis markers instead. Returns tempo, ' +
+    'meter, bars (bar number → time), sections, pauses and the beats (t, bar.beat).',
   inputSchema: {
     clipIds: z.array(z.string()).optional().describe('listen to these clips only'),
     trackId: z.string().optional().describe('listen to this track only'),
@@ -364,8 +510,18 @@ server.registerTool('kadr_beats', {
       const p = E.useEditor.getState().project
       const inSpan = (p.markers || []).filter(m => m.kind === 'beat' &&
         m.time >= r.range.start - 1e-6 && m.time <= r.range.end + 1e-6)
+      const rh = r.analysis.rhythm
+      const T = (x) => +(r.range.start + x).toFixed(3)
       return { tempo: r.tempo, found: r.found, placed: r.placed, range: r.range, listenedTo: r.source,
-               beats: inSpan.slice(0, 400).map(m => ({ t: +m.time.toFixed(3), s: +(m.strength || 0).toFixed(2),
+               attackShiftMs: r.attackShiftMs,
+               meter: rh && rh.meter, meterConfidence: rh && rh.meterConfidence, phaseConfidence: rh && rh.phaseConfidence,
+               kickOffsetMs: rh && rh.kickOffsetMs,
+               bars: r.analysis.beats.filter(b => b.beatInBar === 1 && b.bar > 0).slice(0, 300).map(b => [b.bar, T(b.time)]),
+               sections: rh ? rh.sections.map(s => ({ label: s.label, start: T(s.start), end: T(s.end), bar: s.startBar,
+                 bars: s.bars, energy: s.energy, repeatOf: s.repeatOf })) : [],
+               pauses: rh ? rh.pauses.map(x => ({ start: T(x.start), end: T(x.end), depthDb: x.depth })) : [],
+               beats: inSpan.slice(0, 400).map(m => ({ t: +m.time.toFixed(3),
+                 b: m.bar != null ? m.bar + '.' + m.beatInBar : undefined, s: +(m.strength || 0).toFixed(2),
                  strong: !!m.strong })),
                truncated: inSpan.length > 400 }`))
   } catch (e) { return asError(e) }
@@ -378,7 +534,15 @@ server.registerTool('kadr_audio_react', {
     '`import { useAudio, beats, bpm } from "./audio"`, `const a = useAudio()` → a.level, a.bass, ' +
     'a.mid, a.treble (0..1, normalised over the clip, attack/release smoothed), a.beat / a.accent ' +
     '(1 on a beat / an accented beat, decaying to 0 in ~0.15 s; useAudio(0.3) for a slower decay), ' +
-    'a.beatIndex, a.sinceBeat; `beats` = [{time (composition s), strength, strong}]. ' +
+    'a.beatIndex, a.sinceBeat; `beats` = [{time (composition s), strength, strong, bar, beatInBar}]. ' +
+    'THE BAR\'S HIERARCHY (needs kadr_beats on the timeline first — bars and sections come from the ' +
+    'whole track, not the few seconds under the clip): `useAccent()` / `accentAt(frame, fps)` → ' +
+    '{hit: 1 on the "one", 0.35 on other beats, 0 in a pause — decaying; bar; beat; beatInBar; ' +
+    'barNumber; section; energy; pause}, pulses already led by the measured kick offset; ' +
+    '`breathAt(frame, fps)` a swell once per bar as deep as the section is energetic; `bars` (times ' +
+    'of every "one"), `sections`, `sectionAt(t)`, `pauses`, `inPause(t)`, `meter`, `kickOffsetMs`. ' +
+    'Big events on `bars`, small ones on beats, NOTHING in pauses; glow breathes with breathAt and ' +
+    'answers accent.hit — never a uniform pulse on every beat. ' +
     'kadr_fragment_create already bakes by default — call this after the music under the clip ' +
     'changes or the clip moves (kadr_state shows clip.audioBake; an export re-bakes stale ones by ' +
     'itself, the live preview does not). source: "mix" (default) or a trackId to listen to one ' +
@@ -409,7 +573,10 @@ server.registerTool('kadr_sounds', {
     'Results come gentlest first. Uses: major reveal, hard transition, soft reveal, logo payoff, ' +
     'success, reveal confirmation, button press, selection, simulated user action, toggle, mode ' +
     'change, card reveal, sequential item, swipe, panel opening, typing, general accent, tiny ' +
-    'accent only, chaotic accent, comedic interruption, ambience, dissolve.',
+    'accent only, chaotic accent, comedic interruption, ambience, dissolve, mechanical. ' +
+    '"mechanical" = a mechanism IN THE FRAME (click, switch, latch, a light metal/plastic/wood knock): ' +
+    'under a song with vocals use only these, quietly (gain 0.4–0.5), each on something visibly ' +
+    'clicking into place — booms and whooshes fight the song.',
   inputSchema: {
     kind: z.enum(['sfx', 'music']).optional().describe('default: both'),
     family: z.string().optional(),

@@ -148,6 +148,7 @@ const api: KadrApi = {
   fragmentDelete: (id) => ipcRenderer.invoke('fragment:delete', id),
   fragmentRelocate: (projectDir, ids) => ipcRenderer.invoke('fragment:relocate', projectDir, ids),
   fragmentWriteFile: (id, name, content) => ipcRenderer.invoke('fragment:write-file', id, name, content),
+  fragmentParamsWrite: (id, patch) => ipcRenderer.invoke('fragment:params-write', id, patch),
   fragmentCaptureStart: (id, url, w, h, fps) =>
     ipcRenderer.invoke('fragment:capture-start', id, url, w, h, fps),
   fragmentCaptureStop: (id) => ipcRenderer.invoke('fragment:capture-stop', id),
@@ -158,8 +159,24 @@ const api: KadrApi = {
     ipcRenderer.on('fragment:frame', handler)
     return () => ipcRenderer.removeListener('fragment:frame', handler)
   },
+  fragmentTypecheck: (id) => ipcRenderer.invoke('fragment:typecheck', id),
+  probeBasic: (path) => ipcRenderer.invoke('media:probe-basic', path),
+  fragmentMedia: (path, projectDir, opts) => ipcRenderer.invoke('media:fragment-media', path, projectDir, opts),
+  fragmentInspect: (id) => ipcRenderer.invoke('fragment:inspect', id),
+  fragmentCollide: (id, step) => ipcRenderer.invoke('fragment:collide', id, step),
+  modelImport: (path, projectDir, opts) => ipcRenderer.invoke('model:import', path, projectDir, opts),
+  modelList: (projectDir) => ipcRenderer.invoke('model:list', projectDir),
+  fragmentCaptureResize: (id, w, h) => ipcRenderer.invoke('fragment:capture-resize', id, w, h),
+  onFragmentCaptureLog: (cb) => {
+    const handler = (_e: unknown, p: { id: string; level: 'error' | 'warn'; msg: string }) => cb(p)
+    ipcRenderer.on('fragment:capture-log', handler)
+    return () => ipcRenderer.removeListener('fragment:capture-log', handler)
+  },
   fragmentRender: (id, opts) => ipcRenderer.invoke('fragment:render', id, opts),
   fragmentCancelRender: () => ipcRenderer.invoke('fragment:cancel-render'),
+  gpuGet: () => ipcRenderer.invoke('gpu:get'),
+  gpuSet: (pref: string) => ipcRenderer.invoke('gpu:set', pref),
+  gpuReport: (renderer: string) => ipcRenderer.invoke('gpu:report', renderer),
   onFragmentProgress: (cb) => {
     const handler = (_e: unknown, p: { id: string; phase: string; progress: number }) => cb(p)
     ipcRenderer.on('fragment:progress', handler)

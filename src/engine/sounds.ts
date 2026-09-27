@@ -45,8 +45,9 @@ export const SFX_USES = [
   'button press', 'selection', 'simulated user action', 'toggle', 'mode change',
   'card reveal', 'sequential item', 'swipe', 'panel opening', 'typing',
   'general accent', 'tiny accent only', 'chaotic accent', 'comedic interruption',
-  // Kadr's own, for longer sounds /brag's set has none of
-  'ambience', 'dissolve'
+  // Kadr's own: longer sounds /brag's set has none of, and the mechanism in
+  // the frame (a click, a latch — the only effects that sit under a song with vocals)
+  'ambience', 'dissolve', 'mechanical'
 ] as const
 
 export interface SfxQuery {

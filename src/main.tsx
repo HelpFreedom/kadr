@@ -1,6 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import App from './App'
+import App, { openProjectAt } from './App'
 import { useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, newClipDefaults, snapPoints } from './state/store'
 import { PRESETS } from './presets'
 import { startExport } from './engine/exporter'
@@ -18,7 +18,13 @@ import { wireAutosave, autosaveNow, activity } from './engine/autosave'
 import { autoCaptions, captionsTsx } from './engine/captions'
 import { reverseClip } from './engine/reverse'
 import { importFiles, wireDropDiagnostics } from './engine/mediaImport'
-import { snapshotFrame } from './engine/snapshot'
+import { snapshotFrame, contactSheet } from './engine/snapshot'
+import { runChecks, readingTime, cameraJerks, CHECK_LIMITS, useChecksUi } from './engine/checks'
+import { importModels, refreshModels, insertModelFragment, modelFragmentTsx, useModelsUi, wireModels, prepareForFragment } from './engine/models'
+import { useFragmentParams, setParam, resetParams, flushParamSaves } from './engine/fragmentParams'
+import { useOnion, setOnion, toggleOnion, wireOnion } from './engine/onion'
+import { audioStats, silencePreview } from './engine/audio'
+import { previewPoolStats } from './engine/player'
 import { usePopout, openPreviewWindow, dockPreviewWindow, togglePreviewWindow } from './engine/popout'
 import { wireExportChime } from './engine/chime'
 import { normalizeClip } from './engine/normalize'
@@ -42,15 +48,36 @@ wireFragmentCapture()
 wireExportChime()
 wireAutosave()
 wireDropDiagnostics()
+wireModels()
+wireOnion()
+
+// Tell main which GPU WebGL really runs on (electron/gpu.ts falls back to the
+// default one when the discrete GPU was asked for and this says otherwise).
+{
+  let name = 'none'
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2')
+    if (gl) {
+      const ext = gl.getExtension('WEBGL_debug_renderer_info')
+      name = String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER))
+      gl.getExtension('WEBGL_lose_context')?.loseContext()
+    }
+  } catch { /* 'none' */ }
+  void window.kadr.gpuReport?.(name).then((mode) => logInfo('видеокарта', `${name} (${mode === 'discrete' ? 'дискретная' : 'по умолчанию'})`))
+}
 
 // Scripting surface for automation and AI integration (Claude Code / MCP):
 // every editor operation is reachable from here.
 ;(window as any).kadrEditor = {
   useEditor, useSettings, usePosePresets, useFxPresets, projectDuration, uid, newClipDefaults,
-  PRESETS, startExport, evalAnim,
+  PRESETS, startExport, evalAnim, openProject: openProjectAt,
   transcribe: transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues,
   createFragment, ensureFragmentServer, deleteFragment, fragmentNeedsCapture, autoCaptions, captionsTsx, autosaveNow, activity,
-  reverseClip, importFiles, snapshotFrame, normalizeClip, syncProjectFragments,
+  reverseClip, importFiles, snapshotFrame, contactSheet, normalizeClip, syncProjectFragments,
+  runChecks, readingTime, cameraJerks, CHECK_LIMITS, useChecksUi,
+  importModels, refreshModels, insertModelFragment, modelFragmentTsx, useModelsUi, prepareForFragment,
+  useFragmentParams, setParam, resetParams, flushParamSaves, useOnion, setOnion, toggleOnion,
+  audioStats, silencePreview, previewPoolStats,
   usePopout, openPreviewWindow, dockPreviewWindow, togglePreviewWindow,
   neonWave, neonWaveTsx, NEON_WAVE_DEFAULTS,
   speakText, useTtsSettings, ttsParams, ttsTempo, loadVoices, sanitizeTtsSettings, TTS_DEFAULTS,

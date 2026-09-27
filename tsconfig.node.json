@@ -14,5 +14,6 @@
       "@shared/*": ["shared/*"]
     }
   },
-  "include": ["electron", "shared", "electron.vite.config.ts"]
+  "include": ["electron", "shared", "electron.vite.config.ts"],
+  "exclude": ["electron/fragment-kit"]
 }

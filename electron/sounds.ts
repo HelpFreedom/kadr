@@ -19,6 +19,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { FFMPEG, FFPROBE, mixdownWav, runStream } from './ffmpeg'
 import { AudioAnalyzer, analyzeBeats, featureCurves } from '@shared/audioAnalysis'
+import { analyzeRhythm } from '@shared/rhythm'
 import { sfxFeatures, labelSfx, SFX_ANALYSIS_VERSION, type SfxLabels } from '@shared/sfxFeatures'
 import type {
   AnalyzeRequest, AudioAnalysisResult, SfxEntry, MusicEntry, SoundLibrary
@@ -72,15 +73,26 @@ export async function analyzeRange(req: AnalyzeRequest): Promise<AudioAnalysisRe
   }
   const frames = an.finish()
   const beats = analyzeBeats(frames)
+  const rhythm = analyzeRhythm(frames, beats)
   const r4 = (v: number) => Math.round(v * 1e4) / 1e4
+  const keep = beats.beats.map((b) => b.time <= duration)
   return {
     duration,
     frameRate: frames.frameRate,
     tempo: Math.round(beats.tempo * 100) / 100,
     beats: beats.beats
-      .filter((b) => b.time <= duration)
-      .map((b) => ({ time: r4(b.time), intensity: r4(b.intensity), strong: b.strong })),
+      .map((b, i) => ({ time: r4(b.time), intensity: r4(b.intensity), strong: b.strong, ...rhythm.beats[i] }))
+      .filter((_, i) => keep[i]),
     accentPhase: beats.accentPhase,
+    rhythm: {
+      meter: rhythm.meter,
+      meterConfidence: rhythm.meterConfidence,
+      phaseConfidence: rhythm.phaseConfidence,
+      sections: rhythm.sections,
+      pauses: rhythm.pauses,
+      energy: rhythm.energy,
+      ...(rhythm.kickOffsetMs ? { kickOffsetMs: rhythm.kickOffsetMs } : {})
+    },
     ...(beats.attack ? { attack: beats.attack } : {}),
     curves: featureCurves(frames)
   }
@@ -126,6 +138,18 @@ export async function analyzeSoundFile(path: string) {
 export const USER_SFX = () => join(app.getPath('userData'), 'sfx')
 const USER_CATALOG = () => join(USER_SFX(), 'kadr-sfx.json')
 const SOUND_EXT = /\.(ogg|wav|mp3|flac|m4a|opus|aac)$/i
+
+/**
+ * Kadr's own use label 'mechanical': short sounds of a mechanism doing
+ * something IN THE FRAME — a click, a switch, a latch, a light metal, plastic,
+ * tin or wood knock, a chip laid down. Under a song with vocals these are the
+ * only effects that do not fight it (a real project scored 16 cinematic
+ * effects under a song and the user had them all cut back to mechanics).
+ * Chosen by family and name and checked against the measured shape (all
+ * short, 0.01–0.66 s, a single attack) — not by ear; the user's own sounds
+ * get it through kadr_sound_label.
+ */
+const MECHANICAL = /^(interface\/(click|switch)_|ui\/(click|mouseclick|switch)\d|impact\/impact(Metal_light|Plate_light|Tin_medium|Wood_light)_|casino\/chip-lay-)/
 
 interface UserCatalogEntry {
   path: string
@@ -279,7 +303,10 @@ async function buildLibrary(): Promise<SoundLibrary> {
         envelope: a?.labels?.envelopeShape ?? k?.labels?.envelope,
         labelledBy: a ? 'brag' : 'kadr',
         tags: Array.isArray(a?.labels?.tags) ? a.labels.tags : typing ? ['keypress'] : [],
-        uses: Array.isArray(a?.labels?.suggestedUses) ? a.labels.suggestedUses : typing ? ['typing'] : []
+        uses: [
+          ...(MECHANICAL.test(id) ? ['mechanical'] : []),
+          ...(Array.isArray(a?.labels?.suggestedUses) ? a.labels.suggestedUses : typing ? ['typing'] : [])
+        ]
       })
     }
   }

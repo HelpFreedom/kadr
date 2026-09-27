@@ -63,12 +63,20 @@ captions to this part”, watch it happen live in the preview.
   Remotion fragments **hear the music**: the sound under a clip is baked
   into its folder (level, bass, mid, treble, beat pulses), so letters and
   light jump exactly on the bass, and a moved edit is re-baked before export.
+  On top of the beats come **bars**: the meter, which beat is the "one",
+  the song's sections (intro, build, verse, chorus, break), its pauses and
+  the kick's offset. First beats are heavier and numbered on the timeline,
+  and fragments get the bar's hierarchy: a big response on the "one", a
+  small one on the other beats, stillness in the pauses and a swell once
+  per bar.
 - 🔊 **Sound and music library** — 260 effects (CC0) and five music beds
   (CC BY 4.0) right in the editor, plus your own sound folder. Every sound is
   labelled (brightness, harshness, envelope) and knows the moment of its
   **hit**, so an effect lands on the beat with its impact, not with its file
-  start — a boom with a lead-in can hit a second and a half in. Licences are
-  in [resources/CREDITS.md](resources/CREDITS.md).
+  start — a boom with a lead-in can hit a second and a half in. A "mechanism
+  in frame" filter picks the clicks, latches and light knocks that sit under
+  a song with vocals, where booms and whooshes fight it. Licences are in
+  [resources/CREDITS.md](resources/CREDITS.md).
 - 🗣️ **ElevenLabs voice-over** — any text (from the media bin, a file on
   disk, or typed into the dialog) becomes an audio clip on the timeline.
   Long text is cut at sentence boundaries under the model's limit and
@@ -119,7 +127,36 @@ captions to this part”, watch it happen live in the preview.
   (content-hash cached). Fragment sources live **in the project folder**,
   so a project travels with its graphics. A fragment render reports both of
   its phases (frames and encoding) and really stops on Cancel, with its
-  whole process tree.
+  whole process tree. Each fragment plays in a process of its own and loads
+  only its own code, and 3D draws on demand at the size it is shown: the
+  next scene's first frame arrives in 42–76 ms instead of 2.3 s, and
+  snapshots of heavy 3D are no longer empty. A **project library**
+  `kadr-lib` (shared code, models, video, fonts — `import … from '@lib/…'`)
+  replaces copies in every fragment, and **fragment parameters** are
+  sliders in the Inspector that the preview follows at once and the export
+  uses.
+- ✅ **Checks** — fragments declare their events, captions and camera, and
+  «Проверка» (Check) holds them against the rhythm and the rules of
+  readable motion: big events on the "one", reading time, moving or
+  overlapping captions, contrast on the real pixels, invisible seams,
+  camera jerks, 3D parts passing through each other.
+- 🧩 **3D models** — STL, 3MF (with part placement and units, the way a
+  slicer builds it), STEP, OBJ and GLB in the media bin with a thumbnail
+  and sizes in mm, decimation of heavy meshes, a fragment around a model
+  in one click, and the `@kadr/three` kit: one keyed camera, the print
+  layer, outlines, callouts, exploded views, a "drawing → reality" reveal.
+- 🧅 **Onion skin** — a video clip's frame laid translucently over the
+  preview (or in difference mode) to line a 3D camera up with footage.
+- 🌈 **HDR and rotation** — HLG/PQ phone video is tone-mapped to SDR (a 3D
+  LUT, not a grey picture), portrait footage with rotation metadata stands
+  upright in the preview and the export alike, and «Подготовить для
+  фрагмента» (Prepare for a fragment) makes a copy fit for `<Video>`.
+- ⏱️ **Big projects stay fast** — on a 19-minute, thousand-clip project the
+  sound no longer starts to stutter towards the end (the preview kept, and
+  wired into the audio graph, an element for every clip it had passed: 169
+  stutters per playthrough → 7), and the timeline draws only what is near
+  the view and zooms by stretching, redrawing sharply once the gesture
+  stops.
 - 🪟 **Alpha video** — transparent WebM (VP8/VP9+alpha), MOV (ProRes 4444)
   and HEVC with alpha keep their transparency in both preview and export:
   lower tracks show through, masks and effects behave as usual.
@@ -127,7 +164,10 @@ captions to this part”, watch it happen live in the preview.
   terminal panel, wired to the live project over MCP: it reads the
   timeline, edits clips, transcribes, creates and iterates Remotion
   fragments while you watch the preview update. The panel is draggable,
-  resizable and remembers its place across launches.
+  resizable and remembers its place across launches. Its skills are
+  **composable** — a base plus music, motion and 3D, loaded as the project
+  needs; their rules are defaults (questions and a storyboard first, no
+  template tricks, a multi-scene piece is one film), your words win.
 - 📍 **Timeline markers** — press **M** to drop a numbered marker at the
   playhead: drag it, right-click to remove it, it lives in the project
   file and the embedded Claude can see and place them too ("retime
@@ -200,7 +240,12 @@ server with its own set of tools:
 | `kadr_transcribe` | local Whisper over a file or a timeline range |
 | `kadr_fragment_create` | scaffold a Remotion composition as a timeline clip |
 | `kadr_neon_wave` | an audio-reactive wave over a range |
-| `kadr_beats` | find the beats of a sound and place beat marks (all / every other / bars / accents) |
+| `kadr_sheet` | a contact sheet: many frames in one image, labelled with time and bar |
+| `kadr_check` | check fragments: rhythm, reading, contrast, seams, camera, collisions |
+| `kadr_typecheck` | type-check one fragment |
+| `kadr_model_import` · `kadr_models` | import 3D models into the project · list them |
+| `kadr_fragment_media` | prepare a video for `<Video>` in a fragment |
+| `kadr_beats` | the music map: beats, meter, the "one", bars, sections, pauses |
 | `kadr_audio_react` | bake the sound under a fragment so it moves with the music |
 | `kadr_sounds` · `kadr_sound_add` | find an effect or music bed in the library · place it with its hit on a beat |
 | `kadr_sound_label` | describe one of your own sounds: uses, tags, a note |
@@ -232,9 +277,13 @@ focus, the dialog contract), the session log, the storage panel (the
 the detached preview window, voice-over, marking and phrase
 regeneration, the shape of the training corpus, beats and the sound baked
 into fragments, the sound library (e2e44), fragment layering in the preview
-and hot reload of project-owned fragments (e2e45).
+and hot reload of project-owned fragments (e2e45), preview speed at cuts
+and 3D snapshots (e2e46), the project library and fonts (e2e47), the
+checks (e2e48), 3D import and collisions (e2e49), fragment parameters and
+the onion skin (e2e50), and big projects — the preview pool, timeline
+culling, zoom gestures (e2e51).
 
-Seven more checks run without the app and without the network:
+Ten more checks run without the app and without the network:
 
 ```bash
 node scripts/check-envelope.mjs   # loudness envelope (Blender's Bake Sound)
@@ -244,11 +293,14 @@ node scripts/check-voicemap.mjs   # remapping times after a phrase is spliced in
 node scripts/check-beats.mjs resources/music  # beats: librosa parity + attack alignment
 node scripts/check-limiter.mjs    # the master limiter is transparent below the limit (ffmpeg)
 node scripts/check-sfx-labels.mjs # sound labels against /brag's reference (ffmpeg)
+node scripts/check-hdr.mjs        # HDR → SDR: the formula and ffmpeg's filter chain (ffmpeg)
+node scripts/check-models.mjs     # 3D import: 3MF, STL, OBJ, GLB, decimation
+node scripts/check-timeline.mjs   # timeline waveform and overlaps — exactly as the slow code
 ```
 
 ## Documentation
 
-- [FEATURES.md](FEATURES.md) — the full feature guide (Russian, 1900+ lines).
+- [FEATURES.md](FEATURES.md) — the full feature guide (Russian, 2200+ lines).
 - [CLAUDE.md](CLAUDE.md) — architecture map (also read by Claude Code).
 
 ## Authors

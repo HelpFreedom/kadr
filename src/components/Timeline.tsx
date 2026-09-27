@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { create } from 'zustand'
+import { type WaveBins, waveColumns, trackOverlaps } from '@/engine/timelineMath'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
-import type { AudioDefect, Clip, MediaAsset, Track } from '@shared/types'
+import type { AudioDefect, Clip, MediaAsset, TimelineMarker, Track } from '@shared/types'
 import {
   useEditor, useSettings, projectDuration, snapPoints, findClip, withLinked, MAX_ZOOM
 } from '@/state/store'
@@ -16,6 +18,7 @@ import { useCaptionsUi } from './CaptionsDialog'
 import { useNeonWaveUi } from './NeonWaveDialog'
 import { useSoundsUi } from './SoundsDialog'
 import { useBeatsUi } from '@/engine/beats'
+import { useChecksUi } from '@/engine/checks'
 import { useTtsUi } from './TtsDialog'
 import { evalAnim } from '@/engine/anim'
 import { spanToProject, projectToSrc, type VisibleSpan } from '@/engine/voiceDefects'
@@ -110,13 +113,11 @@ function windowDrag(
 // ---------------------------------------------------------------------------
 // decoded waveform cache (per asset)
 
-interface Wf {
-  rate: number
-  max: Uint8Array
-  rms: Uint8Array
-  /** display gain so quiet recordings stay visible (Audacity-like view) */
+/** a decoded waveform + its display gain (quiet recordings stay visible, Audacity-like) */
+interface Wf extends WaveBins {
   norm: number
 }
+
 const wfCache = new Map<string, Wf>()
 
 function getWaveform(asset: MediaAsset): Wf | null {
@@ -125,13 +126,15 @@ function getWaveform(asset: MediaAsset): Wf | null {
   if (!wf) {
     const decode = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
     const max = decode(asset.waveform.max)
+    const rms = decode(asset.waveform.rms)
     let peak = 0
     for (const v of max) if (v > peak) peak = v
     wf = {
       rate: asset.waveform.rate,
       max,
-      rms: decode(asset.waveform.rms),
-      norm: Math.min(8, 230 / Math.max(16, peak))
+      rms,
+      norm: Math.min(8, 230 / Math.max(16, peak)),
+      windows: new Map()
     }
     wfCache.set(asset.id, wf)
   }
@@ -183,65 +186,135 @@ export function Timeline({ height }: { height: number }) {
   const trackH = useSettings((s) => s.trackH)
   const duration = useEditor((s) => projectDuration(s.project))
   const scrollRef = useRef<HTMLDivElement>(null)
-  const [view, setView] = useState({ start: 0, end: 60 })
+  // the scroll position in PIXELS; the visible seconds are derived from it and
+  // the zoom in the same render — keeping seconds in state meant a zoom was
+  // rendered once with the old view and then again, i.e. two layouts a frame
+  const [sv, setSv] = useState({ left: 0, width: 0 })
+  // a zoom gesture in progress (see the timeline effect): the zoom it started
+  // at, where it is now, and the time under the anchor (off px into the lanes)
+  const gestureRef = useRef<{ z0: number; nz: number; anchorT: number; off: number } | null>(null)
+  const zoomGestureRef = useRef<((target: number, anchorClientX: number) => void) | null>(null)
+  const commitGestureRef = useRef<(() => void) | null>(null)
+  const zoomSliderRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (zoomSliderRef.current) zoomSliderRef.current.value = String(Math.log(zoom))
+  }, [zoom])
+  const view = useMemo(() => ({ start: sv.left / zoom, end: (sv.left + sv.width - HEADER_W) / zoom }), [sv, zoom])
   const [menu, setMenu] = useState<MenuState | null>(null)
 
   const contentW = Math.max(800, (duration + 30) * zoom)
 
-  useEffect(() => {
+  // a layout effect: the first measure lands before the first paint (no empty frame)
+  useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el) return
     let raf = 0
+    // the same numbers → the same state object: no re-render of every track
+    const setSvIf = (v: { left: number; width: number }) =>
+      setSv((cur) => (cur.left === v.left && cur.width === v.width ? cur : v))
     const updateView = () => {
       cancelAnimationFrame(raf)
-      raf = requestAnimationFrame(() => {
-        const z = useEditor.getState().zoom
-        setView({
-          start: el.scrollLeft / z,
-          end: (el.scrollLeft + el.clientWidth - HEADER_W) / z
-        })
-      })
+      raf = requestAnimationFrame(() => setSvIf({ left: el.scrollLeft, width: el.clientWidth }))
     }
-    updateView()
+    setSvIf({ left: el.scrollLeft, width: el.clientWidth }) // no empty first frame
     el.addEventListener('scroll', updateView)
     const ro = new ResizeObserver(updateView)
     ro.observe(el)
 
+    // ZOOM GESTURES STRETCH, THEN COMMIT. Re-laying out and re-rasterising
+    // the whole visible timeline on every step cost 70–90 ms a frame zoomed
+    // out on an 1100-clip project (the GPU raster, not the JS). During a
+    // gesture only a transform changes — the lanes, the ruler and the overlay
+    // layer are scaled about the anchor (see .tl-content.zooming in the CSS),
+    // which is composited, not drawn — and the real zoom is committed when
+    // the gesture pauses (or stretches too far): one render, with the anchor
+    // landing exactly where the stretched picture had it.
+    const content = el.querySelector('.tl-content') as HTMLElement
+    const commit = () => {
+      clearTimeout(gestureTimer)
+      const g = gestureRef.current
+      if (!g) return
+      gestureRef.current = null
+      lastAnchor = { anchorT: g.anchorT, off: g.off, at: performance.now() }
+      const s = useEditor.getState()
+      const nz = g.nz
+      // commit the new content width AND the view it will show in one go:
+      // scrollLeft set against the stale (narrower) width gets clamped by the
+      // browser (zooming near the end of a long timeline anchored left of the
+      // cursor), and a view left over from the old zoom would leave the edges
+      // of the new one empty for a frame
+      const dur = projectDuration(s.project)
+      const maxLeft = Math.max(0, HEADER_W + Math.max(800, (dur + 30) * nz) - el.clientWidth)
+      const left = Math.min(maxLeft, Math.max(0, g.anchorT * nz - g.off))
+      settleAtOnce = true
+      try {
+        flushSync(() => {
+          s.setZoom(nz)
+          setSvIf({ left, width: el.clientWidth })
+        })
+      } finally {
+        settleAtOnce = false
+      }
+      el.scrollLeft = left
+      content.classList.remove('zooming')
+      content.style.removeProperty('--zs')
+    }
+    commitGestureRef.current = commit
+    let gestureTimer: ReturnType<typeof setTimeout> | undefined
+    let lastAnchor: { anchorT: number; off: number; at: number } | null = null
+    zoomGestureRef.current = (target: number, anchorClientX: number) => {
+      const s = useEditor.getState()
+      let g = gestureRef.current
+      if (!g) {
+        const rect = el.getBoundingClientRect()
+        const off = Math.max(0, Math.min(el.clientWidth - HEADER_W, anchorClientX - rect.left - HEADER_W))
+        // a gesture that goes on after a commit keeps its anchor TIME: taken
+        // afresh from the (whole-pixel) scroll position, each commit added up
+        // to half a pixel of drift — ~100 ms over a tenfold zoom, measured
+        const prev = lastAnchor
+        const anchorT = prev && performance.now() - prev.at < 400 && Math.abs(prev.off - off) < 2
+          ? prev.anchorT
+          : (off + el.scrollLeft) / s.zoom
+        g = { z0: s.zoom, nz: s.zoom, anchorT, off }
+        gestureRef.current = g
+        content.style.setProperty('--zo', `${HEADER_W + g.anchorT * g.z0}px`)
+        content.classList.add('zooming')
+      }
+      g.nz = Math.min(MAX_ZOOM, Math.max(4, target))
+      const k = g.nz / g.z0
+      content.style.setProperty('--zs', String(k))
+      clearTimeout(gestureTimer)
+      // a long stretch gets blurry (in) or leaves empty edges (out): redraw
+      if (k > 2 || k < 0.5) commit()
+      else gestureTimer = setTimeout(commit, 150)
+    }
     const onWheel = (e: WheelEvent) => {
       // plain wheel (and Ctrl+wheel) zooms around the cursor; Shift+wheel pans
       if (e.shiftKey) return
       // the gain/opacity slider row has its own precise ±1% wheel
       if ((e.target as HTMLElement).closest?.('.track-gain-row')) return
       e.preventDefault()
-      const s = useEditor.getState()
-      const rect = el.getBoundingClientRect()
-      const cx = e.clientX - rect.left - HEADER_W + el.scrollLeft
-      const tAtCursor = cx / s.zoom
-      const nz = Math.min(MAX_ZOOM, Math.max(4, s.zoom * Math.exp(-e.deltaY * 0.0015)))
-      // commit the new content width NOW: scrollLeft set against the stale
-      // (narrower) width gets clamped by the browser, so zooming near the
-      // end of a long timeline used to anchor somewhere left of the cursor
-      flushSync(() => s.setZoom(nz))
-      el.scrollLeft = tAtCursor * nz - (e.clientX - rect.left - HEADER_W)
-      updateView()
+      const cur = gestureRef.current?.nz ?? useEditor.getState().zoom
+      zoomGestureRef.current?.(cur * Math.exp(-e.deltaY * 0.0015), e.clientX)
     }
+    // anything else on the timeline sees the committed zoom: a click during
+    // the stretch would otherwise land where the picture is not
+    const onDown = () => commit()
+    el.addEventListener('pointerdown', onDown, true)
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => {
       el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('pointerdown', onDown, true)
       el.removeEventListener('scroll', updateView)
       ro.disconnect()
       cancelAnimationFrame(raf)
+      // no commit here (flushSync is not allowed while React unmounts)
+      clearTimeout(gestureTimer)
+      gestureRef.current = null
+      zoomGestureRef.current = null
+      commitGestureRef.current = null
     }
   }, [])
-
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    setView({
-      start: el.scrollLeft / zoom,
-      end: (el.scrollLeft + el.clientWidth - HEADER_W) / zoom
-    })
-  }, [zoom])
 
   useEffect(() => {
     if (!menu) return
@@ -297,6 +370,7 @@ export function Timeline({ height }: { height: number }) {
           <Icon name="glow" /> {t('capButton')}
         </button>
         <BeatButtons />
+        <ChecksButton />
         <button data-act="sounds" title={t('soundsButtonHint')}
                 onClick={() => useSoundsUi.getState().setOpen(true)}>
           <Icon name="sfx" /> {t('soundsButton')}
@@ -324,17 +398,32 @@ export function Timeline({ height }: { height: number }) {
           {t('zoom')}
           <input
             type="range"
+            ref={zoomSliderRef}
             min={Math.log(4)}
             max={Math.log(MAX_ZOOM)}
             step={0.01}
-            value={Math.log(zoom)}
-            onChange={(e) => useEditor.getState().setZoom(Math.exp(Number(e.target.value)))}
+            defaultValue={Math.log(zoom)}
+            onChange={(e) => {
+              // the same stretch-then-commit as the wheel, anchored at the
+              // playhead when it is on screen, else at the middle
+              const el = scrollRef.current
+              const fn = zoomGestureRef.current
+              if (!el || !fn) { useEditor.getState().setZoom(Math.exp(Number(e.target.value))); return }
+              const st = useEditor.getState()
+              const rect = el.getBoundingClientRect()
+              const g = gestureRef.current
+              const z = g ? g.z0 : st.zoom
+              const px = rect.left + HEADER_W + st.playhead * z - el.scrollLeft
+              const onScreen = px >= rect.left + HEADER_W && px <= rect.right
+              fn(Math.exp(Number(e.target.value)), onScreen ? px : rect.left + HEADER_W + (el.clientWidth - HEADER_W) / 2)
+            }}
+            onPointerUp={() => commitGestureRef.current?.()}
           />
         </label>
       </div>
       <div className="tl-scroll" ref={scrollRef} onDragOver={onAnyDragOver} onDrop={onAnyDrop}>
-        <div className="tl-content" style={{ width: HEADER_W + contentW }}>
-          <RulerRow contentW={contentW} />
+        <div className="tl-content" style={{ width: HEADER_W + contentW, ['--z' as string]: zoom, ['--hw' as string]: `${HEADER_W}px` }}>
+          <RulerRow contentW={contentW} view={view} />
           {tracks.map((track) => (
             <TrackRow
               key={track.id}
@@ -345,11 +434,16 @@ export function Timeline({ height }: { height: number }) {
               onMenu={setMenu}
             />
           ))}
-          <RangeOverlay />
-          <KfMarker />
-          <BeatLines view={view} />
-          <Markers />
-          <Playhead />
+          {/* zero width, full height: takes no pointer events itself and changes
+              no coordinates — it exists so a zoom gesture can scale all of
+              these together (.tl-content.zooming) */}
+          <div className="tl-overlays">
+            <RangeOverlay />
+            <KfMarker />
+            <BeatLines view={view} />
+            <Markers />
+            <Playhead />
+          </div>
         </div>
       </div>
       {menu && <TrackMenu menu={menu} onClose={() => setMenu(null)} />}
@@ -572,14 +666,20 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
   )
 }
 
-function RulerRow({ contentW }: { contentW: number }) {
+function RulerRow({ contentW, view }: { contentW: number; view: ViewWindow }) {
   const zoom = useEditor((s) => s.zoom)
   const step = niceStep(zoom)
+  // labels for the visible stretch only (half a screen either side): the
+  // whole length was one element per step — tens of thousands zoomed in on a
+  // long project. The grid lines are the CSS background and cost nothing.
+  const pad = (view.end - view.start) * 0.5
+  const from = Math.max(0, Math.floor((view.start - pad) / step))
+  const to = Math.min(Math.ceil(contentW / (step * zoom)), Math.ceil((view.end + pad) / step))
   const ticks = useMemo(() => {
     const out: number[] = []
-    for (let x = 0; x * step * zoom < contentW; x++) out.push(x * step)
+    for (let x = from; x < to; x++) out.push(x * step)
     return out
-  }, [step, zoom, contentW])
+  }, [step, from, to])
 
   return (
     <div className="tl-row" style={{ height: RULER_H }}>
@@ -609,8 +709,8 @@ function Markers() {
   const all = useEditor((s) => s.project.markers)
   const zoom = useEditor((s) => s.zoom)
   const t = useT()
-  // beats are drawn by BeatLines; only the user's own markers get a flag
-  const markers = useMemo(() => (all ?? []).filter((m) => m.kind !== 'beat'), [all])
+  // the analysis' markers are drawn by BeatLines; only the user's own get a flag
+  const markers = useMemo(() => (all ?? []).filter((m) => !m.kind), [all])
   if (!markers.length) return null
   return (
     <>
@@ -648,26 +748,95 @@ function Markers() {
 }
 
 /**
- * Detected beats: a thin pink line each, accents brighter. Only the visible
- * stretch is drawn, and when they crowd closer than 5 px only the accents are —
- * at that zoom every beat would just paint the lanes pink. Passive: they are
- * snap targets, not handles.
+ * Detected beats: a thin pink line each; with a bar analysis the first beat
+ * of every bar is a heavier line and carries its bar number on the ruler
+ * (numbers thin out when bars crowd). Only the visible stretch is drawn, and
+ * when beats crowd closer than 5 px only the downbeats (or, without bars, the
+ * accents) are — at that zoom every beat would just paint the lanes pink.
+ * Sections of the song are a labelled band along the bottom of the ruler,
+ * pauses a light hatch through the lanes. All passive: they are snap targets,
+ * not handles.
  */
 function BeatLines({ view }: { view: ViewWindow }) {
+  const t = useT()
   const markers = useEditor((s) => s.project.markers)
   const zoom = useEditor((s) => s.zoom)
   const beats = useMemo(() => (markers ?? []).filter((m) => m.kind === 'beat'), [markers])
-  if (!beats.length) return null
+  const spans = useMemo(() => (markers ?? []).filter((m) => m.kind === 'section' || m.kind === 'pause'), [markers])
+  if (!beats.length && !spans.length) return null
   const margin = 50 / zoom
   const visible = beats.filter((b) => b.time >= view.start - margin && b.time <= view.end + margin)
+  const hasBars = beats.some((b) => b.beatInBar !== undefined)
+  const isDown = (b: TimelineMarker) => b.beatInBar === 1 && (b.bar ?? 0) > 0
   let gap = Infinity
   for (let i = 1; i < beats.length; i++) gap = Math.min(gap, beats[i].time - beats[i - 1].time)
-  const shown = gap * zoom < 5 ? visible.filter((b) => b.strong) : visible
+  const shown = gap * zoom < 5 ? visible.filter((b) => (hasBars ? isDown(b) : b.strong)) : visible
+  // bar numbers: every bar when there is room, else every 2nd / 4th / 8th / 16th
+  const downs = beats.filter(isDown)
+  let barGap = Infinity
+  for (let i = 1; i < downs.length; i++) barGap = Math.min(barGap, downs[i].time - downs[i - 1].time)
+  const every = [1, 2, 4, 8, 16, 32].find((n) => barGap * n * zoom >= 26) ?? 64
+  const inView = (m: TimelineMarker) => (m.end ?? m.time) >= view.start - margin && m.time <= view.end + margin
   return (
     <>
+      {spans.filter(inView).map((m) => m.kind === 'section'
+        ? (
+          <div key={m.id} className={`tl-section sec-${m.section ?? 'verse'}`}
+               style={{ left: HEADER_W + m.time * zoom, width: Math.max(1, ((m.end ?? m.time) - m.time) * zoom) }}
+               title={`${t(`section_${m.section ?? 'verse'}` as TKey)} · ${t('sectionEnergy')} ${Math.round((m.energy ?? 0) * 100)}%`}>
+            <span>{t(`section_${m.section ?? 'verse'}` as TKey)}</span>
+          </div>
+          )
+        : (
+          <div key={m.id} className="tl-pause" title={t('musicPause')}
+               style={{ left: HEADER_W + m.time * zoom, width: Math.max(2, ((m.end ?? m.time) - m.time) * zoom) }} />
+          ))}
       {shown.map((b) => (
-        <div key={b.id} className={b.strong ? 'tl-beat strong' : 'tl-beat'}
-             style={{ left: HEADER_W + b.time * zoom }} />
+        <div key={b.id}
+             className={`tl-beat${hasBars ? (isDown(b) ? ' down' : '') : b.strong ? ' strong' : ''}`}
+             style={{ left: HEADER_W + b.time * zoom }}>
+          {isDown(b) && (b.bar! - 1) % every === 0 && <span className="tl-bar-num">{b.bar}</span>}
+        </div>
+      ))}
+    </>
+  )
+}
+
+/** «Проверка» — opens the checks dialog (src/engine/checks.ts). */
+function ChecksButton() {
+  const t = useT()
+  const running = useChecksUi((s) => s.running)
+  const hasFragments = useEditor((s) => s.project.tracks.some((tr) => tr.clips.some((c) => c.kind === 'remotion')))
+  if (!hasFragments) return null
+  return (
+    <button data-act="checks" title={t('checksButtonHint')} onClick={() => useChecksUi.getState().setOpen(true)}>
+      {running ? <Spinner /> : <Icon name="check" />} {t('checksButton')}
+    </button>
+  )
+}
+
+/**
+ * What a fragment declared it does (fragment.inspect events), as ticks along
+ * the bottom of its clip — tall for a big event, short for a small one — and a
+ * warning mark where the last check found a problem. From the last «Проверка»;
+ * passive like the beats (a drag on the clip goes through).
+ */
+function EventTicks({ track }: { track: Track }) {
+  const zoom = useEditor((s) => s.zoom)
+  const result = useChecksUi((s) => s.result)
+  if (!result) return null
+  const evs = result.events.filter((e) => e.trackId === track.id)
+  const ids = new Set(track.clips.map((c) => c.id))
+  const probs = result.issues.filter((i) => i.level === 'warn' && i.clipId && ids.has(i.clipId))
+  if (!evs.length && !probs.length) return null
+  return (
+    <>
+      {evs.map((e, k) => (
+        <div key={`e${k}`} className={`tl-event ${e.kind}`} style={{ left: e.t * zoom }} />
+      ))}
+      {probs.map((p, k) => (
+        <div key={`p${k}`} className="tl-event-warn" title={p.message}
+             style={{ left: p.t * zoom, width: Math.max(3, ((p.end ?? p.t) - p.t) * zoom) }} />
       ))}
     </>
   )
@@ -784,6 +953,22 @@ function TrackRow({
   const t = useT()
   const reorder = useRef<{ pushed: boolean } | null>(null)
   const gainRef = useRef<HTMLInputElement>(null)
+  // Only what is near the visible stretch goes into the DOM (half a screen on
+  // either side, so a scroll finds it drawn), plus the selection — a clip being
+  // dragged must not unmount under the pointer. Everything was rendered before:
+  // 1124 clips and 9400 nodes on a real 19-minute project, re-rendered on every
+  // scroll and every zoom step.
+  const selection = useEditor((s) => s.selection)
+  // Zoomed out so that the whole project is a few screens, culling costs more
+  // than it saves: every scroll would mount and unmount clips at the edges
+  // (measured: worse than rendering them all, which memo() makes cheap).
+  const span = view.end - view.start
+  const pad = contentW <= 4 * span * useEditor.getState().zoom ? Infinity : Math.max(2, span * 0.5)
+  const near = { start: view.start - pad, end: view.end + pad }
+  const shown = useMemo(() => {
+    const sel = new Set(selection)
+    return track.clips.filter((c) => (c.start < near.end && c.start + c.duration > near.start) || sel.has(c.id))
+  }, [track.clips, selection, near.start, near.end])
 
   // wheel over the volume/opacity slider: precise ±1% per notch (a drag can't
   // hit exact values); consecutive notches merge into one history entry
@@ -952,11 +1137,21 @@ function TrackRow({
         onDrop={onDrop}
         onPointerDown={onLaneDown}
       >
-        {track.clips.map((c) => (
-          <ClipView key={c.id} clip={c} track={track} laneHeight={trackH} view={view} onMenu={onMenu} />
-        ))}
-        <TransitionZones track={track} onMenu={onMenu} />
-        <DefectBands track={track} />
+        {shown.map((c) => {
+          // a clip off screen (beyond the waveform's 64 px margin) gets a
+          // constant "nothing visible" — otherwise every clip right of the view
+          // was handed a new view.end on every zoom step and re-rendered
+          const m = 64 / useEditor.getState().zoom
+          const on = c.start + c.duration > view.start - m && c.start < view.end + m
+          return (
+            <ClipView key={c.id} clip={c} track={track} laneHeight={trackH} onMenu={onMenu}
+                      visStart={on ? Math.max(c.start, view.start) : Infinity}
+                      visEnd={on ? Math.min(c.start + c.duration, view.end) : Infinity} />
+          )
+        })}
+        <TransitionZones track={track} view={near} onMenu={onMenu} />
+        <DefectBands track={track} view={near} />
+        <EventTicks track={track} />
       </div>
     </div>
   )
@@ -1044,7 +1239,7 @@ const DEFECT_LABEL: Record<string, TKey> = {
  * still works (the trick `.tl-marker` uses); only the flag and the two phrase
  * edge handles take the mouse.
  */
-function DefectBands({ track }: { track: Track }) {
+function DefectBands({ track, view }: { track: Track; view: ViewWindow }) {
   const t = useT()
   const zoom = useEditor((s) => s.zoom)
   const defects = useEditor((s) => s.project.defects)
@@ -1053,21 +1248,29 @@ function DefectBands({ track }: { track: Track }) {
   const hidden = useVoiceUi((s) => s.hidden)
   const marking = useVoiceUi((s) => s.marking)
   const preview = marking && marking.trackId === track.id ? marking : null
+  // every defect against every clip of the track — once per change of either,
+  // not on every render (it ran on every scroll and zoom step)
+  const all = useMemo(() => {
+    const out: Array<{ d: AudioDefect; src: VisibleSpan; phrase: VisibleSpan | null; clipId: string }> = []
+    if (!defects?.length) return out
+    const byAsset = new Map<string, Clip[]>()
+    for (const c of clips) if (c.assetId) byAsset.set(c.assetId, [...(byAsset.get(c.assetId) ?? []), c])
+    for (const d of defects) {
+      // «не дефект» — метка и выделение уходят с таймлайна. Сама запись остаётся
+      // в проекте: это обучающий пример для детектора, и Ctrl+Z вернёт её вид.
+      if (d.state === 'rejected') continue
+      for (const clip of byAsset.get(d.assetId) ?? []) {
+        const src = spanToProject(clip, d.src[0], d.src[1])
+        if (!src) continue
+        out.push({ d, src, phrase: spanToProject(clip, d.phrase.t0, d.phrase.t1), clipId: clip.id })
+      }
+    }
+    return out
+  }, [defects, clips])
   if (hidden) return null
   if (!defects?.length && !preview) return null
-
-  const placed: Array<{ d: AudioDefect; src: VisibleSpan; phrase: VisibleSpan | null; clipId: string }> = []
-  for (const d of defects ?? []) {
-    // «не дефект» — метка и выделение уходят с таймлайна. Сама запись остаётся
-    // в проекте: это обучающий пример для детектора, и Ctrl+Z вернёт её вид.
-    if (d.state === 'rejected') continue
-    for (const clip of clips) {
-      if (clip.assetId !== d.assetId) continue
-      const src = spanToProject(clip, d.src[0], d.src[1])
-      if (!src) continue
-      placed.push({ d, src, phrase: spanToProject(clip, d.phrase.t0, d.phrase.t1), clipId: clip.id })
-    }
-  }
+  const placed = all.filter(({ src, phrase }) =>
+    (src.end > view.start && src.start < view.end) || (!!phrase && phrase.end > view.start && phrase.start < view.end))
   if (!placed.length && !preview) return null
 
   const dragEdge = (e: React.PointerEvent, d: AudioDefect, edge: 't0' | 't1', clip: Clip) => {
@@ -1215,25 +1418,12 @@ function DefectBands({ track }: { track: Track }) {
  * Vegas-style crossed overlap regions (badge picks the blend) plus junction
  * markers on butt joints (badge picks an AE-style edge transition pair).
  */
-function TransitionZones({ track, onMenu }: { track: Track; onMenu: (m: MenuState) => void }) {
+function TransitionZones({ track, view, onMenu }: { track: Track; view: ViewWindow; onMenu: (m: MenuState) => void }) {
   const t = useT()
   const zoom = useEditor((s) => s.zoom)
-  const zones: { clip: Clip; from: number; to: number }[] = []
-  const joints: { a: Clip; b: Clip; at: number }[] = []
-  const sorted = [...track.clips].sort((a, b) => a.start - b.start)
-  for (let i = 1; i < sorted.length; i++) {
-    const b = sorted[i]
-    let coverEnd = 0
-    for (let j = 0; j < i; j++) {
-      const aEnd = sorted[j].start + sorted[j].duration
-      if (sorted[j].start < b.start && aEnd > b.start) coverEnd = Math.max(coverEnd, aEnd)
-    }
-    const to = Math.min(coverEnd, b.start + b.duration)
-    if (to > b.start + 1e-6) zones.push({ clip: b, from: b.start, to })
-    // butt joint: the previous clip ends exactly where this one starts
-    const a = sorted[i - 1]
-    if (Math.abs(a.start + a.duration - b.start) < 0.02) joints.push({ a, b, at: b.start })
-  }
+  const all = useMemo(() => trackOverlaps(track.clips), [track.clips])
+  const zones = all.zones.filter((z) => z.to > view.start && z.from < view.end)
+  const joints = all.joints.filter((j) => j.at > view.start && j.at < view.end)
   if (!zones.length && !joints.length) return null
   return (
     <>
@@ -1307,17 +1497,45 @@ interface DragState {
   group: { id: string; start: number; trackId: string; kind: Track['kind'] }[] | null
 }
 
-function ClipView({
-  clip, track, laneHeight, view, onMenu
+/**
+ * The zoom the clips were last RENDERED at. During a zoom gesture only the CSS
+ * variable --z (px per second, set on .tl-content) changes: every clip's
+ * position and size are calc()s of it, so a zoom step is one style change and
+ * a layout — not a React render of every clip (122 ms a step on a 1124-clip
+ * project, in the dev build this editor runs in). What depends on the zoom in
+ * any other way — which handles fit, the waveform's pixels — follows this
+ * value, 150 ms after the zooming stops; until then a waveform is stretched.
+ */
+const useSettledZoom = create<{ z: number }>(() => ({ z: useEditor.getState().zoom }))
+let settleTimer: ReturnType<typeof setTimeout> | undefined
+let settleAtOnce = false
+useEditor.subscribe((s, p) => {
+  if (s.zoom === p.zoom) return
+  clearTimeout(settleTimer)
+  // a zoom gesture commits ONE change when it ends: settle in the same render
+  if (settleAtOnce) useSettledZoom.setState({ z: s.zoom })
+  else settleTimer = setTimeout(() => useSettledZoom.setState({ z: useEditor.getState().zoom }), 150)
+})
+/** a length in timeline seconds as CSS that follows the live zoom */
+const zpx = (sec: number) => `calc(var(--z) * ${sec}px)`
+
+/**
+ * One clip. `visStart..visEnd` is the visible part of it (timeline seconds,
+ * clipped to the clip): a clip that is entirely on screen gets the same pair on
+ * every scroll, and memo() then skips it — only the clips at the edges redraw.
+ */
+const ClipView = memo(function ClipView({
+  clip, track, laneHeight, visStart, visEnd, onMenu
 }: {
   clip: Clip
   track: Track
   laneHeight: number
-  view: ViewWindow
+  visStart: number
+  visEnd: number
   onMenu: (m: MenuState) => void
 }) {
   const t = useT()
-  const zoom = useEditor((s) => s.zoom)
+  const zoom = useSettledZoom((s) => s.z)
   const selected = useEditor((s) => s.selection.includes(clip.id))
   const asset = useEditor((s) =>
     clip.assetId ? s.project.assets.find((a) => a.id === clip.assetId) : undefined
@@ -1341,8 +1559,8 @@ function ClipView({
 
   // visible slice in clip-local px — waveform drawn 1:1 with device pixels
   const margin = 64
-  const vis0 = Math.max(0, Math.floor((view.start - clip.start) * zoom) - margin)
-  const vis1 = Math.min(w, Math.ceil((view.end - clip.start) * zoom) + margin)
+  const vis0 = Math.max(0, Math.floor((visStart - clip.start) * zoom) - margin)
+  const vis1 = Math.min(w, Math.ceil((visEnd - clip.start) * zoom) + margin)
   const visW = Math.max(0, Math.round(vis1 - vis0))
 
   useEffect(() => {
@@ -1359,25 +1577,21 @@ function ClipView({
     ctx.clearRect(0, 0, cw, ch)
     const span = Math.max(0.05, asset.duration - clip.inPoint)
     const mid = ch / 2
-    const srcPerPx = speed / (zoom * dpr)
+    const cols = waveColumns(wf, { cw, vis0, dpr, zoom, speed, inPoint: clip.inPoint, span })
+    // one path per colour, filled once: switching fillStyle for every column
+    // was a large share of the redraw
+    const peaks = new Path2D()
+    const rmsPath = new Path2D()
     for (let x = 0; x < cw; x++) {
-      const localT = (vis0 + x / dpr) / zoom
-      const srcT = clip.inPoint + ((localT * speed) % span)
-      const i0 = Math.floor(srcT * wf.rate)
-      const i1 = Math.max(i0 + 1, Math.ceil((srcT + srcPerPx) * wf.rate))
-      let peak = 0
-      let rms = 0
-      for (let i = i0; i < i1 && i < wf.max.length; i++) {
-        if (wf.max[i] > peak) peak = wf.max[i]
-        if (wf.rms[i] > rms) rms = wf.rms[i]
-      }
-      const ph = Math.max(1, Math.min(1, (peak * wf.norm) / 255) * mid)
-      const rh = Math.max(1, Math.min(1, (rms * wf.norm) / 255) * mid)
-      ctx.fillStyle = token('--c-wave-peak')
-      ctx.fillRect(x, mid - ph, 1, ph * 2)
-      ctx.fillStyle = token('--c-wave-rms')
-      ctx.fillRect(x, mid - rh, 1, rh * 2)
+      const ph = Math.max(1, Math.min(1, (cols.peak[x] * wf.norm) / 255) * mid)
+      const rh = Math.max(1, Math.min(1, (cols.rms[x] * wf.norm) / 255) * mid)
+      peaks.rect(x, mid - ph, 1, ph * 2)
+      rmsPath.rect(x, mid - rh, 1, rh * 2)
     }
+    ctx.fillStyle = token('--c-wave-peak')
+    ctx.fill(peaks)
+    ctx.fillStyle = token('--c-wave-rms')
+    ctx.fill(rmsPath)
   }, [asset, zoom, vis0, visW, clip.inPoint, clip.start, speed, laneHeight])
 
   // -------------------------------------------------------------- main drag
@@ -1691,6 +1905,12 @@ function ClipView({
   const fadeIn = clip.fadeIn ?? 0
   const fadeOut = clip.fadeOut ?? 0
   const cls = `clip ${track.kind} ${selected ? 'selected' : ''} ${isText ? 'text-clip' : ''} ${clip.kind === 'remotion' ? 'remotion-clip' : ''}`
+  // A clip a few pixels wide shows nothing but its colour: its handles, level
+  // line, label and waveform can be neither seen nor grabbed. Zoomed out on a
+  // long project that is most of them (a 19-minute project: ~600 clips on
+  // screen, most of them short sounds) and all that DOM was rebuilt on every
+  // zoom step. It stays one element — selectable, draggable, with its menu.
+  const tiny = w < 6
 
   // edge (tip) transitions: AE-style effects on the clip head/tail
   const tipIn = clip.transitionIn && clip.transitionIn.duration > 0.001 ? clip.transitionIn : null
@@ -1702,32 +1922,48 @@ function ClipView({
 
   const loopMarks: number[] = []
   if (loops) {
-    for (let k = 1; k * natural < clip.duration; k++) loopMarks.push(k * natural * zoom)
+    for (let k = 1; k * natural < clip.duration; k++) loopMarks.push(k * natural)
   }
 
-  // fade handles ride along the fade boundary
-  const fadeInX = Math.max(0, Math.min(w - 12, fadeIn * zoom - 5))
-  const fadeOutX = Math.max(0, Math.min(w - 12, fadeOut * zoom - 5))
+  // fade handles ride along the fade boundary: max(0, min(w − 12, fade·zoom − 5))
+  const fadeInX = `clamp(0px, calc(var(--z) * ${fadeIn}px - 5px), calc(var(--z) * ${clip.duration}px - 12px))`
+  const fadeOutX = `clamp(0px, calc(var(--z) * ${fadeOut}px - 5px), calc(var(--z) * ${clip.duration}px - 12px))`
 
+  const onDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    useEditor.getState().setAnimClip(clip.id)
+  }
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const st = useEditor.getState()
+    if (!st.selection.includes(clip.id)) st.select(withLinked(st.project, [clip.id]))
+    onMenu({
+      x: e.clientX, y: e.clientY, kind: 'clip',
+      clipId: clip.id, linked: !!clip.linkId, trackKind: track.kind
+    })
+  }
+  if (tiny) {
+    return (
+      <div
+        className={cls}
+        data-clip={clip.id}
+        style={{ left: zpx(clip.start), width: `max(4px, ${zpx(clip.duration)})` }}
+        title={clip.label ?? asset?.name}
+        onPointerDown={onPointerDown}
+        onDoubleClick={onDoubleClick}
+        onContextMenu={onContextMenu}
+      />
+    )
+  }
   return (
     <div
       className={cls}
-      style={{ left: clip.start * zoom, width: Math.max(4, w) }}
+      data-clip={clip.id}
+      style={{ left: zpx(clip.start), width: `max(4px, ${zpx(clip.duration)})` }}
       onPointerDown={onPointerDown}
-      onDoubleClick={(e) => {
-        e.stopPropagation()
-        useEditor.getState().setAnimClip(clip.id)
-      }}
-      onContextMenu={(e) => {
-        e.preventDefault()
-        e.stopPropagation()
-        const st = useEditor.getState()
-        if (!st.selection.includes(clip.id)) st.select(withLinked(st.project, [clip.id]))
-        onMenu({
-          x: e.clientX, y: e.clientY, kind: 'clip',
-          clipId: clip.id, linked: !!clip.linkId, trackKind: track.kind
-        })
-      }}
+      onDoubleClick={onDoubleClick}
+      onContextMenu={onContextMenu}
     >
       {track.kind === 'video' && asset?.thumbnail && !isText && (
         <img className="clip-thumb" src={asset.thumbnail} alt="" draggable={false} />
@@ -1741,7 +1977,7 @@ function ClipView({
         />
       )}
       {track.kind === 'audio' && visW > 0 && (
-        <canvas ref={waveRef} className="clip-wave" style={{ left: vis0, width: visW }} />
+        <canvas ref={waveRef} className="clip-wave" style={{ left: zpx(vis0 / zoom), width: zpx(visW / zoom) }} />
       )}
       <div
         className="level-hit"
@@ -1756,10 +1992,10 @@ function ClipView({
           {Math.round(levelDrag * 100)}%
         </div>
       )}
-      {fadeIn > 0 && <div className="fade-shade left" style={{ width: fadeIn * zoom }} />}
-      {fadeOut > 0 && <div className="fade-shade right" style={{ width: fadeOut * zoom }} />}
+      {fadeIn > 0 && <div className="fade-shade left" style={{ width: zpx(fadeIn) }} />}
+      {fadeOut > 0 && <div className="fade-shade right" style={{ width: zpx(fadeOut) }} />}
       {loopMarks.map((x) => (
-        <div key={x} className="loop-mark" style={{ left: x }} title="loop" />
+        <div key={x} className="loop-mark" style={{ left: zpx(x) }} title="loop" />
       ))}
       <span className="clip-label">
         {clip.kind === 'remotion' && <Icon name="atom" size={11} />}
@@ -1778,8 +2014,8 @@ function ClipView({
       {reversing !== undefined && (
         <div className="reverse-progress" style={{ width: `${Math.round(reversing * 100)}%` }} />
       )}
-      {tipIn && <div className="tip-strip left" style={{ width: tipIn.duration * zoom }} />}
-      {tipOut && <div className="tip-strip right" style={{ width: tipOut.duration * zoom }} />}
+      {tipIn && <div className="tip-strip left" style={{ width: zpx(tipIn.duration) }} />}
+      {tipOut && <div className="tip-strip right" style={{ width: zpx(tipOut.duration) }} />}
       {track.kind === 'video' && w > 40 && (
         <>
           <div
@@ -1835,4 +2071,4 @@ function ClipView({
       )}
     </div>
   )
-}
+})

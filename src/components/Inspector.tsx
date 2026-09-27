@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { Anim, Clip, Effect, FxPreset, TextStyle } from '@shared/types'
+import type { Anim, Clip, Effect, FragmentInspect, FragmentParamDecl, FxPreset, TextStyle } from '@shared/types'
 import { useEditor, useFxPresets, findClip, uid } from '@/state/store'
 import { GLOW_DEFAULTS } from '@/gl/glow'
 import { useT } from '@/i18n'
 import { bakeAudio, bakeState, bakePlan } from '@/engine/audioReact'
 import { audibleTracksInRange } from '@/engine/subtitles'
+import { useFragmentParams, paramValues, setParam, resetParams, rememberParamValues } from '@/engine/fragmentParams'
 import { CtxMenu } from './CtxMenu'
 import { Icon, Spinner } from './icons'
 
@@ -137,6 +138,7 @@ function ClipProps({ clip }: { clip: Clip }) {
         <input type="checkbox" checked={clip.muted}
           onChange={(e) => update({ muted: e.target.checked })} />
       </label>
+      {clip.kind === 'remotion' && <FragmentParamsSection clip={clip} />}
       {clip.kind === 'remotion' && <AudioReactSection clip={clip} />}
       <EffectsSection clip={clip} />
     </>
@@ -206,6 +208,89 @@ function AudioReactSection({ clip }: { clip: Clip }) {
       {note && <div className="dim">{note}</div>}
       {error && <div className="tr-error"><Icon name="alert" size={15} /><span>{error}</span></div>}
       <div className="dim ar-hint">{t('arHint')}</div>
+    </>
+  )
+}
+
+/**
+ * The fragment's own parameters (defineParams in @kadr/runtime): sliders that
+ * move the preview live and are saved into the fragment's params.json.
+ */
+function FragmentParamsSection({ clip }: { clip: Clip }) {
+  const t = useT()
+  const fid = clip.fragmentId!
+  const [ins, setIns] = useState<FragmentInspect | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [gen, setGen] = useState(0)
+  useFragmentParams((s) => s.live[fid]) // re-render while a value is dragged
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    window.kadr.fragmentInspect(fid)
+      .then((r) => {
+        if (!alive) return
+        if (r.ok) rememberParamValues(fid, r.paramValues)
+        setIns(r)
+      })
+      .catch((e) => { if (alive) setIns({ ok: false, error: String((e as Error)?.message ?? e) }) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [fid, gen])
+  const decl: Record<string, FragmentParamDecl> = ins?.ok ? ins.params ?? {} : {}
+  const names = Object.keys(decl)
+  const values = paramValues(fid, decl, ins?.ok ? ins.paramValues : undefined)
+  const set = (k: string, v: number | boolean | string) => setParam(fid, k, v)
+  return (
+    <>
+      <div className="insp-section">
+        <Icon name="sliders" size={13} /> {t('fpTitle')}
+        <button className="fx-del fp-reload" data-act="fp-reload" aria-label={t('fpReload')} title={t('fpReload')}
+          disabled={loading} onClick={() => setGen((g) => g + 1)}>
+          {loading ? <Spinner /> : <Icon name="reload" size={13} />}
+        </button>
+      </div>
+      {ins && !ins.ok && <div className="tr-error"><Icon name="alert" size={15} /><span>{ins.error.split('\n')[0]}</span></div>}
+      {ins?.ok && !names.length && <div className="dim ar-hint">{t('fpNone')}</div>}
+      {names.map((k) => {
+        const d = decl[k]
+        const v = values[k]
+        const label = d.label || k
+        if (typeof d.value === 'boolean') {
+          return (
+            <label key={k} className="insp-field" data-param={k}>
+              <span>{label}</span>
+              <input type="checkbox" checked={v === true} onChange={(e) => set(k, e.target.checked)} />
+            </label>
+          )
+        }
+        if (typeof d.value === 'string') {
+          const color = /^#[0-9a-f]{6}$/i.test(String(d.value))
+          return (
+            <label key={k} className="insp-field" data-param={k}>
+              <span>{label}</span>
+              <input type={color ? 'color' : 'text'} value={String(v)} onChange={(e) => set(k, e.target.value)} />
+            </label>
+          )
+        }
+        const n = Number(v)
+        const step = d.step ?? (d.min != null && d.max != null ? (d.max - d.min) / 200 : 0.01)
+        const ranged = d.min != null && d.max != null && d.max > d.min
+        const digits = Math.max(0, Math.min(4, Math.ceil(-Math.log10(step) - 1e-9)))
+        return (
+          <label key={k} className="insp-field fx-slider fp-num" data-param={k}>
+            <span>{label}</span>
+            {ranged && (
+              <input type="range" value={n} min={d.min} max={d.max} step={step}
+                onChange={(e) => set(k, Number(e.target.value))} />
+            )}
+            <input type="number" value={Number(n.toFixed(digits))} step={step} min={d.min} max={d.max}
+              onChange={(e) => { const x = Number(e.target.value); if (e.target.value !== '' && Number.isFinite(x)) set(k, x) }} />
+          </label>
+        )
+      })}
+      {names.length > 0 && (
+        <button data-act="fp-reset" onClick={() => void resetParams(fid)}>{t('fpReset')}</button>
+      )}
     </>
   )
 }

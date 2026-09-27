@@ -5,7 +5,7 @@ import { getCaptureFrame } from './fragmentCapture'
 import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
 import { getTextLayer } from './text'
-import { attachAudio, setElementGain, isRouted, resumeAudio } from './audio'
+import { attachAudio, detachAudio, setElementGain, isRouted, resumeAudio } from './audio'
 import { logError } from './log'
 
 export interface ActiveLayer {
@@ -120,6 +120,37 @@ export interface MediaPoolOptions {
   proxy?: boolean
 }
 
+/** How far around the playhead media elements are kept ready: a clip that
+    starts within KEEP_AHEAD s (the preroll seeks 2 s ahead) or ended less
+    than KEEP_BEHIND s ago. Anything further is dropped and made again when
+    the playhead comes back — which costs one load, like any far jump. */
+export const KEEP_AHEAD = 8
+export const KEEP_BEHIND = 3
+
+/** ids of the clips whose elements the preview keeps at time t */
+export function clipsAround(project: Project, t: number): Set<string> {
+  const keep = new Set<string>()
+  for (const tr of project.tracks) {
+    for (const c of tr.clips) {
+      if (c.start - KEEP_AHEAD <= t && t <= c.start + c.duration + KEEP_BEHIND) keep.add(c.id)
+    }
+  }
+  return keep
+}
+
+/** preview playback health (previewPoolStats): corrective seeks while playing
+    are heard as a gap, drift is element time − master clock of audible clips */
+export const playbackHealth = { resyncs: 0, drift: new Map<string, number>() }
+
+/** every live pool, for previewPoolStats() */
+const pools = new Set<MediaPool>()
+/** how many media elements the preview holds (debug panel, tests) */
+export function previewPoolStats() {
+  let elements = 0
+  for (const p of pools) elements += p.size
+  return { pools: pools.size, elements, resyncs: playbackHealth.resyncs, drift: Object.fromEntries(playbackHealth.drift) }
+}
+
 export class MediaPool {
   private items = new Map<string, HTMLVideoElement | HTMLImageElement>()
   private srcs = new Map<string, string>()
@@ -130,7 +161,13 @@ export class MediaPool {
       clips through an ffmpeg intermediate that the element CAN play */
   private overrides = new Map<string, string>()
 
-  constructor(private opts: MediaPoolOptions = {}) {}
+  constructor(private opts: MediaPoolOptions = {}) {
+    pools.add(this)
+  }
+
+  get size() {
+    return this.items.size
+  }
 
   setSourceOverride(clipId: string, path: string | null) {
     if (path) this.overrides.set(clipId, path)
@@ -140,8 +177,10 @@ export class MediaPool {
   get(clipId: string, asset: MediaAsset): HTMLVideoElement | HTMLImageElement {
     let el = this.items.get(clipId)
     const override = this.overrides.get(clipId)
+    // the original is used for source quality (snapshots) unless it cannot be
+    // shown right: undecodable (HEVC) or HDR (the proxy is the tone-mapped one)
     const useProxy = !override && this.opts.proxy && !!asset.proxyPath &&
-      (!this.sourceQuality || !chromiumCanDecode(asset.codec))
+      (!this.sourceQuality || !chromiumCanDecode(asset.codec) || !!asset.hdr)
     const url = window.kadr.fileUrl(override ?? (useProxy ? asset.proxyPath! : asset.path))
     if (!el) {
       if (asset.kind === 'image') {
@@ -177,17 +216,33 @@ export class MediaPool {
 
   /** Drop elements whose clips no longer exist. */
   prune(liveClipIds: Set<string>) {
-    for (const [id, el] of this.items) {
-      if (!liveClipIds.has(id)) {
-        if (el instanceof HTMLVideoElement) {
-          el.pause()
-          el.removeAttribute('src')
-          el.load()
-        }
-        this.items.delete(id)
-        this.srcs.delete(id)
-      }
+    for (const id of [...this.items.keys()]) if (!liveClipIds.has(id)) this.release(id)
+  }
+
+  /**
+   * Drop every element but those of `keep` — the clips around the playhead.
+   * The pool used to keep an element for EVERY clip it had ever touched, each
+   * wired into the WebAudio graph for good: measured on a 19-minute project
+   * with 1080 audio clips, the preview ended playback holding 1082 elements
+   * and 1080 routed sources, the median frame went from 7 to 23 ms, and the
+   * corrective seeks — each one a gap you hear — went from none in the first
+   * thirteen minutes to 33–53 per 30 s at the end.
+   */
+  evictExcept(keep: Set<string>) {
+    for (const id of [...this.items.keys()]) if (!keep.has(id)) this.release(id)
+  }
+
+  private release(id: string) {
+    const el = this.items.get(id)
+    if (el instanceof HTMLVideoElement) {
+      el.pause()
+      detachAudio(el)
+      // frees the decoder and the buffered data now, not whenever GC gets to it
+      el.removeAttribute('src')
+      el.load()
     }
+    this.items.delete(id)
+    this.srcs.delete(id)
   }
 
   pauseAllExcept(activeIds: Set<string>) {
@@ -198,6 +253,7 @@ export class MediaPool {
 
   dispose() {
     this.prune(new Set())
+    pools.delete(this)
   }
 }
 
@@ -710,15 +766,15 @@ export class Player {
       this.lastDrawnT = t
     }
 
-    if (++this.gcCounter % 120 === 0) {
-      this.comp?.collect()
-      const live = new Set<string>()
-      for (const tr of project.tracks) for (const c of tr.clips) live.add(c.id)
-      this.pool.prune(live)
-    }
+    if (++this.gcCounter % 120 === 0) this.comp?.collect()
+    // Keep elements only for clips around the playhead (the pool held one for
+    // every clip ever played — see MediaPool.evictExcept); a deleted clip is
+    // outside the window too, so this also does what prune() did.
+    if (this.gcCounter % 30 === 0) this.pool.evictExcept(clipsAround(project, t))
   }
 
   private syncMedia(project: Project, t: number, playing: boolean) {
+    playbackHealth.drift.clear() // the clips audible on THIS frame
     const activeIds = new Set<string>()
     const seen = new Set<string>()
     let loading = false
@@ -757,7 +813,9 @@ export class Player {
         // speed, and aim slightly AHEAD so the seek lands on time.
         const speed = clip.speed || 1
         const tolerance = Math.max(0.15, 0.08 * speed)
+        if (isAudible && !el.seeking && !el.paused) playbackHealth.drift.set(clip.id, el.currentTime - desired)
         if (!el.seeking && Math.abs(el.currentTime - desired) > tolerance) {
+          if (!el.paused) playbackHealth.resyncs++
           el.currentTime = desired + 0.08 * speed
         }
         if (el.paused) el.play().catch(() => { /* not ready yet */ })

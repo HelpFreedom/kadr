@@ -32,6 +32,13 @@ export interface MediaAsset {
   /** video carries an alpha channel (yuva pix_fmt or WebM alpha_mode tag) —
       proxies/intermediates must preserve it (VP9+alpha WebM, not H.264) */
   hasAlpha?: boolean
+  /** the picture is shown turned by this many degrees clockwise (a phone's
+      portrait recording: 90) — width/height are the SHOWN size */
+  rotation?: number
+  /** an HDR transfer (a phone's HLG, PQ): shown and exported tone-mapped to SDR */
+  hdr?: 'hlg' | 'pq'
+  /** probe generation: 2 = rotation and hdr were looked at (absent there = none) */
+  probeV?: number
   /** light 540p copy used by the preview; export always reads `path` */
   proxyPath?: string
   /** this asset is a reversed render of a source range of another asset */
@@ -203,15 +210,29 @@ export interface TimelineMarker {
   /** short label shown in the flag — auto-numbered 1, 2, 3…; empty for beats */
   label: string
   /**
-   * absent = the user's own marker (green flag); 'beat' = a detected musical
-   * beat (thin line, no flag). Both are snap targets.
+   * absent = the user's own marker (green flag). The rest come from the music
+   * analysis (Биты) and are replaced together when a stretch is analysed
+   * again: 'beat' = a beat (thin line, no flag), 'section' = a part of the
+   * song from `time` to `end` (a band under the ruler), 'pause' = where the
+   * music stops, `time`..`end`. All are snap targets.
    */
-  kind?: 'beat'
+  kind?: 'beat' | 'section' | 'pause'
   /** beats: strength 0..1 (brag's cue intensity) */
   strength?: number
   /** beats: an accent — among the strongest beats of the piece */
   strong?: boolean
+  /** beats: 1-based bar number (0 = a pickup) and the beat's place in it, 1..meter */
+  bar?: number
+  beatInBar?: number
+  /** sections and pauses: where they end, project seconds */
+  end?: number
+  /** sections: what part of the song, and its energy 0..1 */
+  section?: MusicSectionLabel
+  energy?: number
 }
+
+/** markers the music analysis owns (replaced together on a new analysis) */
+export const isMusicMarker = (m: { kind?: string }) => m.kind === 'beat' || m.kind === 'section' || m.kind === 'pause'
 
 export interface Project {
   version: 1
@@ -369,6 +390,28 @@ export interface AnalyzedBeat {
   /** 0..1 */
   intensity: number
   strong: boolean
+  /** 1-based bar (0 = a pickup before the first downbeat) and 1..meter — shared/rhythm.ts */
+  bar?: number
+  beatInBar?: number
+  /** 0..1 over the piece: kick attack, snare, bass-line onset at this beat */
+  kick?: number
+  snare?: number
+  low?: number
+}
+
+export type MusicSectionLabel = 'intro' | 'verse' | 'build' | 'chorus' | 'break' | 'outro'
+
+/** Bars, sections and pauses of an analysed range (shared/rhythm.ts). Times in seconds from the range start. */
+export interface RhythmSummary {
+  meter: 3 | 4
+  meterConfidence: number
+  phaseConfidence: number
+  sections: { start: number; end: number; startBar: number; bars: number; label: MusicSectionLabel; energy: number; repeatOf?: number }[]
+  pauses: { start: number; end: number; depth: number }[]
+  /** loudness 0..1, `rate` values per second */
+  energy: { rate: number; values: number[] }
+  /** kick attacks against the grid, ms (negative = before the beat) */
+  kickOffsetMs?: { median: number; p90: number; clear: number; total: number }
 }
 
 export interface AudioAnalysisResult {
@@ -380,6 +423,8 @@ export interface AudioAnalysisResult {
   beats: AnalyzedBeat[]
   /** strongest phase for every-2nd / every-4th grids (heuristic downbeat) */
   accentPhase: { 2: number; 4: number }
+  /** bars, downbeats, sections, pauses — see shared/rhythm.ts */
+  rhythm?: RhythmSummary
   /** 0..1 energies at frameRate, t = 0 at index 0 */
   curves: { rms: number[]; bass: number[]; mid: number[]; treble: number[] }
   /**
@@ -990,6 +1035,69 @@ export interface StoragePruneResult {
   error?: string
 }
 
+export type GpuPref = 'auto' | 'discrete' | 'integrated'
+export interface GpuInfo {
+  pref: GpuPref
+  /** what this launch actually asked Chromium for */
+  applied: 'discrete' | 'default'
+  why: string
+  /** WebGL's renderer string (empty until the page reports it) */
+  renderer: string
+  available: boolean
+  fallback: { at: number; reason: string } | null
+}
+
+/** An imported 3D model (electron/models.ts): <name>.glb (metres) + <name>.png in kadr-lib/models. */
+export interface ModelInfo {
+  name: string
+  source: string
+  file: string
+  thumb: string
+  units: 'm'
+  trianglesIn: number
+  trianglesOut: number
+  /** mm (x, y = up, z) */
+  sizeMm: [number, number, number]
+  parts: {
+    name: string
+    triangles: number
+    bboxMm: [[number, number, number], [number, number, number]]
+    obbMm: { center: [number, number, number]; axes: [number, number, number][]; half: [number, number, number] }
+  }[]
+  importedAt: number
+}
+
+/** A fragment's declarations for the checks, in composition seconds / pixels
+    (electron/fragment-kit/runtime.ts KadrInspect, functions sampled at 30 Hz). */
+export type FragmentInspect =
+  | {
+      ok: true
+      meta: { width: number; height: number; fps: number; durationInFrames: number }
+      events: { t: number; kind: 'big' | 'small'; label?: string }[]
+      texts: {
+        from: number; to: number; text: string; sub?: string; role?: 'title' | 'note' | 'caption'
+        box?: [number, number, number, number]; color?: string
+        /** [t, x, y] samples when the caption moves */
+        path: [number, number, number][]
+      }[]
+      /** [t, pos, target, fov] samples */
+      camera: [number, [number, number, number], [number, number, number], number | null][]
+      continuous: boolean
+      /** defineParams declarations (runtime.ts) and the values params.json held */
+      params?: Record<string, FragmentParamDecl>
+      paramValues?: Record<string, unknown>
+    }
+  | { ok: false; error: string }
+
+export type FragmentParamValue = number | boolean | string
+export interface FragmentParamDecl {
+  value: FragmentParamValue
+  label?: string
+  min?: number
+  max?: number
+  step?: number
+}
+
 export interface KadrApi {
   openMediaDialog(): Promise<string[]>
   probeMedia(path: string): Promise<ProbeResult>
@@ -1068,6 +1176,8 @@ export interface KadrApi {
   soundSetMeta(id: string, meta: { uses?: string[]; tags?: string[]; note?: string }): Promise<SfxEntry>
   /** Write one generated file (plain name, no folders) into a fragment's folder; returns its path. */
   fragmentWriteFile(id: string, name: string, content: string): Promise<string>
+  /** merge changed parameter values into the fragment's params.json (null = reset to {}); returns the file's content */
+  fragmentParamsWrite(id: string, patch: Record<string, FragmentParamValue> | null): Promise<Record<string, unknown>>
 
   exportDialog(defaultName: string, ext: string): Promise<string | null>
   exportBegin(job: ExportJob): Promise<void>
@@ -1112,12 +1222,37 @@ export interface KadrApi {
   fragmentCaptureStart(id: string, url: string, w: number, h: number, fps: number): Promise<void>
   fragmentCaptureStop(id: string): Promise<void>
   /** Player page's current frame (−1 not ready, −2 no capture window). */
+  /** the frame the capture page has really drawn (−1 not yet, −2 no window) */
   fragmentCaptureQuery(id: string): Promise<number>
+  fragmentCaptureResize(id: string, w: number, h: number): Promise<void>
+  /** a video made fit for a fragment's <Video> (upright, SDR, keyframe every 30) in kadr-lib/media — electron/hdr.ts */
+  fragmentMedia(path: string, projectDir: string, opts?: { name?: string; maxSide?: number }): Promise<{ path: string; import: string; cached: boolean; hdr: 'hlg' | 'pq' | null }>
+  /** codec / alpha / rotation / HDR of a video file — ffprobe only, no thumbnails or waveform */
+  probeBasic(path: string): Promise<{ codec?: string; hasAlpha?: boolean; rotation?: number; hdr?: 'hlg' | 'pq' }>
+  /** import a 3D model (STL/3MF/OBJ/GLB/glTF/STEP) into <projectDir>/kadr-lib/models — electron/models.ts */
+  modelImport(path: string, projectDir: string, opts?: { name?: string; budget?: number; upAxis?: 'y' | 'z' }): Promise<ModelInfo>
+  /** the project's imported models, newest first (`dir` = their folder) */
+  modelList(projectDir: string): Promise<(ModelInfo & { dir: string })[]>
+  /** what a fragment declares about itself (fragment.inspect) — see FragmentInspect */
+  fragmentInspect(id: string): Promise<FragmentInspect>
+  /** which 3D-kit parts intersect on which frames (player ?collide=1) */
+  fragmentCollide(id: string, step?: number): Promise<
+    | { ok: true; fps: number; step: number; samples: number; pairs: { pair: string; sampled: number; hitFrames: number[] }[] }
+    | { ok: false; error: string }>
+  /** tsc over one fragment (its @lib and @kadr paths); only its own errors */
+  fragmentTypecheck(id: string): Promise<{ ok: boolean; errors: { file: string; line: number; col: number; code: string; message: string }[]; more: number }>
+  /** errors from inside a capture window (WebGL failures, a crashed page) */
+  onFragmentCaptureLog(cb: (p: { id: string; level: 'error' | 'warn'; msg: string }) => void): () => void
   fragmentCaptureSync(id: string, msg: unknown): void
   onFragmentFrame(cb: (p: { id: string; w: number; h: number; data: Uint8Array }) => void): () => void
   fragmentRender(id: string, opts?: { transparent?: boolean }): Promise<{ path: string; cached: boolean }>
   /** stops the running fragment render (its whole process tree) */
   fragmentCancelRender(): Promise<void>
+  /** which GPU Chromium renders on (electron/gpu.ts); a change needs a restart */
+  gpuGet(): Promise<GpuInfo>
+  gpuSet(pref: GpuPref): Promise<{ restartNeeded: boolean }>
+  /** the WebGL renderer string as the page sees it */
+  gpuReport(renderer: string): Promise<'discrete' | 'default'>
   onFragmentProgress(cb: (p: { id: string; phase: string; progress: number }) => void): () => void
 
   /** Mix the request's audio to a temp wav and run Whisper over it. */

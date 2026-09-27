@@ -184,11 +184,14 @@ try {
   }
   const after = await evalJs(`(() => {
     const s = window.kadrEditor.useLog.getState()
-    return { n: s.entries.length, unseen: s.unseen,
+    // a fresh window may log its own start (the GPU in use, INFO) — what
+    // matters is that nothing from BEFORE the reload came back
+    return { n: s.entries.length, unseen: s.unseen, old: s.entries.filter((e) => e.msg.includes('до перезагрузки')).length,
+             notInfo: s.entries.filter((e) => e.level !== 'info').length,
              panel: !!document.querySelector('.debug-panel') }
   })()`)
   check('the log does not survive the window — it is a session, not a diary',
-        after.n === 0 && after.unseen === 0, JSON.stringify(after))
+        after.old === 0 && after.notInfo === 0 && after.unseen === 0, JSON.stringify(after))
 
   // ---- 9. a browser notice that is not a failure must not be counted as one.
   // Chromium delivers «ResizeObserver loop …» through window.onerror: an

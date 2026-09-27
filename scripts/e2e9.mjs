@@ -163,8 +163,11 @@ check('unlink via menu clears linkId', unlinked === null)
 
 // 3. level badge appears mid-drag with live %
 const band = await rect('.lane.video .clip .level-hit')
-await mouse('mousePressed', band.cx, band.cy + 4)
-await mouse('mouseMoved', band.cx, band.cy + 14)
+// the band is 9 px tall: aim at its middle — cy + 4 is its last row, and
+// after rounding to whole pixels it landed one row BELOW the band whenever the
+// layout put the band on a half pixel (the press then went to the clip)
+await mouse('mousePressed', band.cx, band.cy)
+await mouse('mouseMoved', band.cx, band.cy + 10)
 await new Promise((r) => setTimeout(r, 150))
 const badge = await evalJs(`(() => {
   const b = document.querySelector('.level-badge')

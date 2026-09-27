@@ -664,6 +664,8 @@ progress::-webkit-progress-value {
 }
 .bin-item:hover { border-color: var(--c-line-3); background: var(--c-bg-3); }
 .bin-item img { width: 100%; height: 68px; object-fit: cover; display: block; }
+/* a model's thumbnail is square — show all of it */
+.bin-item.model img { object-fit: contain; background: var(--c-bg-0); }
 .bin-audio {
   height: 68px;
   display: flex;
@@ -912,6 +914,16 @@ body.kadr-popout .preview {
   border-radius: var(--r2);
   max-width: 70%;
 }
+/* the onion skin (engine/onion.ts): above the fragments, under the gizmo it
+   is used with, and it never takes the mouse */
+.onion-skin {
+  position: absolute;
+  z-index: 6;
+  object-fit: contain;
+  pointer-events: none;
+}
+.onion-ctl { display: inline-flex; align-items: center; gap: var(--s2); }
+.onion-ctl input[type='range'] { width: 72px; }
 .frag-gizmo {
   position: absolute;
   border: 1px dashed var(--c-fragment);
@@ -951,6 +963,8 @@ body.kadr-popout .preview {
   cursor: pointer;
 }
 .tr-badge:hover { background: var(--c-accent-solid); color: var(--c-on-solid); }
+/* the second badge of a tile (next to transcription) */
+.tr-badge.frag-media-badge { left: calc(var(--s2) + 24px); }
 .texts-head {
   margin-top: var(--s2);
   border-top: 1px solid var(--c-line);
@@ -1001,6 +1015,32 @@ body.kadr-popout .preview {
 }
 .text-speak:hover:not(:disabled) { background: var(--c-bg-3); color: var(--c-accent); }
 .tr-target { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.checks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r2);
+}
+.checks-list li + li { border-top: 1px solid var(--c-line); }
+.checks-list button {
+  display: flex;
+  gap: var(--s2);
+  align-items: flex-start;
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  color: var(--c-text);
+}
+.checks-list button:hover { background: var(--c-bg-3); }
+.checks-list li.warn svg { color: var(--c-warn); flex: none; margin-top: 2px; }
+.checks-list li.info button { color: var(--c-text-2); }
+.checks-list li.info svg { flex: none; margin-top: 2px; }
 .tr-live {
   max-height: 64px;
   overflow: hidden;
@@ -1242,6 +1282,9 @@ div.tr-error {
 }
 .fx-del:hover:not(:disabled) { background: var(--c-danger-soft); color: var(--c-danger); }
 .fx-slider input[type='range'] { flex: 1; min-width: 60px; }
+/* fragment parameters: a slider with its exact value beside it */
+.fp-reload { margin-left: auto; display: inline-flex; }
+.fp-num input[type='number'] { width: 72px; }
 .fx-val {
   width: 40px;
   text-align: right;
@@ -1313,6 +1356,21 @@ div.tr-error {
 }
 .tl-scroll::-webkit-scrollbar-corner { background: var(--c-scroll-track); }
 .tl-content { position: relative; }
+/* the overlays' layer (playhead, markers, beats, range): no size of its own */
+.tl-overlays { position: absolute; left: 0; top: 0; bottom: 0; width: 0; }
+/* a zoom gesture in progress: the drawn timeline is stretched about the anchor
+   (--zo, content px) by --zs, composited — the real zoom lands when it ends */
+.tl-content.zooming .lane,
+.tl-content.zooming .ruler {
+  transform: scaleX(var(--zs, 1));
+  transform-origin: calc(var(--zo, 0px) - var(--hw)) 0;
+  will-change: transform;
+}
+.tl-content.zooming .tl-overlays {
+  transform: scaleX(var(--zs, 1));
+  transform-origin: var(--zo, 0px) 0;
+  will-change: transform;
+}
 .tl-row { display: flex; border-bottom: 1px solid var(--c-line); }
 .tl-head {
   position: sticky;
@@ -1442,6 +1500,73 @@ div.tr-error {
 }
 .tl-beat.strong { background: rgb(var(--rgb-beat) / 0.5); }
 .tl-beat.strong::before { height: 12px; background: var(--c-beat); }
+/* the first beat of a bar (bar analysis): heavier, with its number on the ruler */
+.tl-beat.down { width: 2px; background: rgb(var(--rgb-beat) / 0.45); }
+.tl-beat.down::before { height: 14px; left: -1px; width: 4px; background: var(--c-beat); }
+.tl-bar-num {
+  position: absolute;
+  top: 1px;
+  left: 5px;
+  font-size: var(--fz-micro);
+  line-height: 1;
+  color: var(--c-beat);
+  white-space: nowrap;
+}
+/* sections of the song: a labelled band along the bottom of the ruler */
+.tl-section {
+  position: absolute;
+  top: 16px;
+  height: 11px;
+  border-left: 1px solid rgb(var(--rgb-beat) / 0.7);
+  background: rgb(var(--rgb-beat) / 0.1);
+  overflow: hidden;
+  z-index: 1;
+  /* passive, like beats and markers' lines: a drag on the ruler goes through */
+  pointer-events: none;
+}
+.tl-section span {
+  display: block;
+  padding-left: var(--s1);
+  font-size: var(--fz-micro);
+  line-height: 11px;
+  color: var(--c-text-2);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.tl-section.sec-chorus { background: rgb(var(--rgb-beat) / 0.28); }
+.tl-section.sec-chorus span { color: var(--c-text); }
+.tl-section.sec-build { background: linear-gradient(90deg, rgb(var(--rgb-beat) / 0.06), rgb(var(--rgb-beat) / 0.24)); }
+.tl-section.sec-break, .tl-section.sec-intro, .tl-section.sec-outro { background: rgb(var(--rgb-beat) / 0.05); }
+/* what a fragment declared it does (fragment.inspect events), along the
+   bottom of its lane — from the last «Проверка»; passive */
+.tl-event {
+  position: absolute;
+  bottom: 0;
+  width: 2px;
+  height: 6px;
+  margin-left: -1px;
+  background: var(--c-text-2);
+  pointer-events: none;
+  z-index: 3;
+}
+.tl-event.big { height: 12px; width: 3px; background: var(--c-text); }
+.tl-event-warn {
+  position: absolute;
+  bottom: 0;
+  height: 4px;
+  background: var(--c-warn);
+  pointer-events: none;
+  z-index: 3;
+}
+/* a pause in the music: a light hatch through every lane */
+.tl-pause {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: repeating-linear-gradient(135deg, rgb(var(--rgb-beat) / 0.16) 0 3px, transparent 3px 7px);
+}
 .tl-toolbar .beat-snap[aria-pressed="true"] {
   color: var(--c-beat);
   border-color: rgb(var(--rgb-beat) / 0.6);
@@ -2638,6 +2763,24 @@ div.tr-error {
   overflow: hidden;
 }
 .debug-head { cursor: default; }
+.gpu-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  padding: var(--s2) var(--s5);
+  border-bottom: 1px solid var(--c-line);
+  font-size: var(--fz-sm);
+}
+.gpu-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-2);
+}
+.gpu-note { color: var(--c-warn); }
 .log-body {
   flex: 1;
   min-height: 0;

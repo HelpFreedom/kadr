@@ -4,8 +4,8 @@
 // the answer into beat markers, which every drag then snaps to.
 import { create } from 'zustand'
 import { useEditor, projectDuration, withLinked, findClip } from '@/state/store'
-import { pickBeats, type BeatGrid, type BeatAnalysis } from '@shared/audioAnalysis'
-import type { AudioAnalysisResult, Project } from '@shared/types'
+import { pickBeats, type BeatGrid } from '@shared/audioAnalysis'
+import type { AudioAnalysisResult, Project, RhythmSummary } from '@shared/types'
 import { collectRangeAudio, type RangeAudioFilter } from './subtitles'
 import { logInfo } from './log'
 
@@ -83,12 +83,19 @@ export async function detectBeats(opts: DetectBeatsOpts = {}): Promise<DetectBea
   try {
     const analysis = await window.kadr.audioAnalyze({ audioSegments: segments, duration: range.end - range.start })
     const grid = opts.grid ?? 'all'
-    const picked = pickBeats(analysis as BeatAnalysis, grid)
-    const beats = picked.map((b) => ({ time: range.start + b.time, strength: b.intensity, strong: b.strong }))
-    const placed = useEditor.getState().setBeatMarkers(beats, range)
+    const picked = pickBeats(analysis, grid)
+    const beats = picked.map((b) => ({
+      time: range.start + b.time, strength: b.intensity, strong: b.strong, bar: b.bar, beatInBar: b.beatInBar
+    }))
+    const rh = analysis.rhythm
+    const placed = useEditor.getState().setBeatMarkers(beats, range, rh && {
+      sections: rh.sections.map((s) => ({ ...s, start: range.start + s.start, end: range.start + s.end })),
+      pauses: rh.pauses.map((p) => ({ start: range.start + p.start, end: range.start + p.end }))
+    })
     const at = analysis.attack
     logInfo('биты', `${analysis.tempo.toFixed(1)} BPM, ${placed} меток (${grid}) на ${range.start.toFixed(2)}–${range.end.toFixed(2)} с` +
-      (at ? `; сетка выровнена по атаке (${at.band === 'low' ? 'бас' : 'вся полоса'}): ${at.shiftMs > 0 ? '+' : ''}${Math.round(at.shiftMs)} мс, точно на удар ${at.snapped}/${at.total}` : ''))
+      (at ? `; сетка выровнена по атаке (${at.band === 'low' ? 'бас' : 'вся полоса'}): ${at.shiftMs > 0 ? '+' : ''}${Math.round(at.shiftMs)} мс, точно на удар ${at.snapped}/${at.total}` : '') +
+      (rh ? `; ${rhythmLine(rh)}` : ''))
     return { tempo: analysis.tempo, placed, found: analysis.beats.length, range, source, analysis, attackShiftMs: at?.shiftMs }
   } finally {
     useBeatsUi.setState({ busy: false })
@@ -106,4 +113,21 @@ export function beatTimes(project: Project, opts: { strongOnly?: boolean } = {})
     .filter((m) => m.kind === 'beat' && (!opts.strongOnly || m.strong))
     .map((m) => m.time)
     .sort((a, b) => a - b)
+}
+
+/** "4/4 · раз уверенно · бочка −11 мс · 7 разделов · 2 паузы" — the dialog and the log */
+export function rhythmLine(rh: RhythmSummary): string {
+  const conf = (x: number) => (x >= 0.5 ? 'уверенно' : x >= 0.2 ? 'вероятно' : 'неуверенно')
+  const parts = [`${rh.meter}/4`, `«раз» ${conf(rh.phaseConfidence)}`]
+  if (rh.kickOffsetMs) parts.push(`бочка ${rh.kickOffsetMs.median > 0 ? '+' : ''}${rh.kickOffsetMs.median} мс от сетки`)
+  parts.push(`${rh.sections.length} ${plural(rh.sections.length, 'раздел', 'раздела', 'разделов')}`)
+  if (rh.pauses.length) parts.push(`${rh.pauses.length} ${plural(rh.pauses.length, 'пауза', 'паузы', 'пауз')}`)
+  return parts.join(' · ')
+}
+
+const plural = (n: number, one: string, few: string, many: string) => {
+  const m10 = n % 10, m100 = n % 100
+  if (m10 === 1 && m100 !== 11) return one
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few
+  return many
 }

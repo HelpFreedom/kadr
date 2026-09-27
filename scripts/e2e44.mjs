@@ -134,7 +134,9 @@ try {
       soft: soft.length, softHasHigh: soft.some((s) => s.hfRisk === 'high'), high: L.sfx.filter((s) => s.hfRisk === 'high').length,
       ordered, first: all[0].hfRisk,
       typing: E.findSfx(L.sfx, { use: 'typing' }).filter((s) => s.origin === 'bundled').length,
-      reveal: E.findSfx(L.sfx, { use: 'major reveal', limit: 3 }).map((s) => s.id)
+      reveal: E.findSfx(L.sfx, { use: 'major reveal', limit: 3 }).map((s) => s.id),
+      mech: E.findSfx(L.sfx, { use: 'mechanical' }).filter((s) => s.origin === 'bundled')
+        .map((s) => ({ id: s.id, d: s.duration }))
     }
   })()`)
   check('library: 260 bundled effects, 228 labelled by /brag, 5 music beds',
@@ -145,6 +147,9 @@ try {
   check('«без резких» drops exactly the high-risk ones', !lib.softHasHigh && lib.soft === lib.all - lib.high,
     `${lib.soft} = ${lib.all} − ${lib.high}`)
   check('the bundled keyboard set answers to "typing"', lib.typing === 32, String(lib.typing))
+  check('"mechanical": short sounds of a mechanism, none of them a boom or a whoosh',
+    lib.mech.length >= 60 && lib.mech.every((m) => m.d <= 0.7 && !/whoosh|bong|bell|heavy|glitch|error/i.test(m.id)),
+    `${lib.mech.length}, longest ${Math.max(...lib.mech.map((m) => m.d)).toFixed(2)} s`)
   check('"major reveal" finds the soft impacts first', lib.reveal.length === 3 && lib.reveal.every((id) => id.startsWith('impact/')),
     lib.reveal.join(', '))
 
@@ -186,18 +191,28 @@ try {
     E.useSettings.getState().setSnapBeats(true)
     const self = snapPoints(st().project, userId, 0)
     const before = beats.length
+    const all = st().project.markers || []
+    const bars = { withBar: all.filter((m) => m.kind === 'beat' && m.beatInBar >= 1).length,
+      downs: all.filter((m) => m.kind === 'beat' && m.beatInBar === 1).length,
+      sections: all.filter((m) => m.kind === 'section').length }
     const bar = await E.detectBeats({ clipIds: [st().project.tracks.find((t) => t.kind === 'audio').clips[0].id], grid: 'bar' })
     const after = E.beatTimes(st().project)
-    const user = (st().project.markers || []).filter((m) => m.kind !== 'beat')
+    const user = (st().project.markers || []).filter((m) => !m.kind)
     return {
       beatsInOn: beats.every((b) => on.includes(b)), beatsInOff: beats.some((b) => off.includes(b)),
       userInOff: off.includes(12.345), selfExcluded: !self.includes(12.345),
-      before, after: after.length, placed: bar.placed, user: user.map((m) => [m.time, m.label])
+      before, after: after.length, placed: bar.placed, user: user.map((m) => [m.time, m.label]), bars,
+      afterDowns: E.useEditor.getState().project.markers.filter((m) => m.kind === 'beat').every((m) => m.beatInBar === 1),
+      meter: bar.analysis.rhythm && bar.analysis.rhythm.meter
     }
   })()`, { timeout: 120000 })
   check('every beat is a snap target', snap.beatsInOn)
   check('the magnet off takes the beats out — and only them', !snap.beatsInOff && snap.userInOff)
   check('a dragged marker does not snap to its own old place', snap.selfExcluded)
+  check('beats carry their bar (every beat numbered, a quarter of them "ones") and the song its sections',
+    snap.bars.withBar === snap.before && Math.abs(snap.bars.downs - snap.before / 4) <= 2 && snap.bars.sections >= 1,
+    JSON.stringify(snap.bars))
+  check('a "bar" grid keeps exactly the first beats of the bars', snap.afterDowns && snap.meter === 4)
   check('a "bar" grid REPLACES the beats (about a quarter remain)',
     snap.after === snap.placed && Math.abs(snap.after - snap.before / 4) <= 2, `${snap.before} → ${snap.after}`)
   check('the user\'s own marker survives the re-detection', snap.user.length === 1 && snap.user[0][0] === 12.345 && snap.user[0][1] === '1',
@@ -310,6 +325,8 @@ try {
         maxLevel: Math.max(...json.level), beats: json.beats.map((x) => x[0]), bpm: json.bpm,
         timeline: json.timeline },
       tsHasHook: ts.includes('export function useAudio') && ts.includes("import data from './audio.json'"),
+      tsHasAccent: ts.includes('export function useAccent') && ts.includes('export function breathAt'),
+      barsInJson: json.beats.filter((x) => x[4] === 1).length, beatsInJson: json.beats.length, meter: json.meter,
       fresh, stale, refreshed: n, after: E.bakeState(st().project, again), timeline2: json2.timeline,
       beats2: json2.beats.map((x) => x[0])
     }
@@ -329,6 +346,9 @@ try {
     onGrid === frag.json.beats.length && frag.json.beats.length === ref26.length,
     `${onGrid}/${frag.json.beats.length} on the grid, librosa has ${ref26.length}`)
   check('audio.ts is the reader (useAudio, imports audio.json)', frag.tsHasHook)
+  check('…with the bar hierarchy (useAccent, breathAt) and the bars in audio.json',
+    frag.tsHasAccent && frag.meter === 4 && frag.barsInJson >= 1 && frag.barsInJson < frag.beatsInJson,
+    `${frag.barsInJson} ones of ${frag.beatsInJson} beats, meter ${frag.meter}`)
   check('fresh after baking, STALE after moving the clip', frag.fresh === 'fresh' && frag.stale === 'stale')
   check('refreshStaleBakes() re-bakes it for the new place', frag.refreshed === 1 && frag.after === 'fresh' &&
     frag.timeline2.start === 3, JSON.stringify(frag.timeline2))

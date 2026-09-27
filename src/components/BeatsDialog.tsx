@@ -3,7 +3,7 @@
 // markers that clips, the range and markers snap to.
 import { useMemo, useState } from 'react'
 import { useEditor, findClip, withLinked, projectDuration } from '@/state/store'
-import { detectBeats, clearBeats, beatTarget, useBeatsUi, type BeatGrid } from '@/engine/beats'
+import { detectBeats, clearBeats, beatTarget, useBeatsUi, rhythmLine, type BeatGrid } from '@/engine/beats'
 import { audibleTracksInRange, collectRangeAudio } from '@/engine/subtitles'
 import { useT } from '@/i18n'
 import { Icon, Spinner } from './icons'
@@ -69,7 +69,8 @@ export function BeatsDialog() {
       const r = await detectBeats({ ...opts(), grid })
       setResult(r.placed
         ? t('beatsDone').replace('{bpm}', r.tempo.toFixed(1)).replace('{n}', String(r.placed)) +
-          (r.attackShiftMs !== undefined ? ' · ' + t('beatsAligned').replace('{ms}', String(Math.round(Math.abs(r.attackShiftMs)))) : '')
+          (r.attackShiftMs !== undefined ? ' · ' + t('beatsAligned').replace('{ms}', String(Math.round(Math.abs(r.attackShiftMs)))) : '') +
+          (r.analysis.rhythm ? ' · ' + rhythmLine(r.analysis.rhythm) : '')
         : t('beatsNone'))
     } catch (err) {
       setError(String((err as Error)?.message ?? err))

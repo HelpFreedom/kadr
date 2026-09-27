@@ -107,6 +107,15 @@ const melToHz = (m: number) => {
   return m >= minLogMel ? minLogHz * Math.exp(logstep * (m - minLogMel)) : fSp * m
 }
 
+/** centre frequency (Hz) of each of the analyser's mel bands */
+export function melCenters(sr: number, nMels: number): Float64Array {
+  const mMin = hzToMel(0)
+  const mMax = hzToMel(sr / 2)
+  const out = new Float64Array(nMels)
+  for (let m = 0; m < nMels; m++) out[m] = melToHz(mMin + ((mMax - mMin) * (m + 1)) / (nMels + 1))
+  return out
+}
+
 interface MelBand { from: number; w: Float64Array }
 
 /** librosa.filters.mel(sr, n_fft, n_mels, fmin=0, fmax=sr/2, htk=False, norm='slaney'), stored sparse. */
@@ -176,12 +185,19 @@ export interface AudioFrames {
       0): below ATTACK_LOWPASS Hz, and the whole band — for attack timing */
   envLow: Float32Array
   envFull: Float32Array
+  /** the mel spectrogram in dB (frames × nMels, row-major, floored 80 dB
+      below its loudest bin) — bar features and band onsets for the rhythm
+      analysis (shared/rhythm.ts) */
+  mel?: Float32Array
+  nMels?: number
 }
 
 /** attack envelopes: one value per millisecond */
 export const ENV_RATE = 1000
 /** the low band the attacks are looked for in first (kick, 808) */
 export const ATTACK_LOWPASS = 150
+/** a 4th-order Butterworth delays its DC by 2·√2/(2π·fc) — ~3 ms at 150 Hz */
+export const LOW_ENV_DELAY_MS = Math.round((1000 * 2 * Math.SQRT2) / (2 * Math.PI * ATTACK_LOWPASS))
 
 /** one RBJ low-pass biquad (Butterworth Q), state kept across chunks */
 class Lowpass {
@@ -444,7 +460,9 @@ export class AudioAnalyzer {
       mid: pick(2),
       treble: pick(3),
       envLow: Float32Array.from(this.envLow.view()),
-      envFull: Float32Array.from(this.envFull.view())
+      envFull: Float32Array.from(this.envFull.view()),
+      mel: Float32Array.from(S, (v) => Math.max(v, floor)),
+      nMels: M
     }
   }
 }
@@ -759,7 +777,7 @@ function attackOffset(db: Float64Array, beatMs: number, loud: number, span: numb
   return a + Math.round(width / 4) - beatMs
 }
 
-function envelopeBand(band: 'low' | 'full', env: Float32Array, delay: number, width: number) {
+export function envelopeBand(band: 'low' | 'full', env: Float32Array, delay: number, width: number) {
   const db = envDb(env, delay, width)
   const sorted = Float64Array.from(db).sort()
   const loud = sorted[Math.floor(0.95 * (sorted.length - 1))]
@@ -770,7 +788,7 @@ function envelopeBand(band: 'low' | 'full', env: Float32Array, delay: number, wi
   }
 }
 
-const quantile = (sorted: number[], q: number) => {
+export const quantile = (sorted: number[], q: number) => {
   const pos = q * (sorted.length - 1)
   const i = Math.floor(pos)
   const j = Math.min(sorted.length - 1, i + 1)
@@ -783,7 +801,7 @@ const quantile = (sorted: number[], q: number) => {
  * it is meant to follow: a 5 ms RMS of a 50 Hz 808 drops by 15–20 dB at every
  * zero crossing, and those fake dips were taken for attacks.
  */
-function envDb(env: Float32Array, delayMs: number, widthMs: number): Float64Array {
+export function envDb(env: Float32Array, delayMs: number, widthMs: number): Float64Array {
   const n = env.length
   const out = new Float64Array(n)
   const h = widthMs >> 1
@@ -821,7 +839,7 @@ export function alignBeatsToAttacks(a: AudioFrames, times: number[]): { times: n
   const bands: Array<{ band: 'low' | 'full'; offsetOf: (t: number, minRise?: number) => number | null }> = [
     // a 4th-order Butterworth delays its DC by 2·√2/(2π·fc) — ~3 ms at 150 Hz;
     // 20 ms covers a period down to 50 Hz
-    envelopeBand('low', a.envLow, Math.round((1000 * 2 * Math.SQRT2) / (2 * Math.PI * ATTACK_LOWPASS)), 20),
+    envelopeBand('low', a.envLow, LOW_ENV_DELAY_MS, 20),
     envelopeBand('full', a.envFull, 0, 5)
   ]
   for (const { band, offsetOf } of bands) {
@@ -906,9 +924,18 @@ export function analyzeBeats(
 /** Which beats a grid keeps: every one, every 2nd/4th (from the accent phase), or accents only. */
 export type BeatGrid = 'all' | 'half' | 'bar' | 'strong'
 
-export function pickBeats(b: BeatAnalysis, grid: BeatGrid): Beat[] {
+export function pickBeats<T extends Beat & { bar?: number; beatInBar?: number }>(
+  b: { beats: T[]; accentPhase: { 2: number; 4: number } },
+  grid: BeatGrid
+): T[] {
   if (grid === 'all') return b.beats
   if (grid === 'strong') return b.beats.filter((x) => x.strong)
+  // with bars from the rhythm analysis (shared/rhythm.ts): the real "one" of
+  // each bar, and for 'half' the ones and the middles of 4/4 bars
+  if (b.beats.some((x) => x.beatInBar !== undefined)) {
+    if (grid === 'bar') return b.beats.filter((x) => x.beatInBar === 1 && (x.bar ?? 1) > 0)
+    return b.beats.filter((x) => x.beatInBar === 1 || x.beatInBar === 3)
+  }
   const every = grid === 'half' ? 2 : 4
   const phase = b.accentPhase[every]
   return b.beats.filter((_, i) => i % every === phase)

@@ -21,6 +21,8 @@ export function wantsProxy(a: MediaAsset): boolean {
   // codecs Chromium can't decode need a proxy at ANY size — without one the
   // preview <video> renders 0×0 and the clip is invisible
   if (!chromiumCanDecode(a.codec)) return true
+  // an HDR source looks flat and wrong played as it is: its proxy is tone-mapped (electron/hdr.ts)
+  if (a.hdr) return true
   return Math.min(a.width, a.height) >= PROXY_MIN_SIDE
 }
 

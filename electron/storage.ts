@@ -82,8 +82,8 @@ async function keysOf(k: Known): Promise<Set<string>> {
   const add = async (src: string) => {
     let st
     try { st = await fs.stat(src) } catch { return }
-    for (const suffix of [proxySuffix(false), proxySuffix(true),
-                          decodedSuffix(), decodedSuffix({ alpha: true }), decodedSuffix({ packed: true })]) {
+    for (const suffix of [proxySuffix(false), proxySuffix(true), proxySuffix(false, true),
+                          decodedSuffix(), decodedSuffix({ alpha: true }), decodedSuffix({ packed: true }), decodedSuffix({ sdr: true })]) {
       keys.add(mediaCacheKey(src, st.size, st.mtimeMs, suffix))
     }
   }

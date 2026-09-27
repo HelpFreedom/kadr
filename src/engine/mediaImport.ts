@@ -1,3 +1,4 @@
+import { importModels, isModelPath } from './models'
 import { create } from 'zustand'
 import { useEditor, uid } from '@/state/store'
 import { baseOf } from '@shared/paths'
@@ -33,7 +34,10 @@ async function importFilesInner(
   const st = useEditor.getState
   const assetIds: string[] = []
   const textDocs: TextDoc[] = []
-  for (const path of paths) {
+  // 3D models are not timeline media: they go into the project's kadr-lib/models
+  const models = paths.filter(isModelPath)
+  if (models.length) await importModels(models).catch((e) => logWarn('импорт', String((e as Error)?.message ?? e)))
+  for (const path of paths.filter((p) => !isModelPath(p))) {
     const ext = path.split('.').pop()?.toLowerCase()
     if (ext === 'srt' || ext === 'txt') {
       textDocs.push({

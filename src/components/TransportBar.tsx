@@ -6,6 +6,7 @@ import { usePopout, togglePreviewWindow } from '@/engine/popout'
 import { useT, type TKey } from '@/i18n'
 import { Icon, Spinner } from './icons'
 import { logWarn } from '@/engine/log'
+import { useOnion, toggleOnion } from '@/engine/onion'
 
 export function formatTime(t: number, fps: number): string {
   const sign = t < 0 ? '-' : ''
@@ -115,6 +116,7 @@ export function TransportBar() {
       >
         <Icon name={popped ? 'popin' : 'popout'} />
       </button>
+      <OnionControls />
       <span className="time">
         {formatTime(playhead, fps)} <span className="dim">/ {formatTime(duration, fps)}</span>
         <span className="frame-counter dim">
@@ -138,5 +140,56 @@ export function LangSwitch() {
     >
       <Icon name="language" size={14} /> {lang === 'ru' ? 'RU' : 'EN'}
     </button>
+  )
+}
+
+/** the onion skin (engine/onion.ts): on/off, how strong, and «difference» */
+function OnionControls() {
+  const t = useT()
+  const on = useOnion((s) => s.on)
+  const opacity = useOnion((s) => s.opacity)
+  const diff = useOnion((s) => s.diff)
+  const clipId = useOnion((s) => s.clipId)
+  const [none, setNone] = useState(false)
+  const name = useEditor((s) => {
+    const id = clipId
+    const c = on && id ? s.project.tracks.flatMap((tr) => tr.clips).find((x) => x.id === id) : null
+    return c ? c.label ?? s.project.assets.find((a) => a.id === c.assetId)?.name ?? '' : ''
+  })
+  const title = none ? t('onionNone') : on ? `${t('onionOff')} — ${name}` : t('onion')
+  return (
+    <span className="onion-ctl">
+      <button
+        className={`icon-only${on ? ' active' : ''}`}
+        data-act="onion"
+        title={title}
+        aria-label={t('onion')}
+        aria-pressed={on}
+        onClick={() => {
+          const ok = toggleOnion()
+          setNone(!on && !ok)
+          if (!on && !ok) setTimeout(() => setNone(false), 3000)
+        }}
+      >
+        <Icon name="onion" />
+      </button>
+      {on && (
+        <>
+          <input type="range" min={0.05} max={1} step={0.05} value={opacity} data-act="onion-opacity"
+            title={t('onionOpacity')} aria-label={t('onionOpacity')}
+            onChange={(e) => useOnion.setState({ opacity: Number(e.target.value) })} />
+          <button
+            className={`icon-only${diff ? ' active' : ''}`}
+            data-act="onion-diff"
+            title={t('onionDiff')}
+            aria-label={t('onionDiff')}
+            aria-pressed={diff}
+            onClick={() => useOnion.setState({ diff: !diff })}
+          >
+            <Icon name="transition" />
+          </button>
+        </>
+      )}
+    </span>
   )
 }

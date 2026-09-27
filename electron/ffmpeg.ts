@@ -50,6 +50,13 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
   }
   if (kind === 'video' && video?.codec_name) asset.codec = video.codec_name
   if (kind === 'video') {
+    const b = videoBasics(video)
+    if (b.rotation) asset.rotation = b.rotation
+    if (b.rotation === 90 || b.rotation === 270) [asset.width, asset.height] = [asset.height, asset.width]
+    if (b.hdr) asset.hdr = b.hdr
+    asset.probeV = 2
+  }
+  if (kind === 'video') {
     // alpha travels two ways: an alpha pixel format (yuva…, rgba, prores
     // 4444) or WebM's container-level alpha_mode tag (vp8/vp9 alpha planes —
     // their pix_fmt still reads plain yuv420p)
@@ -75,6 +82,39 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
     } catch { /* waveform is optional */ }
   }
   return { asset }
+}
+
+/**
+ * Rotation and HDR of a video stream. Rotation: the container tag (degrees
+ * clockwise) or the display matrix (ffprobe's `rotation` is counter-clockwise);
+ * a phone's portrait clip is stored landscape with 90 on it. The asset reports
+ * the size as SHOWN — the preview element and every intermediate ffmpeg makes
+ * are upright.
+ */
+function videoBasics(video: any): { rotation?: number; hdr?: 'hlg' | 'pq' } {
+  const tag = Number(video?.tags?.rotate)
+  const sd = (video?.side_data_list ?? []).find((d: any) => d.rotation !== undefined)
+  const rot = Number.isFinite(tag) ? tag : sd ? -Number(sd.rotation) : 0
+  const r = (((Math.round(rot / 90) * 90) % 360) + 360) % 360
+  const trc = String(video?.color_transfer ?? '')
+  return {
+    ...(r ? { rotation: r } : {}),
+    ...(trc === 'arib-std-b67' ? { hdr: 'hlg' as const } : trc === 'smpte2084' ? { hdr: 'pq' as const } : {})
+  }
+}
+
+/** codec, alpha, rotation, HDR — ffprobe only (the exporter asks this of old assets) */
+export async function probeBasic(path: string): Promise<{ codec?: string; hasAlpha?: boolean; rotation?: number; hdr?: 'hlg' | 'pq' }> {
+  const { stdout } = await execFileP(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_streams', path], { maxBuffer: 16 * 1024 * 1024 })
+  const video = (JSON.parse(stdout).streams ?? []).find((s: any) => s.codec_type === 'video' && !s.disposition?.attached_pic)
+  if (!video) return {}
+  const pf = String(video.pix_fmt ?? '')
+  const tagAlpha = String(video.tags?.alpha_mode ?? video.tags?.ALPHA_MODE ?? '') === '1'
+  return {
+    codec: video.codec_name,
+    ...(tagAlpha || /^(yuva|rgba|argb|abgr|bgra|gbrap|ya8|ya16)/.test(pf) ? { hasAlpha: true } : {}),
+    ...videoBasics(video)
+  }
 }
 
 async function makeThumbnail(path: string, at: number): Promise<string> {
@@ -146,8 +186,10 @@ export function makeProxy(
   out: string,
   duration: number,
   onProgress?: (p: number) => void,
-  opts?: { alpha?: boolean; codec?: string }
+  opts?: { alpha?: boolean; codec?: string; vfPre?: string }
 ): Promise<void> {
+  // vfPre: a conversion before the scale (an HDR source's tone mapping — electron/hdr.ts)
+  const pre = opts?.vfPre ? `${opts.vfPre},` : ''
   const args = opts?.alpha ? [
     '-y', '-v', 'error', '-progress', 'pipe:1',
     ...alphaInputArgs(opts.codec),
@@ -160,7 +202,7 @@ export function makeProxy(
   ] : [
     '-y', '-v', 'error', '-progress', 'pipe:1',
     '-i', src,
-    '-vf', "scale=-2:'min(540,ih)'",
+    '-vf', `${pre}scale=-2:'min(540,ih)'`,
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '96k',
     '-movflags', '+faststart',
@@ -304,7 +346,7 @@ export async function makeDecoded(
   out: string,
   duration: number,
   onProgress?: (p: number) => void,
-  opts?: { alpha?: boolean; codec?: string; packed?: boolean; matrix?: string }
+  opts?: { alpha?: boolean; codec?: string; packed?: boolean; matrix?: string; vfPre?: string }
 ): Promise<void> {
   const args = opts?.packed ? [
     // ALPHA FAST PATH. Chromium's WebCodecs cannot decode alpha at all
@@ -360,6 +402,8 @@ export async function makeDecoded(
     '-y', '-v', 'error', '-progress', 'pipe:1',
     '-i', src,
     '-map', '0:v:0', '-an',
+    // an HDR source is tone-mapped to SDR BT.709 on the way (electron/hdr.ts)
+    ...(opts?.vfPre ? ['-vf', opts.vfPre] : []),
     '-c:v', 'libx264', '-preset', 'fast', '-crf', '14', '-pix_fmt', 'yuv420p',
     '-movflags', '+faststart',
     out

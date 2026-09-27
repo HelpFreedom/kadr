@@ -8,6 +8,8 @@ import { useEditor } from '@/state/store'
 import { evalAnim } from './anim'
 import { fadeFactor, overlapFades } from './player'
 import { ensureFragmentServer } from './fragments'
+import { logError, logWarn } from './log'
+import { useFragmentParams } from './fragmentParams'
 
 export interface CaptureFrame {
   data: Uint8Array
@@ -38,7 +40,25 @@ let reconcileNow: (() => void) | null = null
 export function setForceCaptureAll(on: boolean) {
   if (forceAll === on) return
   forceAll = on
+  // a snapshot takes the fragments at the project's full width; live preview
+  // goes back to ≤1280 afterwards (already running windows are resized)
+  const p = useEditor.getState().project
+  for (const [id, { clipId }] of active) {
+    const clip = p.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId)
+    const [w, h] = captureSize(clip, p)
+    void window.kadr.fragmentCaptureResize?.(id, w, h)
+  }
   reconcileNow?.()
+}
+
+const CAPTURE_MAX_W = 1280
+
+/** Capture window size for a clip: ≤1280 wide live, full width for snapshots. */
+function captureSize(clip: Clip | undefined, p: Project): [number, number] {
+  const mw = clip?.fragmentMeta?.width ?? p.width
+  const mh = clip?.fragmentMeta?.height ?? p.height
+  const cw = forceAll ? mw : Math.min(CAPTURE_MAX_W, mw)
+  return [cw, Math.round(cw * (mh / mw))]
 }
 
 /** Every fragment wanted at time t is captured and has frames on hand. */
@@ -58,15 +78,23 @@ export function captureTargets(
   const out: { fragmentId: string; expectedFrame: number }[] = []
   for (const [id, { clip }] of wanted(project, t)) {
     const rel = t - clip.start
-    const fps = clip.fragmentMeta?.fps ?? 60
-    out.push({
-      fragmentId: id,
-      expectedFrame: Math.max(0, Math.round(
-        (Math.max(0, Math.min(clip.duration, rel)) * (clip.speed || 1) + clip.inPoint) * fps
-      ))
-    })
+    // only what is on screen at t matters to the picture; a capture kept
+    // warm for a clip that has just ended sits on its LAST frame, and the
+    // old formula expected one past it — a frame no player can show, so the
+    // snapshot waited out its whole deadline (measured: 24 s at a cut)
+    if (rel < 0 || rel >= clip.duration) continue
+    out.push({ fragmentId: id, expectedFrame: fragmentFrameAt(clip, rel) })
   }
   return out
+}
+
+/** The composition frame a fragment clip shows `rel` seconds into it —
+    within the composition (a clip may run longer than its source). */
+export function fragmentFrameAt(clip: Clip, rel: number): number {
+  const fps = clip.fragmentMeta?.fps ?? 60
+  const f = Math.round((Math.max(0, Math.min(clip.duration, rel)) * (clip.speed || 1) + clip.inPoint) * fps)
+  const last = (clip.fragmentMeta?.durationInFrames ?? Infinity) - 1
+  return Math.max(0, Math.min(last, f))
 }
 
 /** Monotonic paint counter of a captured fragment (0 = nothing yet). */
@@ -149,9 +177,10 @@ export function captureRequested(fragmentId: string): boolean {
   return active.has(fragmentId)
 }
 
-const CAPTURE_MAX_W = 1280
-
 export function wireFragmentCapture() {
+  window.kadr.onFragmentCaptureLog?.(({ id, level, msg }) => {
+    ;(level === 'error' ? logError : logWarn)('захват фрагмента', `${id}: ${msg}`)
+  })
   window.kadr.onFragmentFrame(({ id, w, h, data }) => {
     if (!active.has(id)) return
     frames.set(id, {
@@ -166,7 +195,6 @@ export function wireFragmentCapture() {
     const s = useEditor.getState()
     const rel = s.playhead - clip.start
     const inside = rel >= 0 && rel < clip.duration
-    const fps = clip.fragmentMeta?.fps ?? 60
     const vol = clip.muted || track.muted || !inside
       ? 0
       : Math.min(1, evalAnim(clip.gain, Math.max(0, rel)) * track.gain *
@@ -174,15 +202,30 @@ export function wireFragmentCapture() {
     window.kadr.fragmentCaptureSync(fragmentId, {
       kadr: true,
       type: 'sync',
-      frame: Math.max(0, Math.round(
-        (Math.max(0, Math.min(clip.duration, rel)) * (clip.speed || 1) + clip.inPoint) * fps
-      )),
+      frame: fragmentFrameAt(clip, rel),
       playing: s.playing && inside,
       volume: vol
     })
+    // a capture window has no parent to say 'ready' to, so the parameters
+    // ride along with every sync (the page ignores a repeat)
+    postParams(fragmentId)
   }
+  const postParams = (fragmentId: string) => {
+    window.kadr.fragmentCaptureSync(fragmentId, {
+      kadr: true, type: 'params', values: useFragmentParams.getState().live[fragmentId] ?? {}
+    })
+  }
+  useFragmentParams.subscribe((st, prev) => {
+    for (const id of active.keys()) if (st.live[id] !== prev.live[id]) postParams(id)
+  })
 
-  const reconcile = async () => {
+  // One pass at a time. Passes used to overlap (a store change and the
+  // 400 ms ticker both start one), and a pass that had already marked a
+  // fragment as active could still be awaiting the dev server when the next
+  // one decided it was no longer wanted: that one "stopped" a window main had
+  // not created yet, and the first then created it anyway — a capture window
+  // nobody tracked, rendering until the app quit.
+  const reconcileOnce = async () => {
     const s = useEditor.getState()
     const want = wanted(s.project, s.playhead)
     for (const id of [...active.keys()]) {
@@ -192,23 +235,45 @@ export function wireFragmentCapture() {
         void window.kadr.fragmentCaptureStop(id)
       }
     }
-    for (const [id, { clip, track }] of want) {
-      if (!active.has(id)) {
-        active.set(id, { clipId: clip.id })
-        try {
-          const url = await ensureFragmentServer()
-          const meta = clip.fragmentMeta
-          const cw = Math.min(CAPTURE_MAX_W, meta?.width ?? s.project.width)
-          const ch = Math.round(cw * ((meta?.height ?? s.project.height) / (meta?.width ?? s.project.width)))
-          await window.kadr.fragmentCaptureStart(
-            id, `${url}/?comp=${encodeURIComponent(id)}`, cw, ch, meta?.fps ?? 60
-          )
-        } catch {
-          active.delete(id)
-        }
+    // windows already running first: a cold start below can take seconds
+    for (const [id, { clip, track }] of want) if (active.has(id)) syncOne(id, clip, track)
+    for (const [id, { clip }] of want) {
+      if (active.has(id)) continue
+      active.set(id, { clipId: clip.id })
+      try {
+        const url = await ensureFragmentServer()
+        const [cw, ch] = captureSize(clip, s.project)
+        await window.kadr.fragmentCaptureStart(
+          id, `${url}/?comp=${encodeURIComponent(id)}`, cw, ch, clip.fragmentMeta?.fps ?? 60
+        )
+      } catch {
+        active.delete(id)
+        continue
       }
-      syncOne(id, clip, track)
+      // the world may have moved on while the window was starting
+      const now = useEditor.getState()
+      const still = wanted(now.project, now.playhead).get(id)
+      if (!still) {
+        active.delete(id)
+        frames.delete(id)
+        void window.kadr.fragmentCaptureStop(id)
+        continue
+      }
+      syncOne(id, still.clip, still.track)
     }
+  }
+  let running: Promise<void> | null = null
+  let again = false
+  const reconcile = (): Promise<void> => {
+    if (running) { again = true; return running }
+    running = (async () => {
+      try {
+        do { again = false; await reconcileOnce() } while (again)
+      } finally {
+        running = null
+      }
+    })()
+    return running
   }
 
   let scheduled = false

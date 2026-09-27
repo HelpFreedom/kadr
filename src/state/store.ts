@@ -1,8 +1,9 @@
 import { create } from 'zustand'
 import type {
   Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec,
-  VoiceRun, AudioDefect, DefectState
+  VoiceRun, AudioDefect, DefectState, TimelineMarker, MusicSectionLabel
 } from '@shared/types'
+import { isMusicMarker } from '@shared/types'
 
 export const uid = () => Math.random().toString(36).slice(2, 10)
 
@@ -102,10 +103,16 @@ export function sanitizeProject(p: Project): Project {
     (m) => m && typeof m.id === 'string' && Number.isFinite(m.time)
   )
   for (const m of p.markers) {
-    // a beat is the one marker that legitimately has no label
-    if (m.kind !== undefined && m.kind !== 'beat') delete m.kind
-    if (typeof m.label !== 'string' || (!m.label && m.kind !== 'beat')) m.label = m.kind === 'beat' ? '' : '•'
+    // the analysis' markers are the ones that legitimately have no label
+    if (m.kind !== undefined && !isMusicMarker(m)) delete m.kind
+    if (typeof m.label !== 'string' || (!m.label && !isMusicMarker(m))) m.label = isMusicMarker(m) ? '' : '•'
     if (m.time < 0) m.time = 0
+    if (m.kind === 'section' || m.kind === 'pause') {
+      if (!Number.isFinite(m.end) || m.end! < m.time) m.end = m.time
+    } else delete m.end
+    for (const k of ['bar', 'beatInBar', 'energy'] as const) {
+      if (m[k] !== undefined && !Number.isFinite(m[k])) delete m[k]
+    }
     if (m.strength !== undefined) {
       if (!Number.isFinite(m.strength)) delete m.strength
       else m.strength = Math.min(1, Math.max(0, m.strength))
@@ -268,8 +275,10 @@ export function snapPoints(
   }
   for (const m of p.markers ?? []) {
     if (ex.includes(m.id)) continue
-    if (m.kind === 'beat' && !beats) continue
+    if (isMusicMarker(m) && !beats) continue
     pts.push(m.time)
+    // a pause is snapped to at both ends (a cut lands where the music returns)
+    if (m.kind === 'pause' && m.end !== undefined) pts.push(m.end)
   }
   return pts
 }
@@ -542,13 +551,18 @@ interface EditorState {
   moveMarker(id: string, time: number): void
   removeMarker(id: string): void
   /**
-   * Replace the beat markers inside [range.start, range.end] with `beats`
-   * (project seconds) — one undo entry. The user's own markers are never
-   * touched. Returns how many were placed.
+   * Replace the music markers (beats, sections, pauses) inside
+   * [range.start, range.end] with `beats` and `extra` (project seconds) — one
+   * undo entry. The user's own markers are never touched. Returns how many
+   * beats were placed.
    */
-  setBeatMarkers(beats: { time: number; strength: number; strong: boolean }[],
-    range: { start: number; end: number }): number
-  /** Remove beat markers (inside `range`, or all of them) — one undo entry; returns the count. */
+  setBeatMarkers(beats: { time: number; strength: number; strong: boolean; bar?: number; beatInBar?: number }[],
+    range: { start: number; end: number },
+    extra?: {
+      sections?: { start: number; end: number; label: MusicSectionLabel; energy: number; startBar?: number }[]
+      pauses?: { start: number; end: number }[]
+    }): number
+  /** Remove the music markers (inside `range`, or all of them) — one undo entry; returns the count. */
   clearBeatMarkers(range?: { start: number; end: number }): number
   /**
    * Put an audio asset on the timeline at `at` WITHOUT touching anything that
@@ -995,11 +1009,18 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((s) => {
       const p = cloneProject(s.project)
       const end = start + duration
-      // topmost unlocked video track with the slot free, else a fresh one
-      let track = p.tracks.find((t) =>
-        t.kind === 'video' && !t.locked &&
-        !t.clips.some((c) => c.start < end && c.start + c.duration > start)
-      )
+      // The topmost unlocked video track with the slot free — but never one
+      // UNDER a track that already shows something in that span: a caption put
+      // on a free track below the footage is covered by it (and goes through
+      // pixel capture for nothing). Nothing free above the first busy track →
+      // a fresh track on top.
+      let track: Track | undefined
+      for (const t of p.tracks) {
+        if (t.kind !== 'video') continue
+        const busy = t.clips.some((c) => c.start < end && c.start + c.duration > start)
+        if (busy) break
+        if (!t.locked) { track = t; break }
+      }
       if (!track) {
         track = makeTrack(p, 'video')
         p.tracks.unshift(track)
@@ -1070,22 +1091,37 @@ export const useEditor = create<EditorState>((set, get) => ({
     })
   },
 
-  setBeatMarkers: (beats, range) => {
+  setBeatMarkers: (beats, range, extra) => {
     const ok = beats.filter((b) => Number.isFinite(b?.time) && b.time >= 0)
     get().pushHistory('hBeats')
     const lo = Math.min(range.start, range.end) - 1e-6
     const hi = Math.max(range.start, range.end) + 1e-6
+    const num = (x: unknown) => (Number.isFinite(x) ? Number(x) : undefined)
     set((s) => {
       const p = cloneProject(s.project)
-      const kept = (p.markers ?? []).filter((m) => m.kind !== 'beat' || m.time < lo || m.time > hi)
-      const added = ok.map((b) => ({
+      const kept = (p.markers ?? []).filter((m) => !isMusicMarker(m) || m.time < lo || m.time > hi)
+      const added: TimelineMarker[] = ok.map((b) => ({
         id: uid(),
         time: b.time,
         label: '',
         kind: 'beat' as const,
         strength: Math.min(1, Math.max(0, Number(b.strength) || 0)),
-        strong: !!b.strong
+        strong: !!b.strong,
+        ...(num(b.bar) !== undefined ? { bar: num(b.bar) } : {}),
+        ...(num(b.beatInBar) !== undefined ? { beatInBar: num(b.beatInBar) } : {})
       }))
+      for (const sec of extra?.sections ?? []) {
+        if (!(sec.end > sec.start)) continue
+        added.push({
+          id: uid(), time: Math.max(0, sec.start), end: sec.end, label: '', kind: 'section',
+          section: sec.label, energy: Math.min(1, Math.max(0, Number(sec.energy) || 0)),
+          ...(num(sec.startBar) !== undefined ? { bar: num(sec.startBar) } : {})
+        })
+      }
+      for (const pz of extra?.pauses ?? []) {
+        if (!(pz.end > pz.start)) continue
+        added.push({ id: uid(), time: Math.max(0, pz.start), end: pz.end, label: '', kind: 'pause' })
+      }
       p.markers = [...kept, ...added].sort((a, b) => a.time - b.time)
       return { project: p }
     })
@@ -1095,12 +1131,12 @@ export const useEditor = create<EditorState>((set, get) => ({
   clearBeatMarkers: (range) => {
     const inRange = (t: number) => !range ||
       (t >= Math.min(range.start, range.end) - 1e-6 && t <= Math.max(range.start, range.end) + 1e-6)
-    const doomed = (get().project.markers ?? []).filter((m) => m.kind === 'beat' && inRange(m.time)).length
+    const doomed = (get().project.markers ?? []).filter((m) => isMusicMarker(m) && inRange(m.time)).length
     if (!doomed) return 0
     get().pushHistory('hBeatsClear')
     set((s) => {
       const p = cloneProject(s.project)
-      p.markers = (p.markers ?? []).filter((m) => m.kind !== 'beat' || !inRange(m.time))
+      p.markers = (p.markers ?? []).filter((m) => !isMusicMarker(m) || !inRange(m.time))
       return { project: p }
     })
     return doomed

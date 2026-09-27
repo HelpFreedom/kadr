@@ -235,7 +235,10 @@ check('snap off: small drag is not snapped back to 0', Math.abs(noSnap) > 5, 'x=
 await evalJs(`(() => { window.kadrEditor.useEditor.getState().setAnimClip(null); return 1 })()`)
 await new Promise((r) => setTimeout(r, 300))
 const band = await rect('.lane.video .clip .level-hit')
-await drag(band.cx, band.cy + 4, band.cx, band.cy + 18)
+// the band is 9 px tall: aim at its middle — cy + 4 is its last row, and
+// after rounding to whole pixels it landed one row BELOW the band whenever the
+// layout put the band on a half pixel (the press then went to the clip)
+await drag(band.cx, band.cy, band.cx, band.cy + 14)
 const opacity = await evalJs(`(() => {
   const c = window.kadrEditor.useEditor.getState().project.tracks.find(t => t.name === 'V1').clips[0]
   return +c.transform.opacity.value.toFixed(2)
@@ -244,7 +247,7 @@ check('video level band lowers opacity', opacity < 0.9 && opacity > 0, 'opacity=
 
 // 9. audio clip band + track gain slider
 const aband = await rect('.lane.audio .clip .level-hit')
-await drag(aband.cx, aband.cy + 4, aband.cx, aband.cy + 12)
+await drag(aband.cx, aband.cy, aband.cx, aband.cy + 8)
 const gain = await evalJs(`(() => {
   const p = window.kadrEditor.useEditor.getState().project
   return +p.tracks.find(t => t.kind === 'audio').clips[0].gain.value.toFixed(2)

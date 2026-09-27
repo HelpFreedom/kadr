@@ -7,6 +7,7 @@ import { useEditor, projectDuration } from '@/state/store'
 import { AudioMeter } from './AudioMeter'
 import { FragmentOverlays } from './FragmentOverlays'
 import { FragmentGizmo } from './FragmentGizmo'
+import { OnionSkin } from './OnionSkin'
 
 export function Preview() {
   const t = useT()
@@ -54,6 +55,7 @@ export function Preview() {
       <div className="preview-canvas-wrap">
         <canvas ref={canvasRef} width={width} height={height} />
         <FragmentOverlays canvas={canvasRef} />
+        <OnionSkin canvas={canvasRef} />
         <FragmentGizmo canvas={canvasRef} />
         {loading && !gpuLost && (
           <div className="preview-loading">

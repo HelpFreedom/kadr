@@ -18,6 +18,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const src = readFileSync(join(root, 'shared', 'audioAnalysis.ts'), 'utf8')
 const js = transformSync(src, { loader: 'ts', format: 'esm' }).code
 const A = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'))
+// shared/rhythm.ts imports './audioAnalysis': hand it the module loaded above
+const A_URL = 'data:text/javascript;base64,' + Buffer.from(js).toString('base64')
+const rsrc = readFileSync(join(root, 'shared', 'rhythm.ts'), 'utf8').replace("from './audioAnalysis'", `from '${A_URL}'`)
+const R = await import('data:text/javascript;base64,' + Buffer.from(transformSync(rsrc, { loader: 'ts', format: 'esm' }).code).toString('base64'))
 
 let fails = 0
 const check = (name, ok, detail = '') => {
@@ -186,6 +190,105 @@ check('roundHalfEven', [[10.5, 10], [11.5, 12], [-2.5, -2], [2.4, 2], [2.6, 3]].
   check('silence moves nothing', !A.alignBeatsToAttacks(silent, s0).attack)
   const off = A.analyzeBeats(a, { alignAttacks: false })
   check('analyzeBeats can be asked for the raw librosa grid', !off.attack)
+}
+
+// ---- 4c. bars, the "one", sections and pauses (shared/rhythm.ts) -------------
+// A synthetic song with KNOWN bars: a kick on 1 (strong) and 3 (weaker), a
+// snare on 2 and 4 (the backbeat), a bass note on 1 — the way most 4/4 pop and
+// rock sits — starting with a one-beat pickup (so the first beat is NOT a
+// "one"), 8 quiet bars then 24 loud ones (a section boundary by dynamics), and
+// the whole band stopping for half a bar before bar 17 (a pause).
+{
+  const sr = 44100
+  const bpm = 120
+  const beat = 60 / bpm
+  const bars = 32
+  const lead = 1.0 // silence before the pickup
+  const dur = lead + (bars * 4 + 1) * beat + 1
+  const pcm = new Float32Array(Math.round(sr * dur))
+  let seed = 7
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1
+  const add = (t0, len, amp, fn) => {
+    const s0 = Math.round(t0 * sr)
+    for (let i = 0; i < len * sr && s0 + i < pcm.length; i++) pcm[s0 + i] += amp * fn(i / sr)
+  }
+  const kick = (t, a) => add(t, 0.25, a, (x) => Math.exp(-x / 0.06) * Math.sin(2 * Math.PI * (55 + 60 * Math.exp(-x / 0.02)) * x))
+  const snare = (t, a) => add(t, 0.15, a, (x) => Math.exp(-x / 0.03) * (0.8 * rnd() + 0.2 * Math.sin(2 * Math.PI * 200 * x)))
+  const hat = (t, a) => add(t, 0.04, a, (x) => Math.exp(-x / 0.008) * rnd())
+  const bassNote = (t, a) => add(t, beat * 1.8, a, (x) => Math.min(1, x / 0.01) * Math.exp(-x / 0.8) * Math.sin(2 * Math.PI * 82.4 * x))
+  const pauseAt = lead + beat + 16 * 4 * beat - 2 * beat // the last half of bar 16
+  const truth = []
+  // the pickup: one snare beat before bar 1
+  snare(lead, 0.3)
+  for (let b = 0; b < bars; b++) {
+    const g = b < 8 ? 0.25 : 1 // 8 quiet bars, then loud (−12 dB step)
+    for (let k = 0; k < 4; k++) {
+      const t = lead + beat + (b * 4 + k) * beat
+      if (t >= pauseAt && t < pauseAt + 2 * beat) continue
+      if (k === 0) { truth.push(t); kick(t, 0.9 * g); bassNote(t, 0.35 * g) }
+      if (k === 2) kick(t, 0.55 * g)
+      if (k === 1 || k === 3) snare(t, 0.5 * g)
+      hat(t, 0.12 * g); hat(t + beat / 2, 0.08 * g)
+    }
+  }
+  const a = analyse(pcm, sr, 65536)
+  const bt = A.analyzeBeats(a)
+  const rh = R.analyzeRhythm(a, bt)
+  const downs = bt.beats.map((b, i) => ({ t: b.time, r: rh.beats[i] })).filter((x) => x.r.beatInBar === 1 && x.r.bar > 0)
+  const firstDown = downs[0]?.t ?? -1
+  check('rhythm: 4/4', rh.meter === 4, `meter ${rh.meter}, confidence ${rh.meterConfidence}`)
+  check('rhythm: the "one" is the kick on beat 1, not the pickup and not beat 3',
+    Math.abs(firstDown - truth[0]) < 0.03, `first downbeat ${firstDown.toFixed(3)} s, truth ${truth[0].toFixed(3)} s, phase confidence ${rh.phaseConfidence}`)
+  const matched = truth.filter((t) => downs.some((d) => Math.abs(d.t - t) < 0.03)).length
+  check('rhythm: every bar found on its "one"', matched >= truth.length - 1, `${matched}/${truth.length}`)
+  const bar9 = truth[8]
+  check('rhythm: the dynamics step starts a section (bar 9)',
+    rh.sections.some((x) => Math.abs(x.start - bar9) < beat * 1.5), rh.sections.map((x) => `${x.start.toFixed(2)} ${x.label}`).join(', '))
+  const p = rh.pauses.find((x) => x.start < pauseAt + 0.3 && x.end > pauseAt + 0.3)
+  check('rhythm: the band stopping for half a bar is a pause', !!p && Math.abs(p.start - pauseAt) < 0.35,
+    JSON.stringify(rh.pauses) + ` truth ${pauseAt.toFixed(2)}–${(pauseAt + 2 * beat).toFixed(2)}`)
+  check('rhythm: no other pauses in a steady song', rh.pauses.length === 1, `${rh.pauses.length}`)
+  check('rhythm: kicks on the grid → kick offset ≈ 0', !!rh.kickOffsetMs && Math.abs(rh.kickOffsetMs.median) <= 15,
+    JSON.stringify(rh.kickOffsetMs))
+  // pickBeats follows the bars once they exist
+  const withBars = { beats: bt.beats.map((b, i) => ({ ...b, ...rh.beats[i] })), accentPhase: bt.accentPhase }
+  const barGrid = A.pickBeats(withBars, 'bar')
+  check('grid "bar" = the first beat of each bar', barGrid.length === downs.length && barGrid.every((b) => b.beatInBar === 1),
+    `${barGrid.length} vs ${downs.length}`)
+}
+
+// The same idea in 3/4: kick on 1 only, snare on 2 and 3.
+{
+  const sr = 44100
+  const beat = 0.5
+  const bars = 24
+  const pcm = new Float32Array(Math.round(sr * (bars * 3 * beat + 2)))
+  let seed = 11
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1
+  const add = (t0, len, amp, fn) => {
+    const s0 = Math.round(t0 * sr)
+    for (let i = 0; i < len * sr && s0 + i < pcm.length; i++) pcm[s0 + i] += amp * fn(i / sr)
+  }
+  const truth = []
+  for (let b = 0; b < bars; b++) {
+    for (let k = 0; k < 3; k++) {
+      const t = 0.5 + (b * 3 + k) * beat
+      if (k === 0) {
+        truth.push(t)
+        add(t, 0.25, 0.9, (x) => Math.exp(-x / 0.06) * Math.sin(2 * Math.PI * (55 + 60 * Math.exp(-x / 0.02)) * x))
+        add(t, beat * 2.5, 0.3, (x) => Math.min(1, x / 0.01) * Math.exp(-x / 0.9) * Math.sin(2 * Math.PI * 73.4 * x))
+      } else {
+        add(t, 0.12, 0.45, (x) => Math.exp(-x / 0.03) * rnd())
+      }
+    }
+  }
+  const a = analyse(pcm, sr, 65536)
+  const bt = A.analyzeBeats(a)
+  const rh = R.analyzeRhythm(a, bt)
+  const downs = bt.beats.filter((_, i) => rh.beats[i].beatInBar === 1 && rh.beats[i].bar > 0).map((b) => b.time)
+  const matched = truth.filter((t) => downs.some((d) => Math.abs(d - t) < 0.03)).length
+  check('rhythm: 3/4 is told from 4/4', rh.meter === 3, `meter ${rh.meter}, confidence ${rh.meterConfidence}, tempo ${bt.tempo.toFixed(1)}`)
+  check('rhythm: 3/4 bars on their "one"', matched >= truth.length - 2, `${matched}/${truth.length}`)
 }
 
 // ---- 5. against librosa (optional) ------------------------------------------

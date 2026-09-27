@@ -1,4 +1,5 @@
 import { createHash } from 'crypto'
+import { HDR_VERSION } from '@shared/hdr'
 
 /**
  * The identity of a cached artefact derived from a media file.
@@ -26,12 +27,16 @@ export function mediaCacheKey(
     .slice(0, 20)
 }
 
-/** proxies: an alpha proxy is a different artefact (webm), so a different key */
-export const proxySuffix = (alpha?: boolean) => (alpha ? ':a' : '')
+/** proxies: an alpha proxy is a different artefact (webm), so a different key;
+    an HDR source's proxy is tone-mapped to SDR (shared/hdr.ts) — ':sdr' plus
+    the conversion's generation, so neither a proxy built before that existed
+    nor one made with an older curve is taken for the current one */
+const SDR = `:sdr${HDR_VERSION > 1 ? HDR_VERSION : ''}`
+export const proxySuffix = (alpha?: boolean, sdr?: boolean) => (alpha ? ':a' : sdr ? SDR : '')
 
-/** decoded: packed colour+matte, plain alpha, or neither */
-export const decodedSuffix = (opts?: { alpha?: boolean; packed?: boolean }) =>
-  opts?.packed ? ':p' : opts?.alpha ? ':a' : ''
+/** decoded: packed colour+matte, plain alpha, an HDR source tone-mapped, or none of these */
+export const decodedSuffix = (opts?: { alpha?: boolean; packed?: boolean; sdr?: boolean }) =>
+  opts?.packed ? ':p' : opts?.alpha ? ':a' : opts?.sdr ? SDR : ''
 
 /** reversed: the same source cut differently is a different render */
 export const reverseSuffix = (start: number, duration: number) =>

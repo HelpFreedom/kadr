@@ -128,7 +128,7 @@ try {
     st().setPlayhead(1.5)
     for (let i = 0; i < 30; i++) {
       const f = document.querySelector('.frag-frame')
-      if (f && getComputedStyle(f).visibility === 'visible') return { ok: true, src: f.src }
+      if (f && Number(getComputedStyle(f).opacity) > 0.5) return { ok: true, src: f.src }
       await new Promise(r => setTimeout(r, 1000))
     }
     return { ok: false }
@@ -142,7 +142,7 @@ try {
   const afterEdit = await evalJs(`(async () => {
     await new Promise(r => setTimeout(r, 2500))
     const f = document.querySelector('.frag-frame')
-    return !!f && getComputedStyle(f).visibility === 'visible'
+    return !!f && Number(getComputedStyle(f).opacity) > 0.5
   })()`)
   check('hot edit keeps the overlay alive', afterEdit === true)
 

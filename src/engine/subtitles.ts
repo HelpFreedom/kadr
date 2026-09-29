@@ -5,6 +5,7 @@ import type {
 } from '@shared/types'
 import { useEditor, uid } from '@/state/store'
 import { dirOf, baseOf } from '@shared/paths'
+import { audioFollowsSpeed } from '@shared/audioSpeed'
 import { overlapFades } from './player'
 import { evalAnim } from './anim'
 
@@ -195,6 +196,7 @@ export function collectRangeAudio(
       const asset = project.assets.find((a) => a.id === clip.assetId)
       if (!asset?.hasAudio) continue
       const speed = clip.speed || 1
+      if (!audioFollowsSpeed(speed)) continue // silent, as in the preview
       const span = Math.max(0.05, asset.duration - clip.inPoint)
       const from = Math.max(clip.start, start)
       const to = Math.min(clip.start + clip.duration, end)

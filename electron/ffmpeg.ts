@@ -7,6 +7,7 @@ import { join, basename } from 'path'
 import { tmpdir } from 'os'
 import type { ProbeResult, ExportJob, ExportProgress, WaveformData, AudioSegment } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
+import { AUDIO_SPEED_MIN, AUDIO_SPEED_MAX } from '@shared/audioSpeed'
 
 const execFileP = promisify(execFile)
 
@@ -518,7 +519,8 @@ export function audioCodecArgs(outPath: string): string[] {
 
 export function atempoChain(speed: number): string[] {
   const out: string[] = []
-  let s = Math.min(8, Math.max(0.25, speed))
+  // the clip-speed audio rule (shared/audioSpeed.ts) never asks for more
+  let s = Math.min(AUDIO_SPEED_MAX, Math.max(AUDIO_SPEED_MIN, speed))
   while (s > 2) {
     out.push('atempo=2')
     s /= 2
@@ -658,6 +660,17 @@ export class RawVideoEncoder {
   }
 }
 
+/** atempo keeps its last window when the input ends — a 1/16× chain came out
+    0.3 s short. A retimed segment reads this much more source, and the chain
+    cuts the result to the exact timeline length by sample count. */
+const ATEMPO_TAIL = 0.25
+const retimed = (s: AudioSegment) => Math.abs((s.speed || 1) - 1) > 1e-4
+
+/** the input args of one segment (its source window, plus the atempo tail) */
+function segmentInput(s: AudioSegment): string[] {
+  return ['-ss', String(s.inPoint), '-t', String(s.duration + (retimed(s) ? ATEMPO_TAIL : 0)), '-i', s.path]
+}
+
 /** per-segment filter chain shared by the single-graph mix and the premix */
 function segmentChain(s: AudioSegment): string[] {
   const speed = s.speed || 1
@@ -665,7 +678,7 @@ function segmentChain(s: AudioSegment): string[] {
   return [
     'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
     `volume=${s.gain.toFixed(4)}`,
-    ...(Math.abs(speed - 1) > 1e-4 ? atempoChain(speed) : []),
+    ...(retimed(s) ? [...atempoChain(speed), `atrim=end_sample=${Math.round(outDur * 48000)}`] : []),
     ...(s.fadeIn > 0.001 ? [`afade=t=in:st=0:d=${Math.min(s.fadeIn, outDur).toFixed(3)}`] : []),
     ...(s.fadeOut > 0.001
       ? [`afade=t=out:st=${Math.max(0, outDur - s.fadeOut).toFixed(3)}:d=${Math.min(s.fadeOut, outDur).toFixed(3)}`]
@@ -709,7 +722,7 @@ export async function premixSegments(
       const room = mix.length - offset
       if (room <= 0) { done++; continue }
       const args = [
-        '-v', 'error', '-nostdin', '-ss', String(s.inPoint), '-t', String(s.duration), '-i', s.path,
+        '-v', 'error', '-nostdin', ...segmentInput(s),
         '-af', segmentChain(s).join(','), '-f', 'f32le', '-ac', String(MIX_CH), '-ar', String(MIX_RATE), 'pipe:1'
       ]
       await new Promise<void>((resolve, reject) => {
@@ -797,7 +810,7 @@ export class ExportMuxer {
 
     if (hasVideo) args.push('-i', videoTemp)
     for (const s of segs) {
-      args.push('-ss', String(s.inPoint), '-t', String(s.duration), '-i', s.path)
+      args.push(...segmentInput(s))
     }
 
     const filters: string[] = []

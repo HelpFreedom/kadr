@@ -362,7 +362,14 @@ mixes audio and muxes/transcodes per preset.
   clip edge = 0.02–100× with ~16 px snapping to round multipliers AND
   neighbouring clip edges/playhead; a cursor-following ×N badge lights up
   when snapped. Preview clamps element playbackRate to Chromium's hard
-  [0.0625, 16] range — out-of-range assignment THROWS.
+  [0.0625, 16] range — out-of-range assignment THROWS. AUDIO HAS ONE SPEED
+  RULE (`shared/audioSpeed.ts`): inside that same [1/16, 16]× it follows the
+  speed exactly (playbackRate; an atempo chain in every mixdown, fed 0.25 s
+  of extra source and cut by sample count — atempo keeps its last window and
+  a 1/16× chain came out 0.3 s short), outside it the clip is SILENT in the
+  preview and the export alike. The export used to clamp atempo to 0.25–8,
+  so a 20× clip's sound ran 2.5× past its end. Test:
+  `node scripts/check-speed-audio.mjs`.
 - `src/engine/player.ts` — pure layer/audio queries, `MediaPool`,
   `drawFrame` (shared by preview and export), `Player` (anchored rAF
   clock, ~4 fps idle when paused; the tick is exception-proof — one bad

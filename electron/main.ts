@@ -20,6 +20,7 @@ import { registerFragmentIpc, cancelFragmentRenders, stopAllCaptures, sweepRende
 import { applyGpuChoice, registerGpuIpc } from './gpu'
 import { registerModelIpc } from './models'
 import { sourceHdr, hdrLut, hdrFilter, fragmentMedia } from './hdr'
+import { uriListToPaths, readWinFileDrop } from './clipboardFiles'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -711,11 +712,13 @@ function registerIpc() {
   ipcMain.handle('media:clipboard-paste', async () => {
     let uriList = ''
     try { uriList = clipboard.read('text/uri-list') || '' } catch { /* format absent */ }
-    const paths: string[] = []
-    for (const line of uriList.split(/\r?\n/)) {
-      const u = line.trim()
-      if (!u.startsWith('file://')) continue
-      try { paths.push(decodeURIComponent(new URL(u).pathname)) } catch { /* malformed */ }
+    let paths = uriListToPaths(uriList)
+    if (!paths.length && process.platform === 'win32' && clipboard.availableFormats().includes('text/uri-list')) {
+      paths = await readWinFileDrop()
+      if (!paths.length) {
+        const first = clipboard.readBuffer('FileNameW').toString('utf16le').replace(/\0+$/, '')
+        if (first) paths = [first]
+      }
     }
     if (paths.length) return paths
     const img = clipboard.readImage()

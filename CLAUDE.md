@@ -120,7 +120,14 @@ mixes audio and muxes/transcodes per preset.
   `webContents.executeJavaScript`); extra env/command via
   `userData/claude-env.json`, extra MCP servers via
   `userData/claude-mcp.json`; `sweepStaleSessions()` clears leftovers of
-  hard-killed runs at startup.
+  hard-killed runs at startup (after the page loads). On Windows there is no
+  /proc: one PowerShell `Win32_Process` listing, and a process is killed
+  (`taskkill /T`) only if its command line carries a Kadr path AND its parent
+  is gone — the user's own node or ffmpeg in the same folders has a live
+  parent (`electron/orphanSweep.ts`, test `node scripts/check-sweep-match.mjs`).
+  Measured: a `taskkill /F` of Kadr mid-render takes every non-detached
+  helper down with it (libuv's kill-on-close job, the pty's closed console),
+  so what the sweep meets there is a detached one.
   Open and close are SERIALIZED through one promise chain and carry a
   generation: spawning is async (config read, `which`, the node-pty import)
   while a close is instant, so a close that overtakes an in-flight open would
@@ -259,7 +266,11 @@ mixes audio and muxes/transcodes per preset.
   SIGKILLs a snapshot of the whole process TREE — remotion starts Chrome in
   a process group of its own, and on SIGTERM it launched a fresh Chrome that
   was reparented to init and stayed — then removes the render's
-  `react-motion-render*` frame dir. Content trap: per-frame random noise
+  `react-motion-render*` frame dir. On Windows a render's TEMP is
+  `userData/render-tmp`: a hard kill runs no cancel, and it left the frame
+  dir, Chrome's profile and the webpack bundle behind; only a folder nobody
+  else writes to can be emptied at the next start (`sweepRenderScratch`,
+  after the process sweep). Content trap: per-frame random noise
   (film grain) in a transparent fragment makes every PNG and VP9 frame
   incompressible (measured 119 MB / 144 s vs 3.6 MB / 40 s for 120 frames);
   put grain on its own track as a short looped RGBA clip. Speed note:

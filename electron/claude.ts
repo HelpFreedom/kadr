@@ -11,6 +11,8 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import type { IPty } from 'node-pty'
 import { claudeArgs, removeManagedSkills } from './claudeArgs'
+import { WIN_PROCESS_QUERY, parseWinProcs, pickWinOrphans } from './orphanSweep'
+import { WORKSPACE } from './fragments'
 
 // The session inherits this process's environment MINUS the markers of any
 // Claude session that launched the editor (see SESSION_MARKERS). Anything extra the
@@ -64,6 +66,9 @@ let sessionChain: Promise<unknown> = Promise.resolve()
  * launch. Outside-editor processes never reference these paths.
  * (Running two editor instances at once is not supported: the second
  * sweeps the first's helpers.)
+ * Windows has no /proc and no process groups: one PowerShell listing, and a
+ * helper counts only when its parent is gone too (`electron/orphanSweep.ts`)
+ * — which also spares a second instance's live helpers there.
  */
 export async function sweepStaleSessions(): Promise<number> {
   const marks = [
@@ -77,6 +82,7 @@ export async function sweepStaleSessions(): Promise<number> {
     join(app.getAppPath(), 'scripts', 'transcribe.py'),
     join(app.getAppPath(), 'scripts', 'ttsqc_run.py')
   ]
+  if (process.platform === 'win32') return sweepWin32([...marks, app.getPath('userData'), WORKSPACE])
   let entries: string[]
   try { entries = await fs.readdir('/proc') } catch { return 0 } // non-Linux
   const statOf = async (pid: number) => {
@@ -120,6 +126,26 @@ export async function sweepStaleSessions(): Promise<number> {
     }
   }
   if (killed) console.log(`[claude] swept ${killed} stale session group(s)`)
+  return killed
+}
+
+async function sweepWin32(marks: string[]): Promise<number> {
+  const out = await new Promise<string>((resolve) => execFile('powershell',
+    ['-NoProfile', '-NonInteractive', '-Command', WIN_PROCESS_QUERY],
+    { encoding: 'utf8', maxBuffer: 64 << 20, windowsHide: true },
+    (err, stdout) => resolve(err ? '' : stdout)))
+  let procs
+  try { procs = parseWinProcs(out) } catch { return 0 }
+  const pick = new Set(pickWinOrphans(procs, marks, process.pid))
+  const orphans = procs.filter((p) => pick.has(p.pid))
+  let killed = 0
+  for (const p of orphans) {
+    // /T takes the orphan's own children along (remotion's Chrome, vite under its watchdog)
+    const ok = await new Promise<boolean>((done) =>
+      execFile('taskkill', ['/pid', String(p.pid), '/t', '/f'], { windowsHide: true }, (err) => done(!err)))
+    if (ok) killed++
+    console.log(`[claude] swept orphan ${p.pid}${ok ? '' : ' (already gone)'}: ${(p.cmd ?? '').slice(0, 160)}`)
+  }
   return killed
 }
 
@@ -407,7 +433,6 @@ function closeSession(): Promise<void> {
 }
 
 export function registerClaudeIpc(getWin: () => BrowserWindow | null) {
-  void sweepStaleSessions() // leftovers from a hard-killed previous run
   // skills load per session through --plugin-dir; drop copies older versions put in ~/.claude/skills
   void removeManagedSkills(join(app.getPath('home'), '.claude', 'skills'))
     .then((r) => { if (r.length) console.log(`[claude] removed global skill copies: ${r.join(', ')}`) })

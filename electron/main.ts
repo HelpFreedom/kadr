@@ -10,13 +10,13 @@ import {
 } from './ffmpeg'
 import { mediaCacheKey, proxySuffix, decodedSuffix, reverseSuffix } from './cacheKeys'
 import { registerStorageIpc } from './storage'
-import { registerClaudeIpc } from './claude'
+import { registerClaudeIpc, sweepStaleSessions } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerTtsIpc } from './tts'
 import { registerVoiceIpc } from './voice'
 import { registerEnvelopeIpc } from './envelope'
 import { registerSoundsIpc } from './sounds'
-import { registerFragmentIpc, cancelFragmentRenders, stopAllCaptures } from './fragments'
+import { registerFragmentIpc, cancelFragmentRenders, stopAllCaptures, sweepRenderScratch } from './fragments'
 import { applyGpuChoice, registerGpuIpc } from './gpu'
 import { registerModelIpc } from './models'
 import { sourceHdr, hdrLut, hdrFilter, fragmentMedia } from './hdr'
@@ -278,6 +278,9 @@ app.whenReady().then(() => {
   registerModelIpc()
   registerFragmentIpc(() => win)
   createWindow()
+  // leftovers of a hard-killed run: its helper processes, then the render temp they held.
+  // After the page loads — on Windows the listing is a PowerShell cold start (0.3–1 s).
+  win?.webContents.once('did-finish-load', () => { void sweepStaleSessions().then(sweepRenderScratch) })
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

@@ -1125,6 +1125,9 @@ export interface KadrApi {
   writeProject(path: string, project: Project): Promise<void>
   /** write <name>.autosave.kadr next to the project (atomic); returns path */
   autosaveProject(project: Project, mainPath: string | null): Promise<string>
+  /** closing the window asks the page first: `cb` decides, then calls closeWindow() to go on */
+  onCloseRequest(cb: () => void): () => void
+  closeWindow(): void
 
   /** App-wide JSON stores in userData (presets etc.) — survive any restart. */
   storageScan(projects: string[], open: StorageProject | null): Promise<StorageScan>

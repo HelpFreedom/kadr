@@ -97,6 +97,13 @@ const api: KadrApi = {
   readProject: (path) => ipcRenderer.invoke('project:read', path),
   writeProject: (path, project) => ipcRenderer.invoke('project:write', path, project),
   autosaveProject: (project, mainPath) => ipcRenderer.invoke('project:autosave', project, mainPath),
+  onCloseRequest: (cb) => {
+    const handler = () => cb()
+    ipcRenderer.on('app:close-request', handler)
+    ipcRenderer.send('app:close-guard')
+    return () => ipcRenderer.removeListener('app:close-request', handler)
+  },
+  closeWindow: () => ipcRenderer.send('app:close'),
 
   storageScan: (projects, open) => ipcRenderer.invoke('storage:scan', projects, open),
   storagePrune: (req) => ipcRenderer.invoke('storage:prune', req),

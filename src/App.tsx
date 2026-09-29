@@ -18,7 +18,8 @@ import { DefectsDialog } from './components/DefectsDialog'
 import { DebugPanel } from './components/DebugPanel'
 import { StoragePanel } from './components/StoragePanel'
 import { Icon } from './components/icons'
-import { modalsOpen } from './components/Modal'
+import { Modal, modalsOpen } from './components/Modal'
+import { needsConfirm } from './engine/discardGuard'
 import { rememberProject } from './engine/storage'
 import { usePopout, previewHost, setPreviewSlot, dockPreviewWindow } from './engine/popout'
 import { useEditor, newProject } from './state/store'
@@ -49,7 +50,7 @@ export function markProjectSaved(p: Project) {
   useSaveUi.setState({ savedProject: p })
 }
 
-async function writeAndConfirm(path: string) {
+async function writeAndConfirm(path: string): Promise<boolean> {
   const s = useEditor.getState()
   try {
     await window.kadr.writeProject(path, s.project)
@@ -60,20 +61,70 @@ async function writeAndConfirm(path: string) {
     // fragments follow the project: loose workspace folders move next to
     // the .kadr file (first save, save-as to a new place)
     void syncProjectFragments(s.project, path)
+    return true
   } catch (err) {
     flashSave('saveError', String(err), true)
     logError('сохранение', `не удалось записать ${path}, файл на диске не тронут`, err)
+    return false
   }
 }
 
-async function saveProject() {
+/** true once the project is on disk; false when the dialog was cancelled or the write failed */
+async function saveProject(): Promise<boolean> {
   const s = useEditor.getState()
   let path = s.projectPath
   if (!path) {
     path = await window.kadr.saveProjectDialog(s.project.name)
-    if (!path) return
+    if (!path) return false
   }
-  await writeAndConfirm(path)
+  return writeAndConfirm(path)
+}
+
+// The question New, Open and closing the window ask when there is unsaved
+// work: Save / Don't save / Cancel. `answer` is set while it is on screen.
+const useDiscardUi = create<{ answer: ((go: boolean) => void) | null }>(() => ({ answer: null }))
+let pendingDiscard: Promise<boolean> | null = null
+
+/** true → go ahead (saved, or «Не сохранять»); false → keep the project as it is */
+export function confirmDiscard(): Promise<boolean> {
+  if (!needsConfirm(useEditor.getState().project, useSaveUi.getState().savedProject)) return Promise.resolve(true)
+  // a second request while the question is up (two clicks on ×) waits for the same answer
+  return (pendingDiscard ??= new Promise<boolean>((resolve) => {
+    useDiscardUi.setState({
+      answer: (go) => {
+        pendingDiscard = null
+        useDiscardUi.setState({ answer: null })
+        resolve(go)
+      }
+    })
+  }))
+}
+
+function DiscardPrompt() {
+  const t = useT()
+  const answer = useDiscardUi((s) => s.answer)
+  if (!answer) return null
+  return (
+    <Modal
+      title={t('discardTitle')}
+      onClose={() => answer(false)}
+      actions={
+        <>
+          <button onClick={() => answer(false)} data-act="discard-cancel">{t('cancel')}</button>
+          <button onClick={() => answer(true)} data-act="discard-drop">{t('dontSave')}</button>
+          <button className="primary" onClick={async () => answer(await saveProject())} data-act="discard-save">{t('save')}</button>
+        </>
+      }
+    >
+      <p>{t('discardBody')}</p>
+    </Modal>
+  )
+}
+
+async function newProjectGuarded() {
+  if (!(await confirmDiscard())) return
+  useEditor.getState().setProject(newProject())
+  markProjectSaved(useEditor.getState().project)
 }
 
 /** Always ask for a (new) location; the project lives there from now on. */
@@ -90,8 +141,13 @@ async function openProject() {
   await openProjectAt(path)
 }
 
-/** Open a .kadr file exactly as «Открыть проект» does (also kadrEditor.openProject). */
-export async function openProjectAt(path: string) {
+/**
+ * Open a .kadr file exactly as «Открыть проект» does (also kadrEditor.openProject).
+ * Unsaved work is asked about first; `force` skips the question (tests, scripts).
+ * Resolves false when the user chose to keep the open project.
+ */
+export async function openProjectAt(path: string, { force = false }: { force?: boolean } = {}): Promise<boolean> {
+  if (!force && !(await confirmDiscard())) return false
   const p = await window.kadr.readProject(path)
   useEditor.getState().setProject(p, path)
   markProjectSaved(useEditor.getState().project)
@@ -99,6 +155,7 @@ export async function openProjectAt(path: string) {
   // restore workspace symlinks for fragments living next to the .kadr file
   // (project moved from another machine / cleaned workspace)
   void syncProjectFragments(useEditor.getState().project, path)
+  return true
 }
 
 const TL_MIN = 160
@@ -115,6 +172,10 @@ export default function App() {
   useEffect(() => {
     if (useSaveUi.getState().savedProject === null) markProjectSaved(useEditor.getState().project)
   }, [])
+  // closing the window (×, Alt+F4, the app quitting) asks like New and Open do
+  useEffect(() => window.kadr.onCloseRequest(() => {
+    void confirmDiscard().then((go) => go && window.kadr.closeWindow())
+  }), [])
   const dirty = savedProject !== null && project !== savedProject
   const undoLabel = useEditor((s) => s.past[s.past.length - 1]?.label)
   const redoLabel = useEditor((s) => s.future[0]?.label)
@@ -304,10 +365,7 @@ export default function App() {
         <span className="bar-group">
           <button
             data-act="new-project"
-            onClick={() => {
-              useEditor.getState().setProject(newProject())
-              markProjectSaved(useEditor.getState().project)
-            }}
+            onClick={newProjectGuarded}
           >
             <Icon name="filePlus" /> {t('newProject')}
           </button>
@@ -383,6 +441,7 @@ export default function App() {
       <TtsSettingsDialog />
       <SpeakDialog />
       <DefectsDialog />
+      <DiscardPrompt />
       {claudeOpen && <ClaudePanel onClose={() => setClaudeOpen(false)} />}
       {debugOpen && <DebugPanel onClose={() => setDebugOpen(false)} />}
       {storageOpen && <StoragePanel onClose={() => setStorageOpen(false)} />}

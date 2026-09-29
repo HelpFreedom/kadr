@@ -81,6 +81,16 @@ process.on('uncaughtException', (err) => {
 })
 
 let win: BrowserWindow | null = null
+// Closing the window with unsaved work asks the page first (src/App.tsx,
+// confirmDiscard). closeGuard: the page has its answer handler up — a page that
+// never loaded or was reloaded has none, and must not make the window unclosable;
+// a crashed or hung renderer is not asked either (the force-exit failsafe below).
+let closeAllowed = false
+let closeGuard = false
+let unresponsive = false
+let quitAfterClose = false
+const mustAsk = () => !!win && !win.isDestroyed() && !closeAllowed && closeGuard &&
+  !unresponsive && !win.webContents.isCrashed()
 /** window.open name of the detached preview — see src/engine/popout.ts */
 const PREVIEW_WIN = 'kadr-preview'
 
@@ -104,13 +114,21 @@ function createWindow() {
   })
   win.setMenuBarVisibility(false)
   const owner = win
+  closeAllowed = closeGuard = unresponsive = false
+  win.on('close', (e) => {
+    if (!mustAsk()) return
+    e.preventDefault()
+    owner.webContents.send('app:close-request')
+  })
+  win.on('unresponsive', () => { unresponsive = true })
+  win.on('responsive', () => { unresponsive = false })
   // A reload of the editor page forgets which fragment capture windows it
   // asked for, but main keeps them — found as windows of a project closed
   // hours earlier, still rendering 60 frames a second offscreen. The new page
   // starts the ones it wants again. Only the top document counts: the
   // fragment iframes navigate inside this same webContents all the time.
   win.webContents.on('did-start-navigation', (details) => {
-    if (details.isMainFrame && !details.isSameDocument) stopAllCaptures()
+    if (details.isMainFrame && !details.isSameDocument) { stopAllCaptures(); closeGuard = false }
   })
   // The preview can be detached into a window of its own (src/engine/popout.ts).
   // The renderer opens an about:blank popup — same origin and same renderer
@@ -140,8 +158,9 @@ function createWindow() {
     // closing the editor must not leave the preview window behind: while one
     // is open window-all-closed never fires and the app would never quit
     const closeChild = () => { if (!child.isDestroyed()) child.destroy() }
-    owner.on('close', closeChild)
-    child.on('closed', () => owner.isDestroyed() || owner.removeListener('close', closeChild))
+    // 'closed', not 'close': a close the user cancels (unsaved work) keeps both
+    owner.on('closed', closeChild)
+    child.on('closed', () => owner.isDestroyed() || owner.removeListener('closed', closeChild))
   })
   // a killed/crashed renderer leaves a dead window and an immortal main
   // process (the running project is lost either way — autosave has it);
@@ -294,7 +313,15 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (e) => {
+  // a quit (tray, Cmd+Q, OS) goes through the window's question too; nothing
+  // is cancelled until the page said yes
+  if (mustAsk()) {
+    e.preventDefault()
+    quitAfterClose = true
+    win!.close()
+    return
+  }
   exportState?.muxer?.cancel()
   cancelFragmentRenders()
   void cleanupExport()
@@ -625,6 +652,12 @@ function registerIpc() {
   })
 
   ipcMain.on('media:token', (e) => { e.returnValue = MEDIA_TOKEN })
+  ipcMain.on('app:close-guard', () => { closeGuard = true })
+  ipcMain.on('app:close', () => {
+    closeAllowed = true
+    win?.close()
+    if (quitAfterClose) app.quit()
+  })
   ipcMain.handle('media:probe', (_e, path: string) => probeMedia(path))
   ipcMain.handle('media:probe-basic', (_e, path: string) => probeBasic(String(path)))
   ipcMain.handle('media:fragment-media', (_e, path: string, projectDir: string, opts?: { name?: string; maxSide?: number }) =>

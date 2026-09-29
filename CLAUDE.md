@@ -96,6 +96,15 @@ mixes audio and muxes/transcodes per preset.
   over a file another program holds open (antivirus, sync client), so the
   rename is retried 3× with backoff first. Test:
   `node scripts/check-atomic-write.mjs`.
+  NOTHING REPLACES UNSAVED WORK WITHOUT A QUESTION: New, Open and closing
+  the window (×, Alt+F4, a quit) go through `confirmDiscard` in App.tsx —
+  Save / Don't save / Cancel, asked only when `needsConfirm` (the dirty-dot
+  rule, `src/engine/discardGuard.ts`) says so. main cancels the window's
+  `close` (and turns `before-quit` into a close) and waits for the page's
+  `app:close`; a page that has not registered its handler, a crashed or an
+  unresponsive one is not asked, so the window can always be closed.
+  `kadrEditor.openProject(path)` asks too; scripts pass `{ force: true }`.
+  Test: `node scripts/check-discard-guard.mjs`.
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
   render of a clip's source range, RAM-bounded chunks), `ExportMuxer`

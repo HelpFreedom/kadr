@@ -66,8 +66,7 @@ mixes audio and muxes/transcodes per preset.
   keyframes; `evalAnim` interpolates. `tracks[0]` is the top video track
   (drawn last).
 - `electron/main.ts` — window, `kadr://` streaming protocol with manual
-  Range support, IPC: dialogs, project IO (incl. atomic autosave), export,
-  user stores, proxy queue, reversed-media cache, media intake
+  Range support, IPC: dialogs, project IO, export, user stores, proxy queue, reversed-media cache, media intake
   (`media:download` — browser-URL drops fetched into `userData/imported`,
   cached by URL hash; `media:save-blob` — path-less Files / data: URLs /
   clipboard images, cached by content hash; `media:portal-files` — XDG
@@ -89,6 +88,14 @@ mixes audio and muxes/transcodes per preset.
   project loaded through `kadr_eval` never passes main at all, so the
   allowlist would have had holes exactly where a miss means a black preview. Startup sweeps leftover helper processes; shutdown force-exits
   (window-all-closed → app.exit failsafe, render-process-gone → exit).
+  EVERY PROJECT AND USER-STORE WRITE IS ATOMIC (`electron/atomicWrite.ts`):
+  save, autosave and `store:write` write `<path>.part-<pid>`, fsync, then
+  rename over the original — a plain writeFile of a ~78 MB project tears the
+  user's only copy on a crash or a full disk. A failed write leaves the
+  original byte-identical and removes the sidecar; Windows refuses a rename
+  over a file another program holds open (antivirus, sync client), so the
+  rename is retried 3× with backoff first. Test:
+  `node scripts/check-atomic-write.mjs`.
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
   render of a clip's source range, RAM-bounded chunks), `ExportMuxer`

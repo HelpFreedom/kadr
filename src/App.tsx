@@ -62,6 +62,7 @@ async function writeAndConfirm(path: string) {
     void syncProjectFragments(s.project, path)
   } catch (err) {
     flashSave('saveError', String(err), true)
+    logError('сохранение', `не удалось записать ${path}, файл на диске не тронут`, err)
   }
 }
 

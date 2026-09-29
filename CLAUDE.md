@@ -230,8 +230,11 @@ mixes audio and muxes/transcodes per preset.
   REVERSE-ENGINEERED from /brag's published ones (magnitude share in
   4–16 kHz, frames within 18 dB of the loudest; depth-2 trees agree
   96–99 %); inputs must be the channel MEAN (ffmpeg `-ac 1` scales stereo by
-  √2). A sound's HIT (attack of its loudest event) is what `addSound` puts
-  on the beat; a sound with no single event gets hit 0. The user's own
+  √2) over EXACTLY the container duration, zero-padded (`sfxMono`): ffmpeg
+  ≥ 5 applies an Ogg's end trim and decodes up to 128 frames short of it, and
+  a cut-only decode moved activeRatio off /brag's. A sound's HIT (attack of
+  its loudest event) is what `addSound` puts on the beat; a sound with no
+  single event gets hit 0. The user's own
   sounds live in `userData/sfx/<family>/`, analysed once and cached by
   size+mtime+`SFX_ANALYSIS_VERSION`. `placeAudio` picks an audio track FREE
   over the whole span (overlap on one track would crossfade the music).

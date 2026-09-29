@@ -20,7 +20,7 @@ import { tmpdir } from 'os'
 import { FFMPEG, FFPROBE, mixdownWav, runStream } from './ffmpeg'
 import { AudioAnalyzer, analyzeBeats, featureCurves } from '@shared/audioAnalysis'
 import { analyzeRhythm } from '@shared/rhythm'
-import { sfxFeatures, labelSfx, SFX_ANALYSIS_VERSION, type SfxLabels } from '@shared/sfxFeatures'
+import { sfxFeatures, sfxMono, labelSfx, SFX_ANALYSIS_VERSION, type SfxLabels } from '@shared/sfxFeatures'
 import type {
   AnalyzeRequest, AudioAnalysisResult, SfxEntry, MusicEntry, SoundLibrary
 } from '@shared/types'
@@ -103,7 +103,7 @@ export async function analyzeRange(req: AnalyzeRequest): Promise<AudioAnalysisRe
 export const RESOURCES = () => join(app.getAppPath(), 'resources')
 
 /** Decode a sound to mono f32 at 44.1 kHz: the channel MEAN (ffmpeg's -ac 1
-    matrix would scale a stereo file by √2), trimmed to the container duration —
+    matrix would scale a stereo file by √2), as long as the container duration —
     the input shared/sfxFeatures.ts is defined on and was checked against. */
 async function decodeMono(path: string): Promise<Float32Array> {
   const SFX_SR = 44100
@@ -118,15 +118,7 @@ async function decodeMono(path: string): Promise<Float32Array> {
   const buf = Buffer.concat(chunks)
   const inter = new Float32Array(buf.length >> 2)
   new Uint8Array(inter.buffer).set(buf.subarray(0, inter.length * 4))
-  let frames = Math.floor(inter.length / ch)
-  if (dur > 0) frames = Math.min(frames, Math.round(dur * SFX_SR))
-  const mono = new Float32Array(frames)
-  for (let i = 0; i < frames; i++) {
-    let v = 0
-    for (let c = 0; c < ch; c++) v += inter[i * ch + c]
-    mono[i] = v / ch
-  }
-  return mono
+  return sfxMono(inter, ch, dur, SFX_SR)
 }
 
 export async function analyzeSoundFile(path: string) {

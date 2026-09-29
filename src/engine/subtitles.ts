@@ -6,6 +6,7 @@ import type {
 import { useEditor, uid } from '@/state/store'
 import { dirOf, baseOf } from '@shared/paths'
 import { audioFollowsSpeed } from '@shared/audioSpeed'
+import { gainKeys as gainKeysOf } from '@shared/gainKeys'
 import { overlapFades } from './player'
 import { evalAnim } from './anim'
 
@@ -201,7 +202,6 @@ export function collectRangeAudio(
       const from = Math.max(clip.start, start)
       const to = Math.min(clip.start + clip.duration, end)
       if (to - from < 0.001) continue
-      const gain = evalAnim(clip.gain, 0) * track.gain
       const { fadeIn, fadeOut } = overlapFades(track, clip)
       let local = from - clip.start
       const localEnd = to - clip.start
@@ -212,12 +212,14 @@ export function collectRangeAudio(
         const fiLocal = local < fadeIn ? Math.min(fadeIn - local, segDur) : 0
         const tail = clip.duration - (local + segDur)
         const foLocal = tail < fadeOut ? Math.min(fadeOut - tail, segDur) : 0
+        const gainKeys = gainKeysOf(clip.gain, local, local + segDur, (t) => evalAnim(clip.gain, t))
         segs.push({
           path: asset.path,
           inPoint: clip.inPoint + srcOff,
           duration: segDur * speed,
           start: clip.start + local - start,
-          gain,
+          gain: (gainKeys ? 1 : evalAnim(clip.gain, local)) * track.gain,
+          ...(gainKeys ? { gainKeys } : {}),
           speed,
           fadeIn: fiLocal,
           fadeOut: foLocal

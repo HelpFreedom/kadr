@@ -8,6 +8,7 @@ import { tmpdir } from 'os'
 import type { ProbeResult, ExportJob, ExportProgress, WaveformData, AudioSegment } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
 import { AUDIO_SPEED_MIN, AUDIO_SPEED_MAX } from '@shared/audioSpeed'
+import { gainExpr } from '@shared/gainKeys'
 
 const execFileP = promisify(execFile)
 
@@ -679,6 +680,11 @@ function segmentChain(s: AudioSegment): string[] {
     'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
     `volume=${s.gain.toFixed(4)}`,
     ...(retimed(s) ? [...atempoChain(speed), `atrim=end_sample=${Math.round(outDur * 48000)}`] : []),
+    // keyframed gain, on the timeline clock (after atempo): t counts from the
+    // segment's first sample, and the curve is applied in 10 ms steps
+    ...(s.gainKeys?.length
+      ? ['asetpts=N/SR/TB', 'asetnsamples=n=480:p=0', `volume='${gainExpr(s.gainKeys)}':eval=frame`]
+      : []),
     ...(s.fadeIn > 0.001 ? [`afade=t=in:st=0:d=${Math.min(s.fadeIn, outDur).toFixed(3)}`] : []),
     ...(s.fadeOut > 0.001
       ? [`afade=t=out:st=${Math.max(0, outDur - s.fadeOut).toFixed(3)}:d=${Math.min(s.fadeOut, outDur).toFixed(3)}`]

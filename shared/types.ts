@@ -1,6 +1,8 @@
 // Core project model shared between main and renderer processes.
 // All times are in seconds, all dimensions in pixels.
 
+import type { GainKey } from './gainKeys'
+
 export type AssetKind = 'video' | 'audio' | 'image'
 
 /** Audacity-style waveform: per-bin peak and RMS, base64-encoded Uint8 (0..255). */
@@ -948,6 +950,8 @@ export interface AudioSegment {
   /** position in the timeline */
   start: number
   gain: number
+  /** keyframed clip gain, multiplied over `gain` (shared/gainKeys.ts); absent = flat */
+  gainKeys?: GainKey[]
   speed: number
   /** local fade windows in timeline seconds */
   fadeIn: number

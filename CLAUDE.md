@@ -104,6 +104,13 @@ mixes audio and muxes/transcodes per preset.
   all of the timeline piled onto the first seconds and silence after the
   longest clip. Recounting pts from the sample position is version-neutral
   and costs nothing. Test: `node scripts/check-mixdown.mjs`.
+  KEYFRAMED CLIP GAIN reaches the mix: the collector samples the clip's gain
+  Anim with the preview's own `evalAnim` into `AudioSegment.gainKeys`
+  (segment-local timeline seconds, piecewise linear — eased and smooth spans
+  in ≤ 32 pieces, `shared/gainKeys.ts`), and `segmentChain` applies them
+  after atempo as one `volume='<expr>':eval=frame` in 10 ms steps — so the
+  graph and the premix both get it. A gain that never changes stays a
+  scalar and mixes bit-identically. Test: `node scripts/check-gain-keys.mjs`.
   TWO LIMITS A BIG TIMELINE WALKS INTO, both met on a real 19-minute edit
   carrying ~1000 SFX clips. One graph with N padded inputs costs the ffmpeg
   scheduler roughly QUADRATICALLY in N: that mix ran at a quarter of realtime —

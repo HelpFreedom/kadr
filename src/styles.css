@@ -2096,6 +2096,26 @@ div.tr-error {
   background: var(--c-proxy-build);
   color: var(--c-proxy-build-text);
 }
+/* offline media (src/engine/offline.ts): the source file is not on disk */
+.proxy-badge.offline {
+  min-height: 0;
+  border: none;
+  background: var(--c-danger-solid);
+  color: var(--c-on-solid);
+  pointer-events: auto;
+  cursor: pointer;
+}
+.bin-item.offline { border-color: var(--c-danger-line); }
+.bin-item.offline img { opacity: 0.35; }
+.clip.offline { border-color: var(--c-danger-line); }
+.clip.offline::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(135deg, rgb(var(--rgb-danger) / 0.3) 0 4px, transparent 4px 9px);
+}
+.clip-offline { display: inline-flex; color: var(--c-danger-text); }
 
 /* ===========================================================================
    Animation editor (Vegas-style pan/crop) and track motion

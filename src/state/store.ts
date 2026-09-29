@@ -499,6 +499,9 @@ interface EditorState {
   /** Remove media files from the bin AND every timeline clip that uses them
       (linked twins share the assetId) — one undo entry. */
   removeAssets(assetIds: string[]): void
+  /** Point assets at other files (relink of offline media): each given asset
+      replaces the one with its id — one undo entry. */
+  relinkAssets(fresh: MediaAsset[]): void
   /** register transcript/text docs in the sources (one undo entry) */
   addTexts(docs: TextDoc[]): void
   /** Land a finished voice-over — asset, script docs, run record and clip — as
@@ -730,6 +733,16 @@ export const useEditor = create<EditorState>((set, get) => ({
   addAsset: (a) =>
     set((s) => ({ project: { ...s.project, assets: [...s.project.assets, a] } })),
 
+  relinkAssets: (fresh) => {
+    const byId = new Map(fresh.map((a) => [a.id, a]))
+    if (!get().project.assets.some((a) => byId.has(a.id))) return
+    get().pushHistory('hRelink')
+    set((st) => {
+      const p = cloneProject(st.project)
+      p.assets = p.assets.map((a) => byId.get(a.id) ?? a)
+      return { project: p }
+    })
+  },
   removeAssets: (assetIds) => {
     const ids = new Set(assetIds)
     const s = get()

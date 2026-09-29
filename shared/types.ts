@@ -1,6 +1,8 @@
 // Core project model shared between main and renderer processes.
 // All times are in seconds, all dimensions in pixels.
 
+import type { RelinkWanted } from './relinkMatch'
+
 export type AssetKind = 'video' | 'audio' | 'image'
 
 /** Audacity-style waveform: per-bin peak and RMS, base64-encoded Uint8 (0..255). */
@@ -21,6 +23,9 @@ export interface MediaAsset {
   height: number
   fps: number
   hasAudio: boolean
+  /** bytes, from the probe (absent on assets imported before it was kept) —
+      the relink search matches a renamed file by size + duration */
+  size?: number
   /** data: URL of a poster frame, generated on import */
   thumbnail?: string
   /** poster of the last frame (clip tails show it on the timeline) */
@@ -1111,6 +1116,10 @@ export interface FragmentParamDecl {
 export interface KadrApi {
   openMediaDialog(): Promise<string[]>
   probeMedia(path: string): Promise<ProbeResult>
+  /** one pass over many paths: the size of each, null where there is no file (offline media) */
+  statMany(paths: string[]): Promise<(number | null)[]>
+  /** «Искать в папке»: assetId → the file under `folder` to relink it to (shared/relinkMatch.ts) */
+  relinkScan(folder: string, wanted: RelinkWanted[]): Promise<Record<string, string>>
   fileUrl(path: string): string
   /** Absolute path of a File dropped from the OS (File.path is gone since
       Electron 32 — this goes through webUtils.getPathForFile). */

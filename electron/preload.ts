@@ -176,6 +176,8 @@ const api: KadrApi = {
   },
   fragmentTypecheck: (id) => ipcRenderer.invoke('fragment:typecheck', id),
   probeBasic: (path) => ipcRenderer.invoke('media:probe-basic', path),
+  statMany: (paths) => ipcRenderer.invoke('media:stat-many', paths),
+  relinkScan: (folder, wanted) => ipcRenderer.invoke('media:relink-scan', folder, wanted),
   fragmentMedia: (path, projectDir, opts) => ipcRenderer.invoke('media:fragment-media', path, projectDir, opts),
   fragmentInspect: (id) => ipcRenderer.invoke('fragment:inspect', id),
   fragmentCollide: (id, step) => ipcRenderer.invoke('fragment:collide', id, step),

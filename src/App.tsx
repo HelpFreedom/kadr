@@ -17,6 +17,8 @@ import { TtsSettingsDialog, SpeakDialog, refreshTtsKey } from './components/TtsD
 import { DefectsDialog } from './components/DefectsDialog'
 import { DebugPanel } from './components/DebugPanel'
 import { StoragePanel } from './components/StoragePanel'
+import { RelinkDialog } from './components/RelinkDialog'
+import { checkOfflineOnOpen } from './engine/offline'
 import { Icon } from './components/icons'
 import { Modal, modalsOpen } from './components/Modal'
 import { needsConfirm } from './engine/discardGuard'
@@ -137,6 +139,7 @@ function RestorePrompt() {
     if (!(await confirmDiscard())) return
     try {
       useEditor.getState().setProject(await window.kadr.readProject(offer.file), null)
+      checkOfflineOnOpen()
     } catch (err) {
       logError('восстановление', `не удалось открыть ${offer.file}`, err)
     }
@@ -193,6 +196,7 @@ export async function openProjectAt(path: string, { force = false }: { force?: b
   const p = await window.kadr.readProject(path)
   useEditor.getState().setProject(p, path)
   markProjectSaved(useEditor.getState().project)
+  checkOfflineOnOpen()
   void rememberProject(path)
   // restore workspace symlinks for fragments living next to the .kadr file
   // (project moved from another machine / cleaned workspace)
@@ -489,6 +493,7 @@ export default function App() {
       <DefectsDialog />
       <DiscardPrompt />
       <RestorePrompt />
+      <RelinkDialog />
       {claudeOpen && <ClaudePanel onClose={() => setClaudeOpen(false)} />}
       {debugOpen && <DebugPanel onClose={() => setDebugOpen(false)} />}
       {storageOpen && <StoragePanel onClose={() => setStorageOpen(false)} />}

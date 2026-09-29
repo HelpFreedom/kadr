@@ -646,7 +646,22 @@ const ru = {
   duration: 'Длительность',
   inOut: 'Вход/выход',
   logStore: 'настройки',
-  storeWriteFail: 'не удалось сохранить на диск'
+  storeWriteFail: 'не удалось сохранить на диск',
+  hRelink: 'пересвязка медиафайлов',
+  logRelink: 'медиафайлы',
+  offlineFound: 'файлы не найдены на диске',
+  offlineBadge: 'Файл не найден',
+  offlineClip: 'Файл не найден — «Пересвязать» в медиатеке',
+  relinkBtn: 'Пересвязать',
+  relinkTitle: 'Файлы не найдены',
+  relinkBody: 'Эти файлы переместили, переименовали или удалили. Клипы с ними пусты в превью, а экспорт не начнётся, пока файлы не найдены. Отмена пересвязки — Ctrl+Z.',
+  relinkPick: 'Указать файл',
+  relinkFolder: 'Искать в папке',
+  relinkAllFound: 'Все файлы на месте.',
+  relinkWrongKind: 'файл другого типа, пересвязка отклонена',
+  relinkUnreadable: 'не удалось прочитать файл',
+  relinkNotFound: 'в папке не нашлось однозначного совпадения для',
+  exportOffline: 'экспорт не начат — файлы не найдены'
 }
 
 const en: typeof ru = {
@@ -1295,7 +1310,22 @@ const en: typeof ru = {
   duration: 'Duration',
   inOut: 'In/out',
   logStore: 'settings',
-  storeWriteFail: 'could not be saved to disk'
+  storeWriteFail: 'could not be saved to disk',
+  hRelink: 'relink media files',
+  logRelink: 'media files',
+  offlineFound: 'files not found on disk',
+  offlineBadge: 'File not found',
+  offlineClip: 'File not found — «Relink» in the media bin',
+  relinkBtn: 'Relink',
+  relinkTitle: 'Files not found',
+  relinkBody: 'These files were moved, renamed or deleted. Their clips are empty in the preview, and export will not start until the files are found. Ctrl+Z undoes a relink.',
+  relinkPick: 'Choose file',
+  relinkFolder: 'Search a folder',
+  relinkAllFound: 'Every file is in place.',
+  relinkWrongKind: 'a file of another kind, relink refused',
+  relinkUnreadable: 'could not read the file',
+  relinkNotFound: 'no unambiguous match in the folder for',
+  exportOffline: 'export not started — files not found'
 }
 
 export type TKey = keyof typeof ru

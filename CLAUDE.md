@@ -371,6 +371,21 @@ mixes audio and muxes/transcodes per preset.
   x-moz-url / DownloadURL → portal key), `importDrop` (paths → URLs →
   raw blobs), window-level catch-all drop in App.tsx, drop forensics to
   `window.__dragLog` + `userData/drop-log.jsonl`.
+- `src/engine/offline.ts` + `electron/mediaStat.ts` + `shared/relinkMatch.ts`
+  — OFFLINE MEDIA: a moved or renamed source used to be a silent black clip
+  and an export that failed at the mux. The offline set is RUNTIME ONLY (asset
+  ids, never saved), recomputed by one batched `media:stat-many` pass when the
+  asset paths change, when a project is opened or restored (which also opens
+  the relink dialog if files are missing — the same paths still need a pass),
+  and on window focus. Scheduled with setTimeout, NOT rAF: a window behind
+  others gets no frames and the pass never ran. Clips are hatched, the bin
+  badges the asset, `startExport` refuses naming the files (stat'ed afresh).
+  Relink: «Указать файл», or «Искать в папке» — by name, then by size
+  (`MediaAsset.size`, from the probe since this change) + duration; a
+  candidate must agree with what is known, be the only fit, and one file never
+  serves two assets; older assets without a size are found by name only. Each
+  file is re-probed (another kind is refused), all applied as ONE undo step.
+  Test: `node scripts/check-relink-match.mjs`.
 - Clip speed UX (`Timeline.tsx`): Ctrl-drag on either extend grip or
   clip edge = 0.02–100× with ~16 px snapping to round multipliers AND
   neighbouring clip edges/playhead; a cursor-following ×N badge lights up

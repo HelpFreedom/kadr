@@ -48,6 +48,9 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
     fps: fps || 30,
     hasAudio: !!audio
   }
+  // the relink search («Искать в папке») finds a renamed file by size + duration
+  const size = Number(info.format?.size)
+  if (size > 0) asset.size = size
   if (kind === 'video' && video?.codec_name) asset.codec = video.codec_name
   if (kind === 'video') {
     const b = videoBasics(video)
@@ -104,6 +107,17 @@ function videoBasics(video: any): { rotation?: number; hdr?: 'hlg' | 'pq' } {
 }
 
 /** codec, alpha, rotation, HDR — ffprobe only (the exporter asks this of old assets) */
+/** container duration in seconds, or null when ffprobe cannot read the file (relink candidates) */
+export async function probeDuration(path: string): Promise<number | null> {
+  try {
+    const { stdout } = await execFileP(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', path])
+    const d = parseFloat(stdout)
+    return Number.isFinite(d) ? d : 0
+  } catch {
+    return null
+  }
+}
+
 export async function probeBasic(path: string): Promise<{ codec?: string; hasAlpha?: boolean; rotation?: number; hdr?: 'hlg' | 'pq' }> {
   const { stdout } = await execFileP(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_streams', path], { maxBuffer: 16 * 1024 * 1024 })
   const video = (JSON.parse(stdout).streams ?? []).find((s: any) => s.codec_type === 'video' && !s.disposition?.attached_pic)

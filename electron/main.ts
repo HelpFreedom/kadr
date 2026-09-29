@@ -22,6 +22,7 @@ import { registerModelIpc } from './models'
 import { sourceHdr, hdrLut, hdrFilter, fragmentMedia } from './hdr'
 import { atomicWrite, sweepPartSidecars } from './atomicWrite'
 import { beginSession, endSession, registerBackupIpc, writeBackup } from './backups'
+import { argvProject } from '@shared/argvProject'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -43,6 +44,23 @@ protocol.registerSchemesAsPrivileged([
 // (sweepStaleSessions matches helper processes by paths under userData) must
 // never reach the other instance's. Must run before anything reads the path.
 if (process.env.KADR_USER_DATA) app.setPath('userData', process.env.KADR_USER_DATA)
+
+// One editor per userData: two would write over each other's project, stores
+// and autosaves. The lock is keyed by the userData path (so a KADR_USER_DATA
+// sandbox runs next to a live Kadr) and is OS-level — it dies with the process.
+// A second launch hands its argv to the first and quits; a .kadr in it is
+// opened there through the unsaved question (App.tsx, onOpenProject).
+if (!app.requestSingleInstanceLock()) app.exit(0)
+/** a .kadr from the launch argv, handed to the page once it asks */
+let pendingOpen = argvProject(process.argv)
+app.on('second-instance', (_e, argv) => {
+  const path = argvProject(argv)
+  if (!win || win.isDestroyed()) { pendingOpen = path ?? pendingOpen; return }
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+  if (path) win.webContents.send('app:open-project', path)
+})
 
 // the discrete GPU when there is one (electron/gpu.ts) — before 'ready'
 applyGpuChoice()
@@ -657,6 +675,8 @@ function registerIpc() {
 
   ipcMain.on('media:token', (e) => { e.returnValue = MEDIA_TOKEN })
   ipcMain.on('app:close-guard', () => { closeGuard = true })
+  // the launch's own .kadr — handed out once (StrictMode asks twice in dev)
+  ipcMain.handle('app:argv-project', () => { const p = pendingOpen; pendingOpen = null; return p })
   ipcMain.on('app:close', () => {
     closeAllowed = true
     win?.close()

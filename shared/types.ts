@@ -1143,6 +1143,8 @@ export interface KadrApi {
   /** closing the window asks the page first: `cb` decides, then calls closeWindow() to go on */
   onCloseRequest(cb: () => void): () => void
   closeWindow(): void
+  /** a .kadr to open: the launch's own argv (once), then any a second launch hands over */
+  onOpenProject(cb: (path: string) => void): () => void
 
   /** App-wide JSON stores in userData (presets etc.) — survive any restart. */
   storageScan(projects: string[], open: StorageProject | null): Promise<StorageScan>

@@ -106,6 +106,12 @@ const api: KadrApi = {
     return () => ipcRenderer.removeListener('app:close-request', handler)
   },
   closeWindow: () => ipcRenderer.send('app:close'),
+  onOpenProject: (cb) => {
+    const handler = (_e: unknown, path: string) => cb(path)
+    ipcRenderer.on('app:open-project', handler)
+    void ipcRenderer.invoke('app:argv-project').then((p: string | null) => { if (p) cb(p) })
+    return () => ipcRenderer.removeListener('app:open-project', handler)
+  },
 
   storageScan: (projects, open) => ipcRenderer.invoke('storage:scan', projects, open),
   storagePrune: (req) => ipcRenderer.invoke('storage:prune', req),

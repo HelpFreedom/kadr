@@ -105,6 +105,12 @@ mixes audio and muxes/transcodes per preset.
   unresponsive one is not asked, so the window can always be closed.
   `kadrEditor.openProject(path)` asks too; scripts pass `{ force: true }`.
   Test: `node scripts/check-discard-guard.mjs`.
+  ONE EDITOR PER userData (`requestSingleInstanceLock`, taken right after
+  `KADR_USER_DATA` is applied — the lock is keyed by that path, so a sandbox
+  runs next to a live Kadr): a second launch quits and hands its argv over;
+  the first focuses and opens a `.kadr` from it through the same question
+  (`app:open-project`; the launch's own `.kadr` is fetched once over
+  `app:argv-project`). Test: `node scripts/check-argv-project.mjs`.
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
   render of a clip's source range, RAM-bounded chunks), `ExportMuxer`

@@ -218,6 +218,10 @@ export default function App() {
   useEffect(() => window.kadr.onCloseRequest(() => {
     void confirmDiscard().then((go) => go && window.kadr.closeWindow())
   }), [])
+  // a .kadr from the command line, or from a second launch (single instance)
+  useEffect(() => window.kadr.onOpenProject((path) => {
+    openProjectAt(path).catch((err) => logError('проект', `не удалось открыть ${path}`, err))
+  }), [])
   const dirty = savedProject !== null && project !== savedProject
   const undoLabel = useEditor((s) => s.past[s.past.length - 1]?.label)
   const redoLabel = useEditor((s) => s.future[0]?.label)

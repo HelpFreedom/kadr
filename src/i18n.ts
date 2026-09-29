@@ -644,7 +644,9 @@ const ru = {
   resolution: 'Разрешение',
   framerate: 'Частота кадров',
   duration: 'Длительность',
-  inOut: 'Вход/выход'
+  inOut: 'Вход/выход',
+  logStore: 'настройки',
+  storeWriteFail: 'не удалось сохранить на диск'
 }
 
 const en: typeof ru = {
@@ -1291,7 +1293,9 @@ const en: typeof ru = {
   resolution: 'Resolution',
   framerate: 'Frame rate',
   duration: 'Duration',
-  inOut: 'In/out'
+  inOut: 'In/out',
+  logStore: 'settings',
+  storeWriteFail: 'could not be saved to disk'
 }
 
 export type TKey = keyof typeof ru

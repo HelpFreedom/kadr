@@ -659,7 +659,11 @@ function registerIpc() {
   })
 
   ipcMain.handle('store:write', async (_e, name: string, data: unknown) => {
-    await atomicWrite(userStorePath(name), JSON.stringify(data, null, 1))
+    const p = userStorePath(name)
+    // the renderer logs this: it names the store's file, not the .part sidecar
+    await atomicWrite(p, JSON.stringify(data, null, 1)).catch((err: NodeJS.ErrnoException) => {
+      throw new Error(`${p}: ${err.code ?? err.message}`)
+    })
   })
 
   ipcMain.handle('media:open-dialog', async () => {

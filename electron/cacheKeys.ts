@@ -27,6 +27,11 @@ export function mediaCacheKey(
     .slice(0, 20)
 }
 
+/** a project's folder of backups (electron/backups.ts): BY PATH, never by name —
+    a user's projects are routinely all called "Untitled" (see storage.ts) */
+export const projectKey = (projectPath: string): string =>
+  createHash('sha1').update(projectPath).digest('hex').slice(0, 20)
+
 /** proxies: an alpha proxy is a different artefact (webm), so a different key;
     an HDR source's proxy is tone-mapped to SDR (shared/hdr.ts) — ':sdr' plus
     the conversion's generation, so neither a proxy built before that existed

@@ -20,7 +20,8 @@ import { registerFragmentIpc, cancelFragmentRenders, stopAllCaptures } from './f
 import { applyGpuChoice, registerGpuIpc } from './gpu'
 import { registerModelIpc } from './models'
 import { sourceHdr, hdrLut, hdrFilter, fragmentMedia } from './hdr'
-import { atomicWrite } from './atomicWrite'
+import { atomicWrite, sweepPartSidecars } from './atomicWrite'
+import { beginSession, endSession, registerBackupIpc, writeBackup } from './backups'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -284,7 +285,9 @@ app.whenReady().then(() => {
       return new Response('not found', { status: 404 })
     }
   })
+  beginSession()
   registerIpc()
+  registerBackupIpc()
   void pruneDecodedCache()
   void sweepPartFiles()
   registerClaudeIpc(() => win)
@@ -305,6 +308,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
+    endSession()   // a clean exit: no restore offer next time (a crash never gets here)
     app.quit()
     // an in-flight export/muxer or any stray handle must never keep a
     // windowless process alive — a lingering instance blocks the next
@@ -843,6 +847,8 @@ function registerIpc() {
   })
 
   ipcMain.handle('project:read', async (_e, path: string): Promise<Project> => {
+    // a save that died mid-write left its full-size sidecar next to the file
+    void sweepPartSidecars(dirname(path), basename(path) + '.part-')
     return JSON.parse(await fs.readFile(path, 'utf-8'))
   })
 
@@ -850,15 +856,12 @@ function registerIpc() {
     await atomicWrite(path, JSON.stringify(project, null, 1))
   })
 
-  // periodic safety net: <name>.autosave.kadr next to the saved project
-  // (Downloads for never-saved ones); atomic like every project write
+  // periodic safety net: a versioned backup in userData/backups (electron/backups.ts),
+  // and <name>.autosave.kadr next to a saved project for those who open it by hand
   ipcMain.handle('project:autosave', async (_e, project: Project, mainPath: string | null) => {
-    const dir = mainPath ? dirname(mainPath) : app.getPath('downloads')
-    const base = mainPath
-      ? basename(mainPath, '.kadr')
-      : (project.name || 'Untitled').replace(/[^\p{L}\p{N}._ -]/gu, '').trim() || 'Untitled'
-    const out = join(dir, `${base}.autosave.kadr`)
-    await atomicWrite(out, JSON.stringify(project, null, 1))
+    const json = JSON.stringify(project, null, 1)
+    const out = await writeBackup(json, mainPath, project)
+    if (mainPath) await atomicWrite(join(dirname(mainPath), `${basename(mainPath, '.kadr')}.autosave.kadr`), json)
     return out
   })
 

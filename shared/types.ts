@@ -970,9 +970,19 @@ export interface ProbeResult {
 
 /* ------------------------------ disk storage ------------------------------ */
 
+/** A backup written during a session that died, newer than its project file (electron/backups.ts). */
+export interface BackupOffer {
+  file: string
+  /** ms since the epoch */
+  time: number
+  /** the project it is a version of; null when it was never saved */
+  projectPath: string | null
+  name: string
+}
+
 export type StorageGroupId =
   | 'proxies' | 'decoded' | 'fragments' | 'ttsqcCache'
-  | 'reversed' | 'imported' | 'voiceRuns'
+  | 'reversed' | 'imported' | 'voiceRuns' | 'backups'
 
 /** A project, reduced to what identifies the files it owns on disk. */
 export interface StorageProject {
@@ -1124,7 +1134,12 @@ export interface KadrApi {
   readProject(path: string): Promise<Project>
   writeProject(path: string, project: Project): Promise<void>
   /** write <name>.autosave.kadr next to the project (atomic); returns path */
+  /** a backup version in userData/backups (+ <name>.autosave.kadr next to a saved project); resolves to the backup's path */
   autosaveProject(project: Project, mainPath: string | null): Promise<string>
+  /** after an unclean exit: the backup to offer (asked once per launch) */
+  backupOffer(): Promise<BackupOffer | null>
+  /** show a backup in the file manager (paths inside userData/backups only) */
+  revealBackup(file: string): Promise<void>
   /** closing the window asks the page first: `cb` decides, then calls closeWindow() to go on */
   onCloseRequest(cb: () => void): () => void
   closeWindow(): void

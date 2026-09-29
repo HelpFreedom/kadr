@@ -1,7 +1,7 @@
 import { app, ipcMain } from 'electron'
 import { promises as fs, statfsSync } from 'fs'
 import { join, basename, resolve, sep } from 'path'
-import { mediaCacheKey, proxySuffix, decodedSuffix } from './cacheKeys'
+import { mediaCacheKey, proxySuffix, decodedSuffix, projectKey } from './cacheKeys'
 import type {
   StorageScan, StorageGroup, StorageGroupId, StorageProject, StoragePruneRequest,
   StoragePruneResult
@@ -28,7 +28,7 @@ interface GroupDef {
   dir: () => string
   rebuildable: boolean
   /** how a file in this directory is tied back to a project */
-  match: 'key' | 'path' | 'prefix' | 'none'
+  match: 'key' | 'path' | 'prefix' | 'project' | 'none'
 }
 
 const GROUPS: GroupDef[] = [
@@ -38,7 +38,10 @@ const GROUPS: GroupDef[] = [
   { id: 'ttsqcCache', dir: homeCache, rebuildable: true, match: 'none' },
   { id: 'reversed', dir: () => join(app.getPath('userData'), 'reversed'), rebuildable: false, match: 'path' },
   { id: 'imported', dir: () => join(app.getPath('userData'), 'imported'), rebuildable: false, match: 'path' },
-  { id: 'voiceRuns', dir: () => join(app.getPath('userData'), 'ttsqc-runs'), rebuildable: false, match: 'path' }
+  { id: 'voiceRuns', dir: () => join(app.getPath('userData'), 'ttsqc-runs'), rebuildable: false, match: 'path' },
+  // one folder per project, named projectKey(path) (electron/backups.ts); a never-saved
+  // project's folder (unsaved-<id>) belongs to no file and shows as unattributed
+  { id: 'backups', dir: () => join(app.getPath('userData'), 'backups'), rebuildable: false, match: 'project' }
 ]
 
 /** Every project we were told about, reduced to what identifies its files. */
@@ -153,6 +156,8 @@ function ownersOf(
     } else if (def.match === 'prefix') {
       // fragment renders are named "<fragmentId>-<hash>-q2[-a].<ext>"
       mine = k.fragmentIds.some((id) => entry.name.startsWith(id + '-'))
+    } else if (def.match === 'project') {
+      mine = !!k.path && entry.name === projectKey(resolve(k.path))
     } else if (def.match === 'path') {
       mine = k.assets.some((a) => a === entry.path || inside(entry.path, a)) ||
              k.runDirs.some((r) => resolve(r) === resolve(entry.path))

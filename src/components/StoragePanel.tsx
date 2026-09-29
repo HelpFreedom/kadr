@@ -12,7 +12,8 @@ const NAME: Record<StorageGroupId, TKey> = {
   ttsqcCache: 'stTtsqcCache',
   reversed: 'stReversed',
   imported: 'stImported',
-  voiceRuns: 'stVoiceRuns'
+  voiceRuns: 'stVoiceRuns',
+  backups: 'stBackups'
 }
 const ABOUT: Record<StorageGroupId, TKey> = {
   proxies: 'stProxiesAbout',
@@ -21,7 +22,8 @@ const ABOUT: Record<StorageGroupId, TKey> = {
   ttsqcCache: 'stTtsqcCacheAbout',
   reversed: 'stReversedAbout',
   imported: 'stImportedAbout',
-  voiceRuns: 'stVoiceRunsAbout'
+  voiceRuns: 'stVoiceRunsAbout',
+  backups: 'stBackupsAbout'
 }
 
 /** bytes → «1.4 ГБ»: the number is for a human, the unit comes from i18n */

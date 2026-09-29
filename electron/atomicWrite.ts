@@ -1,4 +1,24 @@
 import { promises as fs } from 'fs'
+import { join } from 'path'
+
+const alive = (pid: number) => {
+  try { process.kill(pid, 0); return true } catch (err) { return (err as NodeJS.ErrnoException).code === 'EPERM' }
+}
+
+/**
+ * Remove the `<name>.part-<pid>` sidecars in `dir` (starting with `prefix`) that
+ * a killed process left behind — a crash mid-write leaves one, full size, next
+ * to the file it was replacing. A sidecar whose writer is still alive is kept.
+ */
+export async function sweepPartSidecars(dir: string, prefix = ''): Promise<void> {
+  let names: string[]
+  try { names = await fs.readdir(dir) } catch { return }
+  for (const n of names) {
+    const m = /\.part-(\d+)$/.exec(n)
+    if (!m || !n.startsWith(prefix) || alive(Number(m[1]))) continue
+    await fs.rm(join(dir, n), { force: true }).catch(() => {})
+  }
+}
 
 const RETRY = new Set(['EPERM', 'EACCES', 'EBUSY'])
 

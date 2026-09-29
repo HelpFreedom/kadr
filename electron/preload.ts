@@ -97,6 +97,8 @@ const api: KadrApi = {
   readProject: (path) => ipcRenderer.invoke('project:read', path),
   writeProject: (path, project) => ipcRenderer.invoke('project:write', path, project),
   autosaveProject: (project, mainPath) => ipcRenderer.invoke('project:autosave', project, mainPath),
+  backupOffer: () => ipcRenderer.invoke('backup:offer'),
+  revealBackup: (file) => ipcRenderer.invoke('backup:reveal', file),
   onCloseRequest: (cb) => {
     const handler = () => cb()
     ipcRenderer.on('app:close-request', handler)

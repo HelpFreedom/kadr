@@ -28,7 +28,7 @@ import { syncProjectFragments } from './engine/fragments'
 import { useT, type TKey } from './i18n'
 import { create } from 'zustand'
 import { baseOf } from '@shared/paths'
-import type { Project } from '@shared/types'
+import type { BackupOffer, Project } from '@shared/types'
 import { logError, useLog } from '@/engine/log'
 
 // Save feedback: which project snapshot is on disk (the dirty dot) and a
@@ -117,6 +117,48 @@ function DiscardPrompt() {
       }
     >
       <p>{t('discardBody')}</p>
+    </Modal>
+  )
+}
+
+// After an unclean exit main offers the newest backup of the session that died
+// (electron/backups.ts). Restore opens it as a copy — no path, so it is unsaved
+// and the next Ctrl+S asks where; the backup itself is never written over.
+// Asked once per page: main hands the offer out only once, and StrictMode runs
+// the effect twice in dev — a second ask would answer null over the first.
+let offerAsk: Promise<BackupOffer | null> | null = null
+function RestorePrompt() {
+  const t = useT()
+  const [offer, setOffer] = useState<BackupOffer | null>(null)
+  useEffect(() => { void (offerAsk ??= window.kadr.backupOffer()).then(setOffer, () => {}) }, [])
+  if (!offer) return null
+  const restore = async () => {
+    setOffer(null)
+    if (!(await confirmDiscard())) return
+    try {
+      useEditor.getState().setProject(await window.kadr.readProject(offer.file), null)
+    } catch (err) {
+      logError('восстановление', `не удалось открыть ${offer.file}`, err)
+    }
+  }
+  return (
+    <Modal
+      title={t('restoreTitle')}
+      onClose={() => setOffer(null)}
+      actions={
+        <>
+          <button onClick={() => setOffer(null)} data-act="restore-dismiss">{t('restoreDismiss')}</button>
+          <button onClick={() => void window.kadr.revealBackup(offer.file)} data-act="restore-folder">{t('restoreFolder')}</button>
+          <button className="primary" onClick={() => void restore()} data-act="restore-open">{t('restoreOpen')}</button>
+        </>
+      }
+    >
+      <p>{t('restoreBody')}</p>
+      <p>
+        <b>{offer.name}</b> · {new Date(offer.time).toLocaleString()}
+        <br />
+        {offer.projectPath ?? t('restoreUnsaved')}
+      </p>
     </Modal>
   )
 }
@@ -442,6 +484,7 @@ export default function App() {
       <SpeakDialog />
       <DefectsDialog />
       <DiscardPrompt />
+      <RestorePrompt />
       {claudeOpen && <ClaudePanel onClose={() => setClaudeOpen(false)} />}
       {debugOpen && <DebugPanel onClose={() => setDebugOpen(false)} />}
       {storageOpen && <StoragePanel onClose={() => setStorageOpen(false)} />}

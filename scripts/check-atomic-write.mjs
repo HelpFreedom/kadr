@@ -6,6 +6,7 @@
 // mid-write left a torn or empty project. Cost: the user's only copy destroyed.
 // Run: node scripts/check-atomic-write.mjs
 import { readFileSync, writeFileSync, mkdtempSync, readdirSync, chmodSync, mkdirSync, rmSync } from 'fs'
+import { spawnSync } from 'child_process'
 import { tmpdir } from 'os'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
@@ -68,6 +69,18 @@ if (atomicWrite) {
   try { await atomicWrite(join(dir, 'nope', 'x.kadr'), 'x') } catch (e) { err2 = e }
   check('a missing folder rejects', err2?.code === 'ENOENT', String(err2?.code ?? err2))
 }
+
+// a crash mid-write leaves `<path>.part-<pid>`; the sweep takes a dead writer's, never a live one's
+if (mod.sweepPartSidecars) {
+  const sdir = join(dir, 'sweep')
+  mkdirSync(sdir)
+  const dead = spawnSync(process.execPath, ['-e', '0']).pid   // exited: its pid is free
+  for (const n of [`p.kadr.part-${dead}`, `p.kadr.part-${process.pid}`, `other.kadr.part-${dead}`, 'p.kadr']) writeFileSync(join(sdir, n), 'x')
+  await mod.sweepPartSidecars(sdir, 'p.kadr')
+  const left = readdirSync(sdir).sort().join()
+  check('the sweep drops a dead writer\'s sidecar and keeps a live one\'s and other files\'',
+    left === [`other.kadr.part-${dead}`, 'p.kadr', `p.kadr.part-${process.pid}`].sort().join(), left)
+} else check('sweepPartSidecars is exported', false)
 
 rmSync(dir, { recursive: true, force: true })
 console.log(fails ? `\n${fails} FAILED` : '\nall passed')

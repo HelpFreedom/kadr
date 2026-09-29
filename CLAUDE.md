@@ -546,8 +546,24 @@ mixes audio and muxes/transcodes per preset.
   a `<video>` over the preview, translucent or in difference mode, never in
   snapshots or exports; selecting a fragment (to drag its sliders) does not
   steal it.
-- `src/engine/autosave.ts` — 5-minute autosave with `activity` flags
-  (paused during export and Claude sessions).
+- `src/engine/autosave.ts` + `electron/backups.ts` + `shared/backups.ts` —
+  autosave every 5 minutes and after 25 history moves, skipped while an
+  export or the voice-over check runs (`activity` flags). NOT during a Claude
+  session: every edit replaces the project object, so a tick never sees half
+  of one. Each tick writes a VERSION to
+  `userData/backups/<projectKey(path) | unsaved-<id>>/<ISO time>.kadr`
+  (+ `source.json` naming the project file) — newest 10, at most 500 MB per
+  project, the newest always kept — and `<name>.autosave.kadr` next to a
+  saved project (never-saved ones no longer land in Downloads).
+  `session.lock` is written at startup and removed in window-all-closed; a
+  lock found at the next start means Kadr died, and the page is offered the
+  newest backup WRITTEN DURING THAT SESSION and newer than its project file
+  (Restore opens it as an unsaved copy). Only that session's backups: an
+  older one was there to offer before, and would come back after every kill.
+  The offer is handed out once per launch, so the page memoizes its ask
+  (StrictMode's double effect otherwise answered null over it). Opening a
+  project sweeps `<path>.part-<pid>` sidecars of dead writers left by a
+  crash mid-save. Test: `node scripts/check-backups.mjs`.
 - `src/engine/chime.ts` — short WebAudio two-note signal when a render
   finishes (wired to export progress in `src/main.tsx`).
 - Timeline markers live in `project.markers` (`addMarker`/`moveMarker`/
@@ -644,7 +660,8 @@ mixes audio and muxes/transcodes per preset.
   fragment render are named after their source (a hash of path+size+mtime),
   so deleting one costs time and nothing else; a reversed clip, a download
   and a voice-over run are stored BY PATH in the project and cannot be
-  derived again. The key formula lives in its own file because a second
+  derived again; backups are REFERENCED too (user data), one folder per
+  project named `projectKey(path)`. The key formula lives in its own file because a second
   copy would drift, and a drifted formula aims a delete button at the
   wrong file. Projects are keyed BY PATH, never by name. `storage:prune`
   FAILS CLOSED: without an explicit `confirm: true` it only counts, so a

@@ -20,19 +20,28 @@ import type {
 } from '@shared/types'
 import { spliceForward, toAnalysisTime, type SpliceUnitMap } from '@shared/voiceMap'
 import { FFMPEG, FFPROBE, audioCodecArgs } from './ffmpeg'
+import { speechPython } from './transcribe'
+import { pyLabel, detectorPython, type PyCmd } from './speechPython'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 
 /** python 3.11+ with torch and faster-whisper. Distributions still ship 3.9
     as `python3`, which cannot even import the package (tomllib), and the wheels
     are usually in a venv — hence the setting (voice-over settings → «Python»)
-    and KADR_TTSQC_PYTHON. This default is only the last resort. */
+    and KADR_TTSQC_PYTHON. Without either, the interpreter speech-to-text
+    resolved if it is >= 3.11 and imports torch, else this default. */
 const DEFAULT_PYTHON = 'python3.11'
 const CACHE_DAYS = 14
 
 const driver = () => join(app.getAppPath(), 'scripts', 'ttsqc_run.py')
-const pythonFor = (want?: string) =>
-  (want && want.trim()) || process.env.KADR_TTSQC_PYTHON || DEFAULT_PYTHON
+let detector: Promise<PyCmd> | null = null
+async function pythonFor(want?: string): Promise<PyCmd> {
+  const set = (want && want.trim()) || process.env.KADR_TTSQC_PYTHON
+  if (set) return { command: set, args: [] }
+  // probed once per launch (importing torch takes seconds)
+  detector ??= detectorPython(process.env, speechPython, DEFAULT_PYTHON)
+  return detector
+}
 
 /** One run directory per (audio, script) pair, so two analyses never land on
     top of each other — the trap ttsqc's own _protect() exists for. */
@@ -56,8 +65,8 @@ interface RunOpts {
 /** Spawn the driver and parse its NDJSON. Resolves with the last `done`-ish
     line's payload; rejects with stderr on a non-zero exit. */
 function runDriver(opts: RunOpts): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const py = spawn(pythonFor(opts.python), [driver(), ...opts.args], {
+  return pythonFor(opts.python).then((python) => new Promise((resolve, reject) => {
+    const py = spawn(python.command, [...python.args, driver(), ...opts.args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, KADR_TTSQC_HOME: join(app.getAppPath(), 'python') }
     })
@@ -83,7 +92,7 @@ function runDriver(opts: RunOpts): Promise<void> {
       else if (code === 0) resolve()
       else reject(new Error(err.slice(-800).trim() || `ttsqc_run.py exited ${code}`))
     })
-  })
+  }))
 }
 
 async function selfTest(python?: string): Promise<VoiceSelfTest> {
@@ -95,13 +104,13 @@ async function selfTest(python?: string): Promise<VoiceSelfTest> {
     // exit code 2 is the documented "environment is not ready" answer, and the
     // report it printed on stdout is exactly what the user needs to see
     if (!box.report) {
-      return { ok: false, python: pythonFor(python), problems: [String((e as Error).message)] }
+      return { ok: false, python: pyLabel(await pythonFor(python)), problems: [String((e as Error).message)] }
     }
   }
   const r = (box.report ?? {}) as Record<string, unknown>
   return {
     ok: !!r.ok,
-    python: String(r.executable ?? pythonFor(python)),
+    python: String(r.executable ?? pyLabel(await pythonFor(python))),
     problems: (r.problems as string[]) ?? [],
     cuda: r.cuda as VoiceSelfTest['cuda'],
     modules: r.modules as Record<string, string | null>,

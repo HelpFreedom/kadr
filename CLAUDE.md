@@ -51,7 +51,7 @@ mixes audio and muxes/transcodes per preset.
 
 ## Requirements
 - Node.js ≥ 20, system `ffmpeg`/`ffprobe` in PATH
-- Optional: `python3` + `faster-whisper` (speech-to-text), the `claude`
+- Optional: Python + `faster-whisper` (speech-to-text), the `claude`
   CLI (embedded AI assistant), network access for the one-time Remotion
   workspace install
 - Optional for voice-over: an ElevenLabs API key (entered in the app,
@@ -164,7 +164,18 @@ mixes audio and muxes/transcodes per preset.
 - `electron/transcribe.ts` + `scripts/transcribe.py` — faster-whisper
   runner (VAD, anti-hallucination thresholds and post-filters, NDJSON
   segments with word timestamps); audio comes from an ExportMuxer mixdown
-  (WYSIWYG).
+  (WYSIWYG). THE INTERPRETER IS RESOLVED, never a bare `python3` — on a
+  stock Windows that name is the Microsoft Store stub. `electron/speechPython.ts`
+  tries `KADR_PYTHON`, the app's own `.venv`, `py -3` (Windows), `python`,
+  `python3` and takes the first that imports faster_whisper (once per launch;
+  a miss names every candidate and why). With its own setting empty, the detector
+  takes that interpreter only if it is ≥ 3.11 and imports torch, else
+  `python3.11` (`detectorPython`). Test:
+  `node scripts/check-python-resolve.mjs`. The runner uses CUDA/float16 when
+  ctranslate2 sees a GPU (`KADR_WHISPER_DEVICE=cpu|cuda|auto`; on Windows the
+  pip `nvidia-*` wheels' DLL folders are registered) and redoes the job on
+  the CPU if the GPU load or its first kernel fails before any segment went
+  out; the session log names the interpreter and the device.
 - `shared/envelope.ts` + `electron/envelope.ts` — loudness envelope of a
   timeline range (Blender "Bake Sound to F-Curves" semantics: channels
   summed, |s|, one-pole follower with 5 ms attack / 200 ms release, frame

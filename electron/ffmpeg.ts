@@ -853,6 +853,9 @@ export class ExportMuxer {
     } else if (hasVideo) {
       args.push('-an')
     }
+    // moov before mdat, so a web player starts before the whole file is in.
+    // Keyed on the file, not preset.container: mixdownWav says 'mp4' and writes .wav
+    if (/\.(mp4|mov|m4v|m4a)$/i.test(job.outputPath)) args.push('-movflags', '+faststart')
     args.push('-t', String(job.duration), job.outputPath)
 
     return new Promise((resolve, reject) => {

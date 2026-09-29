@@ -1,8 +1,7 @@
 ---
-name: kadr-music
-description: Music in a Kadr project — the music map (kadr_beats: meter, the "one" of every bar, sections, pauses, kick offset), cutting and animating to a bar hierarchy (accentAt/useAccent/breathAt in a fragment's audio.ts), and sound design (kadr_sounds, kadr_sound_add; mechanical sounds under songs). Use together with kadr-editor whenever the open Kadr project has music or the user wants anything timed to a beat; combine with kadr-motion and kadr-3d as the project needs.
+name: music
+description: Music in a Kadr project — the music map (kadr_beats: meter, the "one" of every bar, sections, pauses, kick offset), cutting and animating to a bar hierarchy (accentAt/useAccent/breathAt in a fragment's audio.ts), and sound design (kadr_sounds, kadr_sound_add; mechanical sounds under songs). Use together with kadr:editor whenever the open Kadr project has music or the user wants anything timed to a beat; combine with kadr:motion and kadr:3d as the project needs.
 ---
-<!-- managed by Kadr: rewritten when Kadr updates (electron/skills/) -->
 
 # Music, rhythm and sound in Kadr
 
@@ -66,7 +65,7 @@ const glow = 0.25 + 0.35 * breathAt(frame, fps) + 0.4 * a.hit
 
 Declare the events in `inspect.events` (`{t, kind: 'big'|'small'}`), so
 `kadr_check` can tell you which big event missed its "one", which event is off
-the grid by more than 40 ms, and which sits in a pause (kadr-motion).
+the grid by more than 40 ms, and which sits in a pause (kadr:motion).
 
 ## 3. Cutting to music
 

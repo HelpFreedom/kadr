@@ -10,6 +10,7 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import type { IPty } from 'node-pty'
+import { claudeArgs, removeManagedSkills } from './claudeArgs'
 
 // The session inherits this process's environment MINUS the markers of any
 // Claude session that launched the editor (see SESSION_MARKERS). Anything extra the
@@ -36,8 +37,8 @@ const SYSTEM_HINT =
   'can go straight into this project: import via kadr_eval (probeMedia → addAsset → ' +
   'insertClipFromAsset) or copy them into a fragment folder for use inside Remotion ' +
   'compositions. ' +
-  'Kadr\'s skills compose: load kadr-editor, plus kadr-music when there is music, kadr-motion ' +
-  'for titles/captions/fragments and kadr-3d for 3D — whichever this project needs. Before a ' +
+  'Kadr\'s skills compose: load kadr:editor, plus kadr:music when there is music, kadr:motion ' +
+  'for titles/captions/fragments and kadr:3d for 3D — whichever this project needs. Before a ' +
   'bigger build, ask about style, rhythm, amount of text and sound, and show a plan; never ' +
   'export unless asked.'
 
@@ -301,12 +302,15 @@ async function spawnSession(
     }, null, 1)
   )
 
-  const args = cfg.args ?? [
-    '--mcp-config', mcpCfgPath,
-    '--append-system-prompt', SYSTEM_HINT
-  ]
   let dir = cwd || app.getPath('home')
   try { await fs.access(dir) } catch { dir = app.getPath('home') }
+  if (cfg.args) console.warn('[claude] claude-env.json args override: no --plugin-dir, so no kadr: skills')
+  const args = claudeArgs({
+    mcpConfig: mcpCfgPath,
+    pluginDir: join(app.getAppPath(), 'electron', 'claude-plugin'),
+    systemHint: SYSTEM_HINT,
+    override: cfg.args
+  })
 
   try {
     // lazy import: node-pty is native — a load failure must not break the app
@@ -402,61 +406,12 @@ function closeSession(): Promise<void> {
   return job
 }
 
-/** the line every skill Kadr writes carries — only such folders are ever removed */
-const SKILL_MARK = '<!-- managed by Kadr'
-
-/**
- * Keep Kadr's agent skills fresh in the user's skills directory — the
- * embedded claude discovers them from ~/.claude/skills. They are COMPOSABLE:
- * kadr-editor is the base (LOOK/ACT/VERIFY, the interface, fragments, voice),
- * kadr-music, kadr-motion and kadr-3d carry the rules of particular kinds of
- * work, and a project loads the ones it needs — a plain cut none of them, a
- * product film to a song all three. (One file used to hold everything, and
- * the rules of one project — 3D, bars — read as law in every other.) Scoped
- * by their descriptions to sessions where the kadr_* tools exist, so they stay
- * dormant in unrelated claude sessions and never collide with a separately
- * installed remotion skill.
- *
- * Written only when the content changed. A kadr-* folder whose SKILL.md
- * carries Kadr's mark but is no longer shipped is removed; a folder without
- * the mark is the user's own and is never touched.
- */
-async function syncSkill(): Promise<void> {
-  try {
-    const srcDir = join(app.getAppPath(), 'electron', 'skills')
-    const root = join(app.getPath('home'), '.claude', 'skills')
-    const shipped = new Set<string>()
-    for (const file of (await fs.readdir(srcDir)).filter((f) => f.endsWith('.md')).sort()) {
-      const src = await fs.readFile(join(srcDir, file), 'utf8')
-      const name = src.match(/^---\n[\s\S]*?^name:\s*([a-z0-9-]+)\s*$/m)?.[1]
-      if (!name || !src.includes(SKILL_MARK)) {
-        console.warn(`[claude] skill ${file}: no name in its front matter or no managed mark — skipped`)
-        continue
-      }
-      shipped.add(name)
-      const dir = join(root, name)
-      const dst = join(dir, 'SKILL.md')
-      const cur = await fs.readFile(dst, 'utf8').catch(() => null)
-      if (cur === src) continue
-      await fs.mkdir(dir, { recursive: true })
-      const tmp = `${dst}.part-${process.pid}`
-      await fs.writeFile(tmp, src)
-      await fs.rename(tmp, dst)
-    }
-    if (!shipped.size) return // nothing read: never take this as "remove everything"
-    for (const d of await fs.readdir(root, { withFileTypes: true }).catch(() => [])) {
-      if (!d.isDirectory() || !d.name.startsWith('kadr-') || shipped.has(d.name)) continue
-      const md = await fs.readFile(join(root, d.name, 'SKILL.md'), 'utf8').catch(() => '')
-      if (md.includes(SKILL_MARK)) await fs.rm(join(root, d.name), { recursive: true, force: true })
-    }
-  } catch (err) {
-    console.warn('[claude] skill sync failed:', err)
-  }
-}
-
 export function registerClaudeIpc(getWin: () => BrowserWindow | null) {
   void sweepStaleSessions() // leftovers from a hard-killed previous run
-  void syncSkill()
+  // skills load per session through --plugin-dir; drop copies older versions put in ~/.claude/skills
+  void removeManagedSkills(join(app.getPath('home'), '.claude', 'skills'))
+    .then((r) => { if (r.length) console.log(`[claude] removed global skill copies: ${r.join(', ')}`) })
+    .catch((err) => console.warn('[claude] skill cleanup failed:', err))
   ipcMain.handle('claude:open', (_e, cols: number, rows: number, cwd: string | null) => {
     const win = getWin()
     if (!win) return { ok: false, error: 'no window' }

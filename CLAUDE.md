@@ -141,13 +141,19 @@ mixes audio and muxes/transcodes per preset.
   send the request — and a flat refusal of any request carrying an `Origin`.
   The token reaches the MCP server as argv[3] of the generated config; the
   liveness ping on `GET /` stays open.
-  AGENT SKILLS are composable: `electron/skills/*.md` are synced at startup
-  to `~/.claude/skills/<name>/SKILL.md` — `kadr-editor` (the base: LOOK →
-  ACT → VERIFY, the interface, fragments, voice), `kadr-music`,
-  `kadr-motion`, `kadr-3d`, loaded as a project needs them (the system hint
-  says so); their rules are defaults. Every file carries a
-  `<!-- managed by Kadr` mark: a `kadr-*` folder with it that is no longer
-  shipped is removed, one without it (the user's own) never is.
+  AGENT SKILLS are composable and load PER SESSION: `electron/claude-plugin`
+  is a plugin named `kadr` that the panel's claude gets with `--plugin-dir`
+  (args built by the pure `claudeArgs` in `electron/claudeArgs.ts`, test
+  `node scripts/check-claude-args.mjs`) — `kadr:editor` (the base: LOOK →
+  ACT → VERIFY, the interface, fragments, voice), `kadr:music`,
+  `kadr:motion`, `kadr:3d`, loaded as a project needs them (the system hint
+  says so); their rules are defaults. They used to be copied into
+  `~/.claude/skills`, which listed them in EVERY claude session on the
+  machine; at startup `removeManagedSkills` deletes the `kadr-*` copies
+  carrying the old `<!-- managed by Kadr` mark, never a folder without it
+  (the user's own). The plugin's files are LF (`.gitattributes`): the old
+  front-matter regex skipped every skill on a CRLF checkout. An `args`
+  override in claude-env.json replaces the flag too (no skills).
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
   via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
   kadr_snapshot / kadr_sheet / kadr_export / kadr_transcribe /

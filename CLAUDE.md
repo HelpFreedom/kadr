@@ -232,7 +232,14 @@ mixes audio and muxes/transcodes per preset.
   delays by its look-ahead (239 samples at 48 kHz / 5 ms) and never flushes
   it, so the chain pads 239 samples in front and trims them after — bit
   identical and the same length below the limit. Analysis mixdowns pass
-  `master: false`.
+  `master: false`. THE PREVIEW IS LIMITED THE SAME WAY: `shared/previewLimiter.ts`
+  ports alimiter (n7.1, asc and auto-level off) line by line and runs as an
+  AudioWorklet between the preview's master and its analyser, so the meter
+  and `audioStats().peakDb` read after it; `useSettings.previewLimiter`
+  (default on) takes it out. Bit-identical to ffmpeg's on the same float
+  input at 48 and 44.1 kHz. Live it cannot trim its look-ahead: preview audio
+  runs 5 ms behind the picture, far under the player's resync tolerance.
+  Test: `node scripts/check-preview-limiter.mjs`.
 - `electron/fragments.ts` — Remotion workspace (`~/kadr-fragments`):
   scaffold, vite dev server (watchdogged), fragment create/delete,
   `remotion render` once per content hash at near-lossless settings

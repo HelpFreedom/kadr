@@ -289,15 +289,23 @@ interface SettingsState {
   trackH: number
   /** clips, the range and markers snap to detected beats (default on) */
   snapBeats: boolean
+  /** the preview's master is limited at −1 dBFS like the export (default on; no settings row yet) */
+  previewLimiter: boolean
   setLang(l: 'ru' | 'en'): void
   setTrackH(h: number): void
   setSnapBeats(v: boolean): void
+  setPreviewLimiter(v: boolean): void
 }
 
 export const useSettings = create<SettingsState>((set) => ({
   lang: (localStorage.getItem('kadr.lang') as 'ru' | 'en') || 'ru',
   trackH: Math.min(140, Math.max(32, Number(localStorage.getItem('kadr.trackh')) || 56)),
   snapBeats: localStorage.getItem('kadr.snapBeats') !== '0',
+  previewLimiter: localStorage.getItem('kadr.previewLimiter') !== '0',
+  setPreviewLimiter: (previewLimiter) => {
+    localStorage.setItem('kadr.previewLimiter', previewLimiter ? '1' : '0')
+    set({ previewLimiter })
+  },
   setLang: (lang) => {
     localStorage.setItem('kadr.lang', lang)
     set({ lang })

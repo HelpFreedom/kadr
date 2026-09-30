@@ -63,9 +63,8 @@ function check(name, cond, extra = '') {
 const S = 'window.kadrEditor.useEditor.getState()'
 
 const clipsOpen = await ed.ev(`${S}.project.tracks.reduce((n, t) => n + t.clips.length, 0)`)
-if (clipsOpen && process.env.KADR_E2E_FORCE !== '1') {
-  console.log(`SKIP  an open project has ${clipsOpen} clips; this suite replaces it (KADR_E2E_FORCE=1 to run anyway)`)
-  ed.close()
+if (clipsOpen > 0 && !process.env.KADR_E2E_FORCE) {
+  console.log(`SKIP  e2e53 replaces the open project, and it has ${clipsOpen} clip(s) — save it and open an empty project (or set KADR_E2E_FORCE=1)`)
   process.exit(0)
 }
 

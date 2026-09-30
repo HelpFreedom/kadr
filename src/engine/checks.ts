@@ -15,6 +15,7 @@ import { useEditor } from '@/state/store'
 import { evalAnim } from './anim'
 import { framePixels } from './snapshot'
 import { logInfo } from './log'
+import { pastSourceEnd } from './timelineMath'
 
 /** The limits, named. Each is a rule a reviewer would apply by eye. */
 export const CHECK_LIMITS = {
@@ -49,7 +50,7 @@ export type CheckKind =
   | 'inspectError' | 'noBeats'
   | 'offBeat' | 'bigOffDownbeat' | 'emptyDownbeats' | 'eventInPause'
   | 'textShort' | 'textConcurrent' | 'textOverlap' | 'textMoving' | 'contrast'
-  | 'seam' | 'cameraJerk' | 'collision' | 'contact'
+  | 'seam' | 'cameraJerk' | 'collision' | 'contact' | 'sourceEnd'
 
 export interface CheckIssue {
   kind: CheckKind
@@ -501,6 +502,17 @@ export async function runChecks(opts: { clipIds?: string[]; pixels?: boolean; co
               message: `${p.pair} проходят друг сквозь друга ${fmt(a)}${b && b - a > 0.05 ? '–' + fmt(b) : ''}` })
           }
         }
+      }
+    }
+
+    // media clips that start past the end of their source (see pastSourceEnd)
+    for (const track of project.tracks) {
+      for (const clip of track.clips) {
+        if (!clip.assetId || !want(clip)) continue
+        const asset = project.assets.find((a) => a.id === clip.assetId)
+        if (!asset || !pastSourceEnd(clip, asset, project.fps)) continue
+        issues.push({ kind: 'sourceEnd', level: 'warn', t: clip.start, end: clip.start + clip.duration, clipId: clip.id,
+          message: `клип начинается за концом исходника: вход ${clip.inPoint.toFixed(2)} с, длина файла ${asset.duration.toFixed(2)} с` })
       }
     }
 

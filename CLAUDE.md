@@ -503,7 +503,11 @@ mixes audio and muxes/transcodes per preset.
   flagged accepted cameras) on samples kept to 1e-6. Contrast and seams read
   real pixels; collisions play the fragment frame by frame (`?collide=1`)
   and test the kit's parts with three-mesh-bvh (both geometries need an
-  index).
+  index). One check is not about fragments: `sourceEnd` warns about ANY media
+  clip whose in-point is at or past the end of its source (`pastSourceEnd` in
+  timelineMath.ts; the loop period collapses to 50 ms, the clip freezes and
+  goes silent). The timeline marks such a clip itself, since the «Проверка»
+  button only appears when the project has fragments.
 - 3D (`electron/models.ts` → `kadr-lib/models`): STL, 3MF (build items,
   components in other package files, units — without them a 150 mm part
   came out 2 mm), OBJ, glTF, STEP via occt-import-js; Z-up → Y-up, welding,

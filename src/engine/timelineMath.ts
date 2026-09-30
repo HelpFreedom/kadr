@@ -2,7 +2,7 @@
 // plain node (scripts/check-timeline.mjs): the waveform's per-pixel peaks and
 // the overlap zones of a track. Both were rewritten for speed on a 1124-clip,
 // 19-minute project, and both must give EXACTLY what the old, slow code gave.
-import type { Clip } from '@shared/types'
+import type { Clip, MediaAsset } from '@shared/types'
 
 /** A waveform as the timeline draws it: peak and RMS bins (0..255) at `rate` per second. */
 export interface WaveBins {
@@ -119,4 +119,15 @@ export function trackOverlaps(clips: Clip[]) {
     groupEnd = Math.max(groupEnd, b.start + b.duration)
   }
   return { zones, joints }
+}
+
+/**
+ * A media clip whose in-point lies at or past the end of its source (within a
+ * frame). The loop period then collapses to 50 ms past the last frame: the
+ * picture freezes or breaks and the sound goes quiet. Marked on the clip and
+ * reported by the checks (kind 'sourceEnd').
+ */
+export function pastSourceEnd(clip: Clip, asset: MediaAsset | undefined, fps: number): boolean {
+  if (!asset || asset.kind === 'image' || !(asset.duration > 0)) return false
+  return clip.inPoint >= asset.duration - 1 / Math.max(1, fps)
 }

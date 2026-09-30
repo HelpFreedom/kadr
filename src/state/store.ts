@@ -173,6 +173,7 @@ export function sanitizeProject(p: Project): Project {
       c.transform = { ...newClipDefaults().transform, ...(c.transform ?? {}) }
       c.gain = anim(c.gain, 1)
       c.effects ??= []
+      for (const e of c.effects) e.params ??= {}
       if (c.audioBake !== undefined && !(c.audioBake && typeof c.audioBake.hash === 'string' &&
           typeof c.audioBake.source === 'string')) delete c.audioBake
       forEachAnim(c, (a) => anim(a, Number.isFinite((a as Anim)?.value) ? (a as Anim).value : 0))
@@ -181,7 +182,7 @@ export function sanitizeProject(p: Project): Project {
   return p
 }
 
-/** All animatable scalars of a clip (transform, gain, mask, shape). */
+/** All animatable scalars of a clip (transform, gain, mask, shape, effect params). */
 export function forEachAnim(c: Clip, fn: (a: Anim) => Anim) {
   const tr = c.transform
   c.transform = {
@@ -212,6 +213,15 @@ export function forEachAnim(c: Clip, fn: (a: Anim) => Anim) {
       cx: fn(s.cx), cy: fn(s.cy),
       w: fn(s.w), h: fn(s.h),
       featherIn: fn(s.featherIn), featherOut: fn(s.featherOut)
+    }))
+  }
+  // effect params: numbers (bare or Anim) are animatable, colours are not —
+  // so splits, trims, speed changes and loading treat them like the transform
+  if (c.effects) {
+    c.effects = c.effects.map((e) => ({
+      ...e,
+      params: Object.fromEntries(Object.entries(e.params ?? {}).map(([k, v]) =>
+        [k, typeof v === 'string' ? v : fn(typeof v === 'number' ? { value: v } : v)]))
     }))
   }
 }

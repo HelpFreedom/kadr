@@ -37,7 +37,8 @@ const SYSTEM_HINT =
   'insertClipFromAsset) or copy them into a fragment folder for use inside Remotion ' +
   'compositions. ' +
   'Kadr\'s skills compose: load kadr-editor, plus kadr-music when there is music, kadr-motion ' +
-  'for titles/captions/fragments and kadr-3d for 3D — whichever this project needs. Before a ' +
+  'for titles/captions/fragments, kadr-3d for 3D and kadr-effects for per-clip effects (keying, ' +
+  'grading, stylize) — whichever this project needs. Before a ' +
   'bigger build, ask about style, rhythm, amount of text and sound, and show a plan; never ' +
   'export unless asked.'
 
@@ -409,7 +410,7 @@ const SKILL_MARK = '<!-- managed by Kadr'
  * Keep Kadr's agent skills fresh in the user's skills directory — the
  * embedded claude discovers them from ~/.claude/skills. They are COMPOSABLE:
  * kadr-editor is the base (LOOK/ACT/VERIFY, the interface, fragments, voice),
- * kadr-music, kadr-motion and kadr-3d carry the rules of particular kinds of
+ * kadr-music, kadr-motion, kadr-3d and kadr-effects carry the rules of particular kinds of
  * work, and a project loads the ones it needs — a plain cut none of them, a
  * product film to a song all three. (One file used to hold everything, and
  * the rules of one project — 3D, bars — read as law in every other.) Scoped

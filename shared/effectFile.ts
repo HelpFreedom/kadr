@@ -26,6 +26,8 @@ export interface EffectParamDecl {
   step?: number
   /** select: the choices; the uniform receives `value` */
   options?: { value: number; name: Label }[]
+  /** color: offer the eyedropper, which takes the colour from the preview */
+  pick?: boolean
   name: Label
 }
 
@@ -81,7 +83,7 @@ function checkParam(key: string, raw: unknown): EffectParamDecl | string {
       if (typeof p.default !== 'string' || !/^#[0-9a-f]{6}$/i.test(p.default)) {
         return `param «${key}»: a colour needs a "#rrggbb" default`
       }
-      return { kind: 'color', default: p.default, name }
+      return { kind: 'color', default: p.default, pick: p.pick === true, name }
     case 'toggle':
       if (typeof p.default !== 'boolean') return `param «${key}»: a toggle needs a true/false default`
       return { kind: 'toggle', default: p.default, name }

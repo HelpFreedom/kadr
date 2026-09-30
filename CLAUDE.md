@@ -26,8 +26,9 @@ mixes audio and muxes/transcodes per preset.
   `check-sfx-labels.mjs` (sound labels vs /brag's 228) and `check-hdr.mjs`
   (the HDR → SDR maths and ffmpeg's own filter chain against the formula);
   `check-models.mjs` (3MF build items/components/units, STL, OBJ, GLB,
-  decimation), `check-effectfile.mjs` (project-library effect headers) and `check-timeline.mjs` (the timeline's waveform columns and
-  overlap zones must EQUAL the slow code they replaced); plus
+  decimation), `check-effectfile.mjs` (project-library effect headers) and
+  `check-timeline.mjs` (the timeline's waveform columns and overlap zones
+  must EQUAL the slow code they replaced); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
   `node scripts/gen-sfx-catalog.mjs` regenerates
   `resources/sfx/kadr-sfx.json` after a bundled sound or

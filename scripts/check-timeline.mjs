@@ -5,7 +5,9 @@
 //      covers, over zooms, speeds, in-points, device pixel ratios and the end of
 //      the array;
 //   2. trackOverlaps (one sweep) vs comparing every pair of clips, over random
-//      tracks with equal starts, butt joints and nested clips.
+//      tracks with equal starts, butt joints and nested clips;
+//   3. tipSpans: edge tips never overlap each other or run past the clip, keep
+//      their length when they fit, and share a short clip in proportion.
 //
 // Pure node, no app.  Run: node scripts/check-timeline.mjs
 import { readFileSync } from 'fs'
@@ -15,7 +17,7 @@ import { transformSync } from 'esbuild'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const js = transformSync(readFileSync(join(root, 'src', 'engine', 'timelineMath.ts'), 'utf8'), { loader: 'ts', format: 'esm' }).code
-const { waveColumns, trackOverlaps } = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'))
+const { waveColumns, trackOverlaps, tipSpans } = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'))
 
 let fails = 0
 const check = (name, ok, detail = '') => {
@@ -115,6 +117,23 @@ check('overlap zones and joints are exactly the pairwise result', diff === 0, `$
 const big = Array.from({ length: 5000 }, (_, i) => ({ id: 'b' + i, start: i * 0.9, duration: 1 + (i % 7) * 0.3 }))
 const t0 = performance.now(); trackOverlaps(big); const fast = performance.now() - t0
 check('a 5000-clip track in a few milliseconds', fast < 50, `${fast.toFixed(1)} ms`)
+
+// ---- 3. edge tips -----------------------------------------------------------
+const tip = (d) => (d ? { type: 'rgbSplit', duration: d } : undefined)
+const fits = tipSpans({ duration: 2, transitionIn: tip(0.5), transitionOut: tip(0.3) })
+check('tips that fit keep their length', fits.tin === 0.5 && fits.tout === 0.3, JSON.stringify(fits))
+const beat = tipSpans({ duration: 1 / 3, transitionIn: tip(0.5), transitionOut: tip(0.5) })
+check('two 0.5 s tips on a 1/3 s clip share it and meet in the middle',
+  Math.abs(beat.tin - 1 / 6) < 1e-9 && Math.abs(beat.tout - 1 / 6) < 1e-9, JSON.stringify(beat))
+const lone = tipSpans({ duration: 0.2, transitionOut: tip(1) })
+check('a lone tip fills at most the whole clip', lone.tin === 0 && Math.abs(lone.tout - 0.2) < 1e-9, JSON.stringify(lone))
+let wrong = 0
+for (let run = 0; run < 5000; run++) {
+  const d = 0.05 + rnd() * 3, a = rnd() < 0.2 ? 0 : rnd() * 2, b = rnd() < 0.2 ? 0 : rnd() * 2
+  const r = tipSpans({ duration: d, transitionIn: tip(a), transitionOut: tip(b) })
+  if (r.tin + r.tout > d + 1e-9 || r.tin > a + 1e-9 || r.tout > b + 1e-9 || (a + b <= d && (r.tin !== a || r.tout !== b))) bad++
+}
+check('random tips never overlap or run past the clip', wrong === 0, `5000 clips, ${wrong} wrong`)
 
 console.log(fails ? `\n${fails} FAILED` : '\nall passed')
 process.exitCode = fails ? 1 : 0

@@ -2,7 +2,9 @@
 // translate/scale/rotate/opacity onto the project canvas.
 import { transitionGlsl } from './transitions'
 import { edgeGlsl } from './edges'
-import { GLOW_FIELD_FS, GLOW_FS, type GlowParams } from './glow'
+import type { EffectDef, FxContext, FxTarget, FxValues } from './effects/types'
+import { fxFragmentShader, sourceHash, uniformName } from './effects/shader'
+import { setEffectError, useEffects } from './effects'
 import { logError } from '@/engine/log'
 
 const VS = `#version 300 es
@@ -165,29 +167,11 @@ uniform sampler2D uTex;
 out vec4 outColor;
 void main() { outColor = texture(uTex, vUV); }`
 
-// Separable gaussian over the premultiplied layer FBO. uDir carries one
-// texel step along the pass axis; uRadius is the blur radius in pixels
-// along that axis (taps spread out for big radii — 24 per side).
-const BLUR_FS = `#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uTex;
-uniform vec2 uDir;
-uniform float uRadius;
-out vec4 outColor;
-void main() {
-  float sigma = max(0.35, uRadius * 0.5);
-  float step = max(1.0, uRadius / 24.0);
-  vec4 acc = vec4(0.0);
-  float wsum = 0.0;
-  for (int i = -24; i <= 24; i++) {
-    float off = float(i) * step;
-    float w = exp(-0.5 * off * off / (sigma * sigma));
-    acc += texture(uTex, vUV + uDir * off) * w;
-    wsum += w;
-  }
-  outColor = acc / wsum;
-}`
+/** One effect of a clip's chain, with its values at the frame's time. */
+export interface FxLink {
+  def: EffectDef
+  values: FxValues
+}
 
 export interface LayerDraw {
   source: TexImageSource | null
@@ -280,19 +264,15 @@ export class Compositor {
   // upload costs more than the draw itself on an iGPU).
   private holdingSources = false
   private srcEpoch = 0
-  // outer-glow buffers: full-res layer + low-res blurred silhouette field
-  private fx: { layer: Overlay; field: Overlay; blur: Overlay; fw: number; fh: number } | null = null
+  // effect buffers: the layer and its ping-pong partner at full size, a
+  // scratch buffer for multi-pass effects (made on first use) and a
+  // quarter-size one for wide, cheap blurs (the glow's silhouette field)
+  private fx: { layer: Overlay; field: Overlay; blur: Overlay; temp: Overlay | null; fw: number; fh: number } | null = null
   private fxSize = 0
-  private blurProg: {
-    prog: WebGLProgram
-    uDir: WebGLUniformLocation
-    uRadius: WebGLUniformLocation
-  } | null = null
-  private fieldProg: { prog: WebGLProgram; uSize: WebGLUniformLocation; uRatio: WebGLUniformLocation } | null = null
-  private glowProg: {
-    prog: WebGLProgram
-    u: Record<'uColor' | 'uSize' | 'uIntensity' | 'uSat' | 'uSmoke' | 'uSpeed' | 'uParticles' | 'uTime' | 'ratio', WebGLUniformLocation>
-  } | null = null
+  // effect programs by key; single-pass effects are keyed by their source hash,
+  // so an edited shader compiles anew instead of hitting a stale entry
+  private fxProgs = new Map<string, { prog: WebGLProgram; u: Map<string, WebGLUniformLocation | null> }>()
+  private fxFailed = new Set<string>()
   private uOpacity: WebGLUniformLocation
   private uRawBGRA: WebGLUniformLocation
   private uAlphaPacked: WebGLUniformLocation
@@ -355,16 +335,32 @@ export class Compositor {
       gl.shaderSource(sh, src)
       gl.compileShader(sh)
       if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-        throw new Error('shader: ' + gl.getShaderInfoLog(sh))
+        const log = gl.getShaderInfoLog(sh)
+        gl.deleteShader(sh)
+        throw new Error('shader: ' + log)
       }
       return sh
     }
+    // a failed build frees what it made: effects from the project library are
+    // edited and recompiled while the editor runs
+    const vs = compile(gl.VERTEX_SHADER, vsSrc)
+    let fs: WebGLShader
+    try {
+      fs = compile(gl.FRAGMENT_SHADER, fsSrc)
+    } catch (err) {
+      gl.deleteShader(vs)
+      throw err
+    }
     const prog = gl.createProgram()!
-    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc))
-    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc))
+    gl.attachShader(prog, vs)
+    gl.attachShader(prog, fs)
     gl.linkProgram(prog)
+    gl.deleteShader(vs)
+    gl.deleteShader(fs)
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      throw new Error('link: ' + gl.getProgramInfoLog(prog))
+      const log = gl.getProgramInfoLog(prog)
+      gl.deleteProgram(prog)
+      throw new Error('link: ' + log)
     }
     return prog
   }
@@ -629,99 +625,72 @@ export class Compositor {
     this.drawScreenQuad(tp, progress, opacity)
   }
 
-  // ------------------------------------------------------------- outer glow
-  // The layer renders into its own full-res buffer; its alpha silhouette is
-  // blurred into a low-res field; the glow shader turns the field into a
-  // smoky halo drawn under the layer, then the layer itself is blitted on
-  // top. Works inside any destination (canvas, accumulator, transition FBO).
-
-  /** Draw a layer (possibly frame-blended pair) with outer glows beneath. */
-  drawLayerGlow(layers: LayerDraw[], glows: GlowParams[], time: number) {
-    this.drawLayerFx(layers, 0, glows, time)
-  }
+  // ---------------------------------------------------------------- effects
+  // The layer renders into its own full-size buffer. The chain then runs in
+  // the clip's order: 'layer' effects replace the layer (ping-pong between two
+  // buffers), 'under' effects paint beneath it into the current destination,
+  // and the layer is blitted on top. Works inside any destination (canvas,
+  // motion-blur accumulator, transition FBO). Effects are src/gl/effects/*.
 
   /**
-   * Layer(s) through the effects chain: optional gaussian blur (radius as a
-   * fraction of output height — resolution independent), then outer glows,
-   * then the (possibly blurred) layer itself, premultiplied into curFbo.
+   * Layer(s) through a clip's effect chain. `time` is clip-local seconds (the
+   * same clock in preview and export); sizes in project pixels scale by the
+   * output height over `projectHeight`.
    */
-  drawLayerFx(layers: LayerDraw[], blurFrac: number, glows: GlowParams[], time: number) {
+  drawLayerFx(layers: LayerDraw[], chain: FxLink[], time: number, projectHeight: number) {
     const gl = this.gl
     this.ensureFx()
     const fx = this.fx!
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fx.layer.fbo)
+    let cur = fx.layer
+    let alt = fx.blur
+    gl.bindFramebuffer(gl.FRAMEBUFFER, cur.fbo)
     gl.clearColor(0, 0, 0, 0)
     gl.clear(gl.COLOR_BUFFER_BIT)
     for (const l of layers) this.drawLayer(l)
 
-    const radius = blurFrac * this.height
-    if (radius > 0.2) {
-      if (!this.blurProg) {
-        const prog = this.buildProgram(TRANS_VS, BLUR_FS)
-        gl.useProgram(prog)
-        gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0)
-        this.blurProg = {
-          prog,
-          uDir: gl.getUniformLocation(prog, 'uDir')!,
-          uRadius: gl.getUniformLocation(prog, 'uRadius')!
-        }
-      }
-      const bp = this.blurProg
-      gl.disable(gl.BLEND)
-      gl.useProgram(bp.prog)
-      gl.activeTexture(gl.TEXTURE0)
-      // horizontal: layer → blur scratch
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fx.blur.fbo)
-      gl.bindTexture(gl.TEXTURE_2D, fx.layer.tex)
-      gl.uniform2f(bp.uDir, 1 / this.width, 0)
-      gl.uniform1f(bp.uRadius, radius)
-      this.fsQuad()
-      // vertical: scratch → back into the layer FBO (glow + blit read it)
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fx.layer.fbo)
-      gl.bindTexture(gl.TEXTURE_2D, fx.blur.tex)
-      gl.uniform2f(bp.uDir, 0, 1 / this.height)
-      this.fsQuad()
-      gl.enable(gl.BLEND)
-    }
+    const ctxFor = (src: WebGLTexture, out: FxTarget): FxContext => ({
+      gl,
+      width: this.width,
+      height: this.height,
+      projectHeight,
+      time,
+      src,
+      out,
+      temp: () => (fx.temp ??= this.makeFbo(this.width, this.height)),
+      small: () => ({ ...fx.field, w: fx.fw, h: fx.fh }),
+      dest: this.curFbo,
+      program: (key, fs) => this.fxProgram(key, fs),
+      quad: () => this.fsQuad(),
+      vs: TRANS_VS
+    })
 
-    const ratio = this.width / Math.max(1, this.height)
-    for (const g of glows) {
-      // blurred silhouette at reduced resolution (radius taps stay cheap)
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fx.field.fbo)
-      gl.viewport(0, 0, fx.fw, fx.fh)
+    for (const link of chain) {
+      if ((link.def.stage ?? 'layer') !== 'layer') continue
+      let wrote = false
       gl.disable(gl.BLEND)
-      const fp = this.getFieldProg()
-      gl.useProgram(fp.prog)
-      gl.activeTexture(gl.TEXTURE0)
-      gl.bindTexture(gl.TEXTURE_2D, fx.layer.tex)
-      gl.uniform1f(fp.uSize, g.sizePx / Math.max(1, this.height))
-      gl.uniform1f(fp.uRatio, ratio)
-      this.fsQuad()
+      try {
+        wrote = link.def.run
+          ? link.def.run(ctxFor(cur.tex, alt), link.values) !== false
+          : this.runFxPass(link, cur.tex, alt.fbo, time)
+      } catch (err) {
+        this.effectFailed(link.def.id, err)
+      }
       gl.enable(gl.BLEND)
       gl.viewport(0, 0, this.width, this.height)
-
-      // smoky halo under the layer, into the current composite destination
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.curFbo)
-      const gp = this.getGlowProg()
-      gl.useProgram(gp.prog)
-      gl.activeTexture(gl.TEXTURE0)
-      gl.bindTexture(gl.TEXTURE_2D, fx.field.tex)
-      gl.activeTexture(gl.TEXTURE1)
-      gl.bindTexture(gl.TEXTURE_2D, fx.layer.tex)
-      gl.uniform3f(gp.u.uColor, g.color[0], g.color[1], g.color[2])
-      gl.uniform1f(gp.u.uSize, g.sizePx / Math.max(1, this.height))
-      gl.uniform1f(gp.u.uIntensity, g.intensity)
-      gl.uniform1f(gp.u.uSat, g.saturation)
-      gl.uniform1f(gp.u.uSmoke, g.smoke)
-      gl.uniform1f(gp.u.uSpeed, g.speed)
-      gl.uniform1f(gp.u.uParticles, g.particles)
-      gl.uniform1f(gp.u.uTime, time)
-      gl.uniform1f(gp.u.ratio, ratio)
-      gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
-      this.fsQuad()
+      if (wrote) [cur, alt] = [alt, cur]
+    }
+    for (const link of chain) {
+      if (link.def.stage !== 'under') continue
+      try {
+        link.def.run?.(ctxFor(cur.tex, alt), link.values)
+      } catch (err) {
+        this.effectFailed(link.def.id, err)
+      }
+      gl.enable(gl.BLEND)
+      gl.viewport(0, 0, this.width, this.height)
     }
 
-    // the layer itself on top of its glow (premultiplied)
+    // the layer itself on top of whatever went under it (premultiplied)
     if (!this.blitProg) {
       this.blitProg = this.buildProgram(TRANS_VS, BLIT_FS)
       gl.useProgram(this.blitProg)
@@ -730,13 +699,72 @@ export class Compositor {
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.curFbo)
     gl.useProgram(this.blitProg)
     gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, fx.layer.tex)
+    gl.bindTexture(gl.TEXTURE_2D, cur.tex)
     gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
     this.fsQuad()
 
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
     gl.activeTexture(gl.TEXTURE0)
     gl.useProgram(this.prog)
+  }
+
+  /** A single-pass effect (EffectDef.glsl): src → out through its shader. */
+  private runFxPass(link: FxLink, src: WebGLTexture, out: WebGLFramebuffer, time: number): boolean {
+    const gl = this.gl
+    const def = link.def
+    if (!def.glsl) return false
+    const key = `fx:${def.id}:${sourceHash(def.glsl)}`
+    if (this.fxFailed.has(key)) return false
+    let p
+    try {
+      p = this.fxProgram(key, fxFragmentShader(def))
+    } catch (err) {
+      this.fxFailed.add(key)
+      this.effectFailed(def.id, err)
+      return false
+    }
+    if (useEffects.getState().errors[def.id]) setEffectError(def.id, null)
+    gl.useProgram(p.prog)
+    gl.uniform1i(p.u('uTex'), 0)
+    gl.uniform1f(p.u('uTime'), time)
+    gl.uniform2f(p.u('uRes'), this.width, this.height)
+    gl.uniform1f(p.u('uRatio'), this.width / Math.max(1, this.height))
+    for (const [k, v] of Object.entries(link.values)) {
+      if (Array.isArray(v)) gl.uniform3f(p.u(uniformName(k)), v[0], v[1], v[2])
+      else gl.uniform1f(p.u(uniformName(k)), v)
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, out)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, src)
+    this.fsQuad()
+    return true
+  }
+
+  private fxProgram(key: string, fs: string) {
+    let entry = this.fxProgs.get(key)
+    if (!entry) {
+      const prog = this.buildProgram(TRANS_VS, fs)
+      entry = { prog, u: new Map() }
+      this.fxProgs.set(key, entry)
+    }
+    const e = entry
+    const gl = this.gl
+    return {
+      prog: e.prog,
+      u: (name: string) => {
+        if (!e.u.has(name)) e.u.set(name, gl.getUniformLocation(e.prog, name))
+        return e.u.get(name)!
+      }
+    }
+  }
+
+  // a broken effect is skipped, not substituted: the clip renders without it,
+  // and the Inspector and kadr_effects show why
+  private effectFailed(id: string, err: unknown) {
+    const msg = String((err as Error)?.message ?? err)
+    if (useEffects.getState().errors[id] === msg) return
+    setEffectError(id, msg)
+    logError('эффекты', `эффект «${id}» не работает`, err)
   }
 
   private fsQuad() {
@@ -772,7 +800,8 @@ export class Compositor {
     const size = this.width * 65536 + this.height
     if (this.fx && this.fxSize === size) return
     if (this.fx) {
-      for (const o of [this.fx.layer, this.fx.field, this.fx.blur]) {
+      for (const o of [this.fx.layer, this.fx.field, this.fx.blur, this.fx.temp]) {
+        if (!o) continue
         gl.deleteFramebuffer(o.fbo)
         gl.deleteTexture(o.tex)
       }
@@ -783,43 +812,11 @@ export class Compositor {
       layer: this.makeFbo(this.width, this.height),
       field: this.makeFbo(fw, fh),
       blur: this.makeFbo(this.width, this.height),
+      temp: null,
       fw, fh
     }
     this.fxSize = size
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.curFbo)
-  }
-
-  private getFieldProg() {
-    if (!this.fieldProg) {
-      const gl = this.gl
-      const prog = this.buildProgram(TRANS_VS, GLOW_FIELD_FS)
-      gl.useProgram(prog)
-      gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0)
-      this.fieldProg = {
-        prog,
-        uSize: gl.getUniformLocation(prog, 'uSize')!,
-        uRatio: gl.getUniformLocation(prog, 'ratio')!
-      }
-      gl.useProgram(this.prog)
-    }
-    return this.fieldProg
-  }
-
-  private getGlowProg() {
-    if (!this.glowProg) {
-      const gl = this.gl
-      const prog = this.buildProgram(TRANS_VS, GLOW_FS)
-      gl.useProgram(prog)
-      gl.uniform1i(gl.getUniformLocation(prog, 'uField'), 0)
-      gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 1)
-      const u: Record<string, WebGLUniformLocation> = {}
-      for (const name of ['uColor', 'uSize', 'uIntensity', 'uSat', 'uSmoke', 'uSpeed', 'uParticles', 'uTime', 'ratio']) {
-        u[name] = gl.getUniformLocation(prog, name)!
-      }
-      this.glowProg = { prog, u }
-      gl.useProgram(this.prog)
-    }
-    return this.glowProg
   }
 
   private drawScreenQuad(tp: TransProg, progress: number, opacity: number) {
@@ -990,7 +987,8 @@ export class Compositor {
         gl.deleteTexture(o.tex)
       }
       if (this.fx) {
-        for (const o of [this.fx.layer, this.fx.field, this.fx.blur]) {
+        for (const o of [this.fx.layer, this.fx.field, this.fx.blur, this.fx.temp]) {
+          if (!o) continue
           gl.deleteFramebuffer(o.fbo)
           gl.deleteTexture(o.tex)
         }
@@ -998,7 +996,8 @@ export class Compositor {
       for (const b of this.pbos) if (b) gl.deleteBuffer(b)
       gl.deleteBuffer(this.vbo)
       for (const t of this.transProgs.values()) gl.deleteProgram(t.prog)
-      for (const prog of [this.prog, this.blitProg, this.blurProg?.prog, this.fieldProg?.prog, this.glowProg?.prog]) {
+      for (const e of this.fxProgs.values()) gl.deleteProgram(e.prog)
+      for (const prog of [this.prog, this.blitProg]) {
         if (prog) gl.deleteProgram(prog)
       }
       // the extension is what actually frees the context; the deletes above
@@ -1013,9 +1012,8 @@ export class Compositor {
     this.fxSize = 0
     this.pbos = [null, null]
     this.blitProg = null
-    this.blurProg = null
-    this.fieldProg = null
-    this.glowProg = null
+    this.fxProgs.clear()
+    this.fxFailed.clear()
   }
 }
 

@@ -1,6 +1,6 @@
 ---
 name: kadr-editor
-description: Editing the LIVE project inside the Kadr video editor through its kadr_* MCP tools (kadr_state, kadr_snapshot, kadr_sheet, kadr_eval, kadr_check, kadr_export, kadr_transcribe, kadr_fragment_create, kadr_typecheck, kadr_fragment_media, kadr_model_import, kadr_models, kadr_beats, kadr_audio_react, kadr_sounds, kadr_sound_add, kadr_sound_label, kadr_neon_wave, kadr_voice_*). The base skill — use it whenever those tools are available and the task concerns the open timeline, its clips, audio, captions, titles or motion graphics; it says which of kadr-music, kadr-motion and kadr-3d to add. Not for standalone Remotion authoring — a dedicated remotion skill, if installed, owns composition internals.
+description: Editing the LIVE project inside the Kadr video editor through its kadr_* MCP tools (kadr_state, kadr_snapshot, kadr_sheet, kadr_eval, kadr_check, kadr_export, kadr_transcribe, kadr_fragment_create, kadr_typecheck, kadr_fragment_media, kadr_model_import, kadr_models, kadr_effects, kadr_beats, kadr_audio_react, kadr_sounds, kadr_sound_add, kadr_sound_label, kadr_neon_wave, kadr_voice_*). The base skill — use it whenever those tools are available and the task concerns the open timeline, its clips, audio, captions, titles or motion graphics; it says which of kadr-music, kadr-motion, kadr-3d and kadr-effects to add. Not for standalone Remotion authoring — a dedicated remotion skill, if installed, owns composition internals.
 ---
 <!-- managed by Kadr: rewritten when Kadr updates (electron/skills/) -->
 
@@ -222,7 +222,7 @@ document.querySelector('[data-act="play"]').click()
 | track head | `track-motion` `mute` `lock` |
 | animation editor | `snap` `lock-x` `lock-y` `shape-edges` `shape-rect` `shape-ellipse` `shape-triangle` |
 | media bin | `import` `delete-selected` `fragment-media` `model-insert` |
-| inspector | `fx-presets` `add-glow` `add-blur` `ar-source` `ar-bake` `fp-reload` `fp-reset` (a parameter row: `[data-param="<name>"]`) |
+| inspector | `fx-presets` `fx-add` (menu) `add-<effect id>` `fx-up` `fx-down` `fx-del` (inside `[data-fx="<id>"]`) `ar-source` `ar-bake` `fp-reload` `fp-reset` (a parameter row: `[data-param="<name>"]`) |
 | debug panel | `gpu-pref` |
 
 Prefer the store API (`kadrEditor`) for edits; use these handles when the action

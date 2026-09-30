@@ -13,6 +13,21 @@ const execFileP = promisify(execFile)
 export const FFMPEG = process.env.KADR_FFMPEG || 'ffmpeg'
 export const FFPROBE = process.env.KADR_FFPROBE || 'ffprobe'
 
+// ffmpeg 8 removed -filter_complex_script; ffmpeg 7 added the generic "-/option file"
+// form, which is the only way left to hand a filter graph over in a file. Builds from
+// git report "N-<rev>" instead of a number and are always newer than both.
+let filterScriptFlagP: Promise<string> | null = null
+export function filterScriptFlag(): Promise<string> {
+  filterScriptFlagP ??= execFileP(FFMPEG, ['-hide_banner', '-version'])
+    .then(({ stdout }) => {
+      const m = /version n?(\d+)\./.exec(stdout)
+      if (m) return Number(m[1]) >= 7 ? '-/filter_complex' : '-filter_complex_script'
+      return /version N-/.test(stdout) ? '-/filter_complex' : '-filter_complex_script'
+    })
+    .catch(() => '-filter_complex_script')
+  return filterScriptFlagP
+}
+
 const IMAGE_EXT = /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i
 
 export async function probeMedia(path: string): Promise<ProbeResult> {
@@ -832,7 +847,7 @@ export class ExportMuxer {
       }
       filterScript = join(tmpdir(), `kadr-filter-${process.pid}-${Date.now()}.txt`)
       await fsp.writeFile(filterScript, filters.join(';\n'))
-      args.push('-filter_complex_script', filterScript)
+      args.push(await filterScriptFlag(), filterScript)
     }
 
     if (hasVideo) {

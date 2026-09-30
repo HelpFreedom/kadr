@@ -164,7 +164,8 @@ export function startExport(
     })
 
     if (preset.audioOnly) {
-      await window.kadr.exportVideoDone()
+      const { error } = await window.kadr.exportVideoDone()
+      if (error) throw new Error(error)
       return
     }
 
@@ -480,7 +481,8 @@ export function startExport(
       if (comp.contextLost()) throw new Error('GPU context lost while rendering the final frame — restart Kadr and export again')
       // hand off to ffmpeg in the main process (audio mix + mux);
       // further progress arrives via onExportProgress events
-      await window.kadr.exportVideoDone()
+      const { error } = await window.kadr.exportVideoDone()
+      if (error) throw new Error(error)
     } catch (err) {
       if (rawDirect) window.kadr.rawEncodeKill()
       await window.kadr.exportCancel().catch(() => { /* already gone */ })

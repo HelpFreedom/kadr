@@ -1307,6 +1307,11 @@ div.tr-error {
 .fx-kf.animated { color: var(--c-accent-hi); }
 .fx-kf.on { color: var(--c-on-solid); background: var(--c-accent-solid); }
 .fx-kf:disabled { color: var(--c-text-off); cursor: default; }
+/* a colour param with its eyedropper beside the swatch; while picking, the
+   button is lit and the pointer over the preview is a crosshair */
+.fx-color { display: inline-flex; align-items: center; gap: var(--s2); }
+.fx-pick.on { color: var(--c-on-solid); background: var(--c-accent-solid); }
+body.fx-picking canvas { cursor: crosshair; }
 .fx-add.active { border-color: var(--c-accent); background: var(--c-accent-soft); color: var(--c-text); }
 .fx-slider input[type='range'] { flex: 1; min-width: 60px; }
 /* fragment parameters: a slider with its exact value beside it */

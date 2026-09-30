@@ -1,6 +1,7 @@
 import type { Project, Clip, Track, MediaAsset } from '@shared/types'
 import { Compositor, type FxLink, type LayerDraw } from '@/gl/compositor'
 import { getEffect, resolveValues } from '@/gl/effects'
+import { useEyedropper } from './eyedropper'
 import { getCaptureFrame } from './fragmentCapture'
 import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
@@ -488,7 +489,8 @@ function drawClipLayer(
     const chain: FxLink[] = []
     for (const e of clip.effects ?? []) {
       const def = e.enabled ? getEffect(e.type) : undefined
-      if (!def) continue
+      // the eyedropper waits on this effect: the preview shows the picture without it
+      if (!def || useEyedropper.getState().target?.effectId === e.id) continue
       const values = resolveValues(def, e.params, rel)
       if (def.active && !def.active(values, project)) continue
       chain.push({ def, values })

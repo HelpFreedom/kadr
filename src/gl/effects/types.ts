@@ -14,6 +14,8 @@ export interface EffectParamDecl {
   step?: number
   /** select: the choices; the uniform receives `value` */
   options?: { value: number; name: Label }[]
+  /** color: offer the eyedropper, which takes the colour from the preview */
+  pick?: boolean
   name: Label
 }
 

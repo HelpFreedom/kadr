@@ -37,6 +37,14 @@ changes move the keys with the clip. People key the same params in the
 Inspector (the diamond beside a slider) and in the animation editor's
 «Эффекты» mode.
 
+## Keying
+`chromaKey` makes its key colour transparent (distance in chroma, so the
+screen's shadows go too), with `similarity`, `softness` and `spill` (takes
+the key colour's cast out of what stays). Put it FIRST in the chain and put
+the new background on a track below. The key colour defaults to pure green;
+for a real screen read it from a `kadr_snapshot` taken with the key switched
+off. People pick it with the eyedropper beside the swatch.
+
 ## How the chain runs
 - In the clip's order, AFTER the clip transform, in project pixels: an
   effect sees the layer as it sits in the frame (scaled, rotated, masked).

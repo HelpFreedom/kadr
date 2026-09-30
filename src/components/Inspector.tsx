@@ -4,6 +4,7 @@ import { useEditor, useFxPresets, useSettings, findClip, uid } from '@/state/sto
 import { useEffects, defaultParams, labelText, paramAnim, type EffectDef } from '@/gl/effects'
 import { evalAnim } from '@/engine/anim'
 import { applyValue, upsertKf, KF_EPS } from './animUtils'
+import { useEyedropper, startEyedropper, cancelEyedropper } from '@/engine/eyedropper'
 import { useT, type TKey } from '@/i18n'
 import { bakeAudio, bakeState, bakePlan } from '@/engine/audioReact'
 import { audibleTracksInRange } from '@/engine/subtitles'
@@ -480,6 +481,7 @@ function FxBlock({ clip, fx, index, count }: { clip: Clip; fx: Effect; index: nu
   const lang = useSettings((s) => s.lang)
   const def = useEffects((s) => s.defs[fx.type])
   const error = useEffects((s) => s.errors[fx.type])
+  const picker = useEyedropper((s) => s.target)
   const playhead = useEditor((s) => s.playhead)
   const rel = Math.max(0, Math.min(clip.duration, playhead - clip.start))
   const inside = playhead >= clip.start - 1e-6 && playhead <= clip.start + clip.duration + 1e-6
@@ -538,11 +540,34 @@ function FxBlock({ clip, fx, index, count }: { clip: Clip; fx: Effect; index: nu
         const raw = fx.params[k]
         if (d.kind === 'color') {
           const v = typeof raw === 'string' && /^#[0-9a-f]{6}$/i.test(raw) ? raw : String(d.default)
+          const picking = picker?.effectId === fx.id && picker.param === k
           return (
             <label key={k} className="insp-field" data-param={k}>
               <span>{label}</span>
-              <input type="color" value={v} onFocus={() => st().pushHistory('hEffect')}
-                onChange={(e) => setP(k, e.target.value)} />
+              <span className="fx-color">
+                {d.pick && (
+                  <button
+                    className={`fx-tool fx-pick${picking ? ' on' : ''}`}
+                    data-act="fx-pick"
+                    aria-pressed={picking}
+                    title={picking ? t('fxPicking') : t('fxPick')}
+                    aria-label={`${picking ? t('fxPicking') : t('fxPick')}: ${label}`}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      if (picking) return cancelEyedropper()
+                      startEyedropper({ clipId: clip.id, effectId: fx.id, param: k }, (hex) => {
+                        st().pushHistory('hEffect')
+                        setP(k, hex)
+                      })
+                    }}
+                  >
+                    <Icon name="target" size={14} />
+                  </button>
+                )}
+                <input type="color" value={v} onFocus={() => st().pushHistory('hEffect')}
+                  onChange={(e) => setP(k, e.target.value)} />
+              </span>
             </label>
           )
         }

@@ -10,6 +10,7 @@ import { videoLayersAt } from '@/engine/player'
 import { useT, type TKey } from '@/i18n'
 import { Icon, type IconName } from './icons'
 import { CtxMenu } from './CtxMenu'
+import { useContentWidth } from './animUtils'
 
 const KF_EPS = 0.02
 
@@ -155,6 +156,8 @@ export function AnimEditor({ width }: { width: number }) {
   const [presetName, setPresetName] = useState('')
   const posePresets = usePosePresets((s) => s.presets)
   const stageRef = useRef<HTMLDivElement>(null)
+  const editorRef = useRef<HTMLDivElement>(null)
+  const contentW = useContentWidth(editorRef, width - 28)
   const miniRef = useRef<HTMLDivElement>(null)
   const clipId = found?.clip.id
   const clipDur = found?.clip.duration ?? 1
@@ -238,7 +241,7 @@ export function AnimEditor({ width }: { width: number }) {
   const allShapeParams = shapes.flatMap((_, i) => makeShapeParams(i))
 
   // ----------------------------------------------------------- stage maths
-  const stageW = Math.max(160, width - 22)
+  const stageW = Math.max(160, contentW)
   const stageH = Math.round((stageW * projH) / projW)
   const k = (stageW / projW) * stageZoom
 
@@ -788,7 +791,7 @@ export function AnimEditor({ width }: { width: number }) {
   const selFo = sel ? evalAnim(sel.featherOut, rel) : 0
 
   return (
-    <div className="anim-editor">
+    <div className="anim-editor" ref={editorRef}>
       <div className="anim-toolbar">
         <button className={mode === 'transform' ? 'active' : ''} onClick={() => setMode('transform')}>
           {t('modeTransform')}

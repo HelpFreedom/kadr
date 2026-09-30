@@ -1315,6 +1315,18 @@ div.tr-error {
 .tl-toolbar::-webkit-scrollbar { height: 0; }
 .tl-toolbar button { min-height: 24px; }
 .hint-inline { font-size: var(--fz-sm); color: var(--c-text-3); }
+/* the controls hint in the timeline toolbar stays on one line: when it
+   wrapped, a narrow window (and the longer Russian text) made the toolbar
+   several lines tall and took the height from the tracks. It shrinks first
+   and ends in an ellipsis; the full text is in its title. */
+.tl-toolbar > * { flex-shrink: 0; }
+.tl-toolbar > .hint-inline {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .zoom-ctl {
   display: flex;
   align-items: center;
@@ -2355,7 +2367,9 @@ div.tr-error {
 
 .anim-values {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* two columns while both fit; a long label (Russian "Позиция Y") in a narrow
+     panel drops to one column instead of pushing the panel sideways */
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
   gap: var(--s2) var(--s4);
 }
 .anim-values label {

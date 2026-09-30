@@ -13,8 +13,7 @@
 // Launch the app with `npx electron-vite dev -- --remote-debugging-port=9777`.
 // REFUSES to run over an open project with clips (it replaces the project)
 // unless KADR_E2E_FORCE=1. Silent (the preview's master is muted while it plays).
-// unless KADR_E2E_FORCE=1. Works in /tmp/kadr-e2e50 and deletes it, with the
-// fragments and renders it made.
+// Works in /tmp/kadr-e2e51 and deletes it.
 import WebSocket from 'ws'
 import { rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { execFileSync } from 'child_process'
@@ -92,6 +91,10 @@ async function until(fn, timeout = 15000, step = 250) {
 }
 
 const clipsOpen = await ed.ev(`${S}.project.tracks.reduce((n, t) => n + t.clips.length, 0)`)
+if (clipsOpen > 0 && !process.env.KADR_E2E_FORCE) {
+  console.log(`SKIP  e2e51 replaces the open project, and it has ${clipsOpen} clip(s) — save it and open an empty project (or set KADR_E2E_FORCE=1)`)
+  process.exit(0)
+}
 
 // ---- the project: 200 short sounds over 200 s on A1, one long sound on A2 ----
 rmSync(DIR, { recursive: true, force: true })

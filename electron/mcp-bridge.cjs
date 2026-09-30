@@ -301,6 +301,8 @@ server.registerTool('kadr_check', {
     'first beats of bars with nothing on them. pixels:true also renders frames: caption contrast ' +
     'against the real background (WCAG, titles ≥3:1, other text ≥4.5:1) and the seams between ' +
     'butt-joined fragments (a warning when a fragment declares continuous: true and the cut shows). ' +
+    'Also warns about a media clip whose in-point is at or past the end of its source file (it shows a ' +
+    'frozen or broken frame and plays silence). ' +
     'Needs the music map on the timeline for the rhythm rules (kadr_beats first). Times returned ' +
     'are TIMELINE seconds.',
   inputSchema: {

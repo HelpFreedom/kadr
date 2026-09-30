@@ -1656,6 +1656,17 @@ div.tr-error {
   text-shadow: 0 1px 2px rgb(var(--rgb-shadow) / 0.85);
   pointer-events: none;
 }
+/* a clip that starts past the end of its file: the sign alone vanished on a
+   busy thumbnail, so the clip also gets a dashed warning outline (drawn over
+   the thumbnails, apart from the solid selection border) and the sign a chip */
+.clip.past-end-clip { outline: 2px dashed var(--c-warn); outline-offset: -2px; }
+.clip-label .past-end {
+  display: inline-flex;
+  padding: 1px;
+  border-radius: var(--r1);
+  background: var(--c-bg-0);
+  color: var(--c-warn);
+}
 .clip-label > span {
   overflow: hidden;
   text-overflow: ellipsis;

@@ -68,6 +68,9 @@ rhythm, readability or physical sense — not a technical failure. So:
 - Discipline: `pushHistory(label)` once before a batch of low-level edits
   (updateClip etc.) — that's one undo step for the user. High-level actions
   (insertClipsFromAssets, splitAtPlayhead, removeAssets…) push their own.
+- Insert actions return the new ids: `insertClipFromAsset` → `[clipId,
+  audioTwinId?]`, `insertClipsFromAssets` → all of them in order,
+  `insertTextClip` → `clipId | null`. No need to diff clip ids.
 - Animatable scalars (gain, transform.x/y/scale/rotation/opacity) are Anim
   objects — write `{ value: 0.5 }`, never a bare number.
 - Re-read `getState()` after every action; the store is immutable snapshots.

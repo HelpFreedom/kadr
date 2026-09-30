@@ -2068,7 +2068,10 @@ vsync-меткам кадров, дрожание таймера не накап
   `insertClipFromAsset`, `splitAtPlayhead`, `deleteSelection`,
   `addTexts`, `insertFragmentClip` — кладут историю сами);
 - `updateClip(id, patch)`, `setClipDuration`, `setClipSpeed`;
-- `insertClipFromAsset(assetId, trackId|null, atSec)`, `addAsset`;
+- `insertClipFromAsset(assetId, trackId|null, atSec)` → id нового клипа
+  и id его связанного аудиоклипа, если он есть; `insertClipsFromAssets`
+  → все новые id по порядку; `insertTextClip(atSec)` → id или null;
+  `addAsset`;
 - `addTrack(kind)`, `addTrackNear(trackId)`;
 - `select(ids)`, `setPlayhead(t)`, `setRange({start,end}|null)`;
 - `splitAtPlayhead()`, `deleteSelection()`, `copySelection()`,

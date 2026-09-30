@@ -52,6 +52,19 @@ void main() {
 }`
 }
 
+/**
+ * A compile log in the effect's own lines: the driver counts from the top of
+ * the wrapped shader («ERROR: 0:33: …»), which says nothing to whoever wrote
+ * the 5-line body.
+ */
+export function effectCompileError(def: EffectDef, log: string): string {
+  const src = fxFragmentShader(def)
+  const at = def.glsl ? src.indexOf(def.glsl) : -1
+  if (at < 0) return log
+  const offset = src.slice(0, at).split('\n').length - 1
+  return log.replace(/\b0:(\d+):/g, (_, n: string) => `line ${Math.max(1, Number(n) - offset)}:`)
+}
+
 /** A short stable hash of a shader's source: part of its cache key. */
 export function sourceHash(s: string): string {
   let h = 5381

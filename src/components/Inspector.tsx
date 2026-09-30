@@ -339,6 +339,8 @@ function EffectsSection({ clip }: { clip: Clip }) {
   const t = useT()
   const lang = useSettings((s) => s.lang)
   const defs = useEffects((s) => s.defs)
+  const libraryIssues = useEffects((s) => s.libraryIssues)
+  const libraryDir = useEffects((s) => s.libraryDir)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null)
   const [name, setName] = useState('')
@@ -419,7 +421,7 @@ function EffectsSection({ clip }: { clip: Clip }) {
         <CtxMenu x={addMenu.x} y={addMenu.y} className="fx-add-menu">
           <div role="menu" aria-label={t('fxAdd')} onPointerDown={(e) => e.stopPropagation()}>
             {FX_GROUPS.map((g) => {
-              const list = Object.values(defs).filter((d) => d.group === g.id).sort(byName)
+              const list = Object.values(defs).filter((d) => d.group === g.id && !d.source).sort(byName)
               if (!list.length) return null
               return (
                 <div key={g.id} role="group" aria-label={t(g.label)}>
@@ -432,6 +434,25 @@ function EffectsSection({ clip }: { clip: Clip }) {
                 </div>
               )
             })}
+            <div role="group" aria-label={t('fxGroupLibrary')}>
+              <div className="ctx-title dim">{t('fxGroupLibrary')}</div>
+              {Object.values(defs).filter((d) => d.source === 'library').sort(byName).map((d) => (
+                <button key={d.id} role="menuitem" data-act={`add-${d.id}`} title={`kadr-lib/effects/${d.file}`}
+                  onClick={() => add(d)}>
+                  {labelText(d.name, lang)}
+                </button>
+              ))}
+              {libraryIssues.map((f) => (
+                <div key={f.id} className="fx-lib-bad">
+                  <span>{f.file} — {t('fxLibBroken')}</span>
+                  <span className="fx-lib-why">{f.error}</span>
+                </div>
+              ))}
+              {!libraryDir && <div className="ctx-empty dim">{t('fxLibUnsaved')}</div>}
+              {libraryDir && !libraryIssues.length && !Object.values(defs).some((d) => d.source === 'library') && (
+                <div className="ctx-empty dim">{t('fxLibEmpty')}</div>
+              )}
+            </div>
           </div>
         </CtxMenu>
       )}

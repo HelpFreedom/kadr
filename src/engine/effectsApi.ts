@@ -34,8 +34,16 @@ export const effectsApi = {
       stage: d.stage ?? 'layer',
       timeDependent: !!d.timeDependent,
       params: d.params,
+      source: d.source ?? 'builtin',
+      file: d.file,
       error: errors[d.id]
     }))
+  },
+
+  /** the project's effect folder (null for an unsaved project) and the files in it that are not effects */
+  library() {
+    const { libraryDir, libraryIssues } = useEffects.getState()
+    return { dir: libraryDir, issues: libraryIssues }
   },
 
   /** add an effect at the end of the clip's chain; returns its id */

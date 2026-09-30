@@ -3,7 +3,7 @@
 import { transitionGlsl } from './transitions'
 import { edgeGlsl } from './edges'
 import type { EffectDef, FxContext, FxTarget, FxValues } from './effects/types'
-import { fxFragmentShader, sourceHash, uniformName } from './effects/shader'
+import { effectCompileError, fxFragmentShader, sourceHash, uniformName } from './effects/shader'
 import { setEffectError, useEffects } from './effects'
 import { logError } from '@/engine/log'
 
@@ -720,7 +720,7 @@ export class Compositor {
       p = this.fxProgram(key, fxFragmentShader(def))
     } catch (err) {
       this.fxFailed.add(key)
-      this.effectFailed(def.id, err)
+      this.effectFailed(def.id, new Error(effectCompileError(def, String((err as Error)?.message ?? err))))
       return false
     }
     if (useEffects.getState().errors[def.id]) setEffectError(def.id, null)

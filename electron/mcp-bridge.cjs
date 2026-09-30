@@ -296,11 +296,18 @@ server.registerTool('kadr_effects', {
     'A numeric param is a number or an Anim ({ value, keyframes: [{ time, value, easing }] }, clip-local ' +
     'seconds); colours are "#rrggbb". ' +
     'The chain runs in list order ("layer" effects change the layer, "under" ones such as glow paint beneath it), ' +
-    'after the clip transform, in project pixels. Look at the result with kadr_snapshot.',
+    'after the clip transform, in project pixels. Look at the result with kadr_snapshot. ' +
+    'NEW EFFECTS need no rebuild: write <project dir>/kadr-lib/effects/<name>.glsl (saved projects; ' +
+    '`library.dir` below) — a header /* kadr-effect {"name":…,"group":"color|key|stylize|light|blur",' +
+    '"params":{"amount":{"kind":"number","default":1,"min":0,"max":1,"name":…}}} */ then GLSL defining ' +
+    'vec4 effect(vec4 c, vec2 uv) on straight colour, with u_<param> uniforms, uTime, uRes, uRatio and ' +
+    'texel(uv), luma, rgb2hsv, hsv2rgb, hash12. It appears as lib:<name> within a second; a bad header ' +
+    'is listed in `library.issues`, a shader error in the effect\'s `error`. Details: kadr-effects skill.',
   inputSchema: {}
 }, async () => {
   try {
-    return asText(await editorEval('return window.kadrEditor.effects.list()'))
+    return asText(await editorEval(`await window.kadrEditor.refreshEffectsLibrary()
+      return { effects: window.kadrEditor.effects.list(), library: window.kadrEditor.effects.library() }`))
   } catch (e) { return asError(e) }
 })
 

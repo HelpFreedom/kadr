@@ -2,20 +2,10 @@
 // `<id>.fx.ts` whose default export is an EffectDef; index.ts collects them, so
 // adding an effect touches nothing else. See CLAUDE.md, EFFECTS.
 
-/** A user-visible name: one string for every language, or one per language. */
-export type Label = string | { ru: string; en: string }
+import type { EffectGroup, EffectParamDecl, Label } from '@shared/effectFile'
 
-export interface EffectParamDecl {
-  kind: 'number' | 'color' | 'select' | 'toggle'
-  /** number / select value; '#rrggbb' for a colour; boolean for a toggle */
-  default: number | string | boolean
-  min?: number
-  max?: number
-  step?: number
-  /** select: the choices; the uniform receives `value` */
-  options?: { value: number; name: Label }[]
-  name: Label
-}
+// the declaration types are shared with project-library effect files
+export type { EffectGroup, EffectParamDecl, Label }
 
 /**
  * Parameter values as the shader sees them: numbers (a select gives its value,
@@ -59,7 +49,7 @@ export interface FxContext {
 export interface EffectDef {
   /** stored in the project as Effect.type — never rename a shipped one */
   id: string
-  group: 'color' | 'key' | 'stylize' | 'light' | 'blur'
+  group: EffectGroup
   name: Label
   params: Record<string, EffectParamDecl>
   /**
@@ -80,6 +70,9 @@ export interface EffectDef {
   stage?: 'layer' | 'under'
   /** reads uTime / ctx.time: frames at different times differ even at rest */
   timeDependent?: boolean
+  /** 'library': from the project's kadr-lib/effects (file named in `file`) */
+  source?: 'library'
+  file?: string
   /** false when these values change nothing (a zero blur): the layer is drawn plainly */
   active?: (v: FxValues, project: { width: number; height: number }) => boolean
 }

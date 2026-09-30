@@ -16,12 +16,35 @@ interface EffectsState {
   defs: Record<string, EffectDef>
   /** effect id → why it cannot run (a shader that does not compile) */
   errors: Record<string, string>
+  /** project-library files that are not effects yet (a bad header) */
+  libraryIssues: { id: string; file: string; error: string }[]
+  /** the open project's kadr-lib/effects, or null for an unsaved project */
+  libraryDir: string | null
 }
 
 export const useEffects = create<EffectsState>(() => ({
   defs: Object.fromEntries(builtins.map((d) => [d.id, d])),
-  errors: {}
+  errors: {},
+  libraryIssues: [],
+  libraryDir: null
 }))
+
+/**
+ * Replace the project-library effects ('lib:*') with a fresh reading of the
+ * folder. Their compile errors are cleared too: an edited file compiles anew
+ * (programs are keyed by source hash) and reports again if it still fails.
+ */
+export function setLibraryEffects(defs: EffectDef[], issues: EffectsState['libraryIssues'], dir: string | null) {
+  const st = useEffects.getState()
+  const keep = Object.fromEntries(Object.entries(st.defs).filter(([id]) => !id.startsWith('lib:')))
+  const errors = Object.fromEntries(Object.entries(st.errors).filter(([id]) => !id.startsWith('lib:')))
+  useEffects.setState({
+    defs: { ...keep, ...Object.fromEntries(defs.map((d) => [d.id, d])) },
+    errors,
+    libraryIssues: issues,
+    libraryDir: dir
+  })
+}
 
 export const getEffect = (id: string): EffectDef | undefined => useEffects.getState().defs[id]
 export const listEffects = (): EffectDef[] => Object.values(useEffects.getState().defs)

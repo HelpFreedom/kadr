@@ -21,6 +21,7 @@ import { importFiles, wireDropDiagnostics } from './engine/mediaImport'
 import { snapshotFrame, contactSheet } from './engine/snapshot'
 import { runChecks, readingTime, cameraJerks, CHECK_LIMITS, useChecksUi } from './engine/checks'
 import { effectsApi } from './engine/effectsApi'
+import { wireEffectsLibrary, refreshEffectsLibrary } from './engine/effectsLibrary'
 import { useEffects } from './gl/effects'
 import { importModels, refreshModels, insertModelFragment, modelFragmentTsx, useModelsUi, wireModels, prepareForFragment } from './engine/models'
 import { useFragmentParams, setParam, resetParams, flushParamSaves } from './engine/fragmentParams'
@@ -51,6 +52,7 @@ wireExportChime()
 wireAutosave()
 wireDropDiagnostics()
 wireModels()
+wireEffectsLibrary()
 wireOnion()
 
 // Tell main which GPU WebGL really runs on (electron/gpu.ts falls back to the
@@ -98,7 +100,7 @@ wireOnion()
   // by reading what actually failed instead of guessing
   useLog, logInfo, logWarn, logError, logAsText, clearLog,
   // per-clip effects: the catalogue (src/gl/effects) and one-undo edits
-  effects: effectsApi, useEffects
+  effects: effectsApi, useEffects, refreshEffectsLibrary
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

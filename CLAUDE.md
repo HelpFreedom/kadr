@@ -26,7 +26,7 @@ mixes audio and muxes/transcodes per preset.
   `check-sfx-labels.mjs` (sound labels vs /brag's 228) and `check-hdr.mjs`
   (the HDR → SDR maths and ffmpeg's own filter chain against the formula);
   `check-models.mjs` (3MF build items/components/units, STL, OBJ, GLB,
-  decimation) and `check-timeline.mjs` (the timeline's waveform columns and
+  decimation), `check-effectfile.mjs` (project-library effect headers) and `check-timeline.mjs` (the timeline's waveform columns and
   overlap zones must EQUAL the slow code they replaced); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
   `node scripts/gen-sfx-catalog.mjs` regenerates
@@ -431,6 +431,16 @@ mixes audio and muxes/transcodes per preset.
   button per slider; the animation editor has an «Эффекты» mode with its own
   lane. Colours, selects and toggles do not animate; FX presets store values
   at the playhead.
+  PROJECT-LIBRARY EFFECTS need no build: `<project>/kadr-lib/effects/
+  <name>.glsl` = a `/* kadr-effect {json} */` header (name, group, params —
+  the same declaration shape) + the GLSL body, used as `lib:<name>`. The
+  parser is pure (`shared/effectFile.ts`, `check-effectfile.mjs`); main
+  lists the folder and `fs.watch`es it (`electron/effects.ts`, created on
+  first watch, debounced 150 ms, one project at a time), the renderer
+  re-reads it on every change (`src/engine/effectsLibrary.ts`) and swaps
+  the `lib:*` entries of the registry. A bad file is listed with its reason
+  and never becomes an effect; nothing but GLSL is loaded, so a project from
+  elsewhere runs nothing outside WebGL.
   People add effects from the Inspector's grouped «Добавить эффект» menu
   (blocks are generated from the params); agents through
   `kadrEditor.effects` (list/add/set/move/remove, one undo each), the

@@ -1937,6 +1937,20 @@ div.tr-error {
   color: var(--c-sel);
 }
 .ctx-empty { padding: var(--s3) var(--s4); font-size: var(--fz-sm); }
+/* the Add effect menu: each group stacks its items; a project file that is
+   not an effect shows its name and, under it, why (readable text, not the
+   disabled colour, which never carries information) */
+.fx-add-menu { max-width: 340px; }
+.fx-add-menu [role='group'] { display: flex; flex-direction: column; }
+.fx-lib-bad {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s3) var(--s4);
+  font-size: var(--fz-sm);
+  color: var(--c-text-2);
+}
+.fx-lib-bad .fx-lib-why { font-size: var(--fz-label); color: var(--c-text-3); overflow-wrap: anywhere; }
 .ctx-dur-row {
   display: flex;
   align-items: center;

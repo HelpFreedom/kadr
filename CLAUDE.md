@@ -27,7 +27,8 @@ mixes audio and muxes/transcodes per preset.
   (the HDR → SDR maths and ffmpeg's own filter chain against the formula);
   `check-models.mjs` (3MF build items/components/units, STL, OBJ, GLB,
   decimation) and `check-timeline.mjs` (the timeline's waveform columns and
-  overlap zones must EQUAL the slow code they replaced); plus
+  overlap zones must EQUAL the slow code they replaced; edge tips never run
+  past their clip); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
   `node scripts/gen-sfx-catalog.mjs` regenerates
   `resources/sfx/kadr-sfx.json` after a bundled sound or

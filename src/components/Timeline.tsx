@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { type WaveBins, waveColumns, trackOverlaps } from '@/engine/timelineMath'
+import { type WaveBins, waveColumns, trackOverlaps, tipSpans } from '@/engine/timelineMath'
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
 import type { AudioDefect, Clip, MediaAsset, TimelineMarker, Track } from '@shared/types'
@@ -2014,8 +2014,8 @@ const ClipView = memo(function ClipView({
       {reversing !== undefined && (
         <div className="reverse-progress" style={{ width: `${Math.round(reversing * 100)}%` }} />
       )}
-      {tipIn && <div className="tip-strip left" style={{ width: zpx(tipIn.duration) }} />}
-      {tipOut && <div className="tip-strip right" style={{ width: zpx(tipOut.duration) }} />}
+      {tipIn && <div className="tip-strip left" style={{ width: zpx(tipSpans(clip).tin) }} />}
+      {tipOut && <div className="tip-strip right" style={{ width: zpx(tipSpans(clip).tout) }} />}
       {track.kind === 'video' && w > 40 && (
         <>
           <div

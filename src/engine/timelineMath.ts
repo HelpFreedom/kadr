@@ -1,6 +1,6 @@
 // Pure timeline maths, kept apart from the component so it can be checked in
-// plain node (scripts/check-timeline.mjs): the waveform's per-pixel peaks and
-// the overlap zones of a track. Both were rewritten for speed on a 1124-clip,
+// plain node (scripts/check-timeline.mjs): the waveform's per-pixel peaks, the
+// overlap zones of a track and the length of a clip's edge tips. Both were rewritten for speed on a 1124-clip,
 // 19-minute project, and both must give EXACTLY what the old, slow code gave.
 import type { Clip } from '@shared/types'
 
@@ -119,4 +119,19 @@ export function trackOverlaps(clips: Clip[]) {
     groupEnd = Math.max(groupEnd, b.start + b.duration)
   }
   return { zones, joints }
+}
+
+/**
+ * How long a clip's edge tips really run. A tip keeps the length it was given
+ * (0.3, 0.5 or 1 s from the menu) even on a clip shorter than that, and a
+ * beat edit is full of 0.3 s clips: an out tip then started before the in tip
+ * had ended and never reached its peak at the cut, and the strip on the
+ * timeline ran past the clip. When both tips together are longer than the
+ * clip they share it in proportion; one tip at most fills the whole clip.
+ */
+export function tipSpans(clip: Clip): { tin: number; tout: number } {
+  const tin = clip.transitionIn && clip.transitionIn.duration > 0.001 ? clip.transitionIn.duration : 0
+  const tout = clip.transitionOut && clip.transitionOut.duration > 0.001 ? clip.transitionOut.duration : 0
+  const k = tin + tout > clip.duration ? clip.duration / (tin + tout) : 1
+  return { tin: tin * k, tout: tout * k }
 }

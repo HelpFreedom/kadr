@@ -108,8 +108,12 @@ mixes audio and muxes/transcodes per preset.
   held whole in main: 48 kHz stereo f32 is ~23 MB per minute of timeline.
   The other limit is argv: Linux caps ONE argument at 128 KB (MAX_ARG_STRLEN),
   and that many clips build a `-filter_complex` past it — spawn failed with
-  E2BIG. The graph is written to a file and passed as `-filter_complex_script`,
-  on every export rather than only the big ones.
+  E2BIG. The graph is written to a file and passed by file on every export
+  rather than only the big ones. THE FLAG DEPENDS ON THE FFMPEG VERSION:
+  ffmpeg 8 removed `-filter_complex_script` ("Unrecognized option", every
+  export with audio failed), and its replacement `-/filter_complex <file>`
+  exists only from ffmpeg 7. `filterScriptFlag()` asks `ffmpeg -version` once
+  per run; git builds ("N-…") count as new, an unreadable answer as old.
   A FAILED MUX NO LONGER BINS THE VIDEO: the stream is rendered first and can
   take hours, and the mux ran with that temp file scheduled for deletion in
   `finally`. A non-cancelled failure that has video keeps it, and the error

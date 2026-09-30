@@ -78,6 +78,38 @@ rhythm, readability or physical sense — not a technical failure. So:
   `contactSheet({times})`, `autoCaptions(...)`, `openProject(path)`, plus
   kadr_transcribe / kadr_export as tools.
 
+### Transform, effects, transitions (what the store accepts)
+
+- `clip.transform`: `x`, `y` — project px from the frame centre, +y down;
+  `scale` — 1 = the source fitted INSIDE the frame (contain, not cover);
+  `rotation` — degrees; `opacity` 0..1; 3D: `rotX`, `rotY` (degrees, with
+  perspective) and `z` (px, depth). All Anims. Rotation or 3D at scale 1
+  leaves empty canvas in the corners — scale up until the frame is covered
+  (for a turn θ of a frame-filling layer roughly `cos θ + (H/W)·sin θ`).
+- Keyframe times are clip-local timeline seconds. `setClipSpeed` RESCALES
+  existing keyframes and fades, so set speed (and duration) first and write
+  keyframes after.
+- `clip.effects`: `[{ id: uid(), type: 'glow', enabled: true, params: {
+  color: '#7fc4ff', size: 70, intensity: 1, saturation: 1, smoke: 0.65,
+  speed: 1, particles: 0.5 } }]` and `{ type: 'blur', params: { size } }`
+  (px of the project). Params are plain numbers, not Anims. There is no
+  colour grading or keying in the editor: grade or key the source with
+  ffmpeg before import.
+- Edge ("tip") transitions, one clip end each —
+  `setEdgeTransitions([{ clipId, edge: 'in'|'out', type, duration }])`,
+  types `blurZoomIn blurZoomOut rgbSplit whipLeft whipRight whipUp whipDown
+  spinBlur flash glitch stretch lensWarp`. At a butt joint put the same type
+  on A's out and B's in: the two halves read as one move.
+- Overlap transitions: overlap two clips ON THE SAME TRACK, then
+  `setTransition(laterClipId, type)` — `crossfade dipToBlack wipeRight
+  wipeLeft wipeUp wipeDown circleOpen circleClose slideLeft slideRight
+  dissolve pixelize zoom radial` (default crossfade; the audio crossfades by
+  itself).
+- `startExport(project, preset, out, onProgress, range, opts)`: `opts.motionBlur`
+  is OFF unless true, `opts.frameBlending` is ON unless false; the export
+  dialog and `kadr_export` default both to on. Motion blur smears fast cuts
+  and snaps — turn it off for a cut-to-the-beat edit.
+
 ## VERIFY
 
 - After any visual edit: `kadr_snapshot` / `kadr_sheet` at the affected

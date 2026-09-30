@@ -168,7 +168,8 @@ server.registerTool('kadr_eval', {
     '- await window.kadr.probeMedia(path) → { asset } (probe a media file to import: then ' +
     'addAsset({ id: uid(), ...asset })); window.kadr.writeProject(path, project); ' +
     'window.kadr.readProject(path).\n' +
-    'Times are seconds. Animatable scalars (clip gain, transform.x/y/scale/rotation/opacity) are ' +
+    'Times are seconds. Animatable scalars (clip gain, transform.x/y/scale/rotation/opacity, numeric ' +
+    'effect params) are ' +
     'Anim objects — write { value: 0.5 }, NEVER a bare number. ' +
     'Mutations: always pushHistory first; the store is zustand — re-read ' +
     'getState() after each action. NEVER return whole project/asset objects — asset ' +
@@ -292,6 +293,8 @@ server.registerTool('kadr_effects', {
     'its kind, range and default, plus a compile error if an effect is broken. Add and change them through ' +
     'kadr_eval with window.kadrEditor.effects: add(clipId, type, params?) → effectId, set(clipId, effectId, ' +
     '{ enabled?, params? }), move(clipId, effectId, index), remove(clipId, effectId) — each one undo step. ' +
+    'A numeric param is a number or an Anim ({ value, keyframes: [{ time, value, easing }] }, clip-local ' +
+    'seconds); colours are "#rrggbb". ' +
     'The chain runs in list order ("layer" effects change the layer, "under" ones such as glow paint beneath it), ' +
     'after the clip transform, in project pixels. Look at the result with kadr_snapshot.',
   inputSchema: {}

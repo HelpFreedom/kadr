@@ -25,6 +25,18 @@ Each call is one undo step for the user; do not wrap them in pushHistory.
 Params you leave out get their defaults. Colours are `'#rrggbb'`, a toggle is
 0 or 1, a select takes one of its option values.
 
+## Animating a param
+Numeric params are Anims like the transform: a number, or
+`{ value, keyframes: [{ time, value, easing }] }` with clip-local times.
+```js
+fx.set(clipId, id, { params: { size: { value: 0, keyframes: [
+  { time: 0, value: 0, easing: 'easeOut' }, { time: 0.5, value: 40, easing: 'linear' }] } } })
+```
+Colours, selects and toggles do not animate. Splitting, trimming and speed
+changes move the keys with the clip. People key the same params in the
+Inspector (the diamond beside a slider) and in the animation editor's
+«Эффекты» mode.
+
 ## How the chain runs
 - In the clip's order, AFTER the clip transform, in project pixels: an
   effect sees the layer as it sits in the frame (scaled, rotated, masked).

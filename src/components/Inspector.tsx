@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Anim, Clip, Effect, FragmentInspect, FragmentParamDecl, FxPreset, TextStyle } from '@shared/types'
 import { useEditor, useFxPresets, useSettings, findClip, uid } from '@/state/store'
-import { useEffects, defaultParams, labelText, type EffectDef } from '@/gl/effects'
+import { useEffects, defaultParams, labelText, paramAnim, type EffectDef } from '@/gl/effects'
+import { evalAnim } from '@/engine/anim'
+import { applyValue, upsertKf, KF_EPS } from './animUtils'
 import { useT, type TKey } from '@/i18n'
 import { bakeAudio, bakeState, bakePlan } from '@/engine/audioReact'
 import { audibleTracksInRange } from '@/engine/subtitles'
@@ -296,7 +298,7 @@ function FragmentParamsSection({ clip }: { clip: Clip }) {
 }
 
 function Slider({
-  label, value, min, max, step, onChange
+  label, value, min, max, step, onChange, after
 }: {
   label: string
   value: number
@@ -304,6 +306,8 @@ function Slider({
   max: number
   step: number
   onChange: (v: number) => void
+  /** a control after the value (an effect param's keyframe button) */
+  after?: React.ReactNode
 }) {
   return (
     <label className="insp-field fx-slider">
@@ -318,6 +322,7 @@ function Slider({
         onChange={(e) => onChange(Number(e.target.value))}
       />
       <span className="fx-val">{Number(value.toFixed(2))}</span>
+      {after}
     </label>
   )
 }
@@ -356,9 +361,16 @@ function EffectsSection({ clip }: { clip: Clip }) {
   const saveFx = () => {
     const nm = name.trim()
     if (!nm || !effects.length) return
+    // a preset is a look, not a timing: animated params keep their value at
+    // the playhead (keyframe times would not fit another clip anyway)
+    const rel = Math.max(0, Math.min(clip.duration, useEditor.getState().playhead - clip.start))
     useFxPresets.getState().savePreset({
       name: nm,
-      effects: effects.map((e) => ({ ...e, params: { ...e.params } }))
+      effects: effects.map((e) => ({
+        ...e,
+        params: Object.fromEntries(Object.entries(e.params).map(([k, v]) =>
+          [k, typeof v === 'object' ? evalAnim(v, rel) : v]))
+      }))
     })
     setName('')
   }
@@ -468,11 +480,14 @@ function FxBlock({ clip, fx, index, count }: { clip: Clip; fx: Effect; index: nu
   const lang = useSettings((s) => s.lang)
   const def = useEffects((s) => s.defs[fx.type])
   const error = useEffects((s) => s.errors[fx.type])
+  const playhead = useEditor((s) => s.playhead)
+  const rel = Math.max(0, Math.min(clip.duration, playhead - clip.start))
+  const inside = playhead >= clip.start - 1e-6 && playhead <= clip.start + clip.duration + 1e-6
   const st = () => useEditor.getState()
   const list = () => st().project.tracks.flatMap((tr) => tr.clips).find((c) => c.id === clip.id)?.effects ?? []
   const patchFx = (patch: Partial<Effect>) =>
     st().updateClip(clip.id, { effects: list().map((e) => (e.id === fx.id ? { ...e, ...patch } : e)) })
-  const setP = (key: string, v: number | string) => patchFx({ params: { ...fx.params, [key]: v } })
+  const setP = (key: string, v: Effect['params'][string]) => patchFx({ params: { ...fx.params, [key]: v } })
   const move = (to: number) => {
     const arr = [...list()]
     const [it] = arr.splice(index, 1)
@@ -531,7 +546,8 @@ function FxBlock({ clip, fx, index, count }: { clip: Clip; fx: Effect; index: nu
             </label>
           )
         }
-        const n = typeof raw === 'number' && Number.isFinite(raw) ? raw : Number(d.default)
+        const anim = paramAnim(d, raw)
+        const n = evalAnim(anim, rel)
         if (d.kind === 'toggle') {
           return (
             <label key={k} className="insp-field" data-param={k}>
@@ -556,9 +572,33 @@ function FxBlock({ clip, fx, index, count }: { clip: Clip; fx: Effect; index: nu
             </label>
           )
         }
+        // numbers animate like the transform: once a param has keyframes, an
+        // edit sets the key at the playhead instead of wiping them
+        const keys = anim.keyframes ?? []
+        const here = keys.find((kf) => Math.abs(kf.time - rel) < KF_EPS)
+        const toggleKey = () => {
+          st().pushHistory('hKeyframe')
+          if (!here) return setP(k, upsertKf(anim, rel, n))
+          const left = keys.filter((kf) => kf !== here)
+          setP(k, left.length ? { ...anim, keyframes: left } : { value: n })
+        }
         return (
           <Slider key={k} label={label} value={n} min={d.min ?? 0} max={d.max ?? 1}
-            step={d.step ?? ((d.max ?? 1) - (d.min ?? 0)) / 100} onChange={(v) => setP(k, v)} />
+            step={d.step ?? ((d.max ?? 1) - (d.min ?? 0)) / 100}
+            onChange={(v) => setP(k, applyValue(anim, rel, v, false))}
+            after={
+              <button
+                className={`fx-kf${here ? ' on' : keys.length ? ' animated' : ''}`}
+                data-act="fx-kf"
+                disabled={!inside}
+                aria-pressed={!!here}
+                title={here ? t('fxKfRemove') : t('fxKfAdd')}
+                aria-label={`${here ? t('fxKfRemove') : t('fxKfAdd')}: ${label}`}
+                onClick={(e) => { e.preventDefault(); toggleKey() }}
+              >
+                <Icon name="diamond" size={12} />
+              </button>
+            } />
         )
       })}
     </div>

@@ -489,7 +489,7 @@ function drawClipLayer(
     for (const e of clip.effects ?? []) {
       const def = e.enabled ? getEffect(e.type) : undefined
       if (!def) continue
-      const values = resolveValues(def, e.params)
+      const values = resolveValues(def, e.params, rel)
       if (def.active && !def.active(values, project)) continue
       chain.push({ def, values })
     }

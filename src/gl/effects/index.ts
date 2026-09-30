@@ -3,6 +3,8 @@
 // registry is a store so the Inspector and the agent API see effects that
 // arrive later (the project library).
 import { create } from 'zustand'
+import type { Anim } from '@shared/types'
+import { evalAnim } from '@/engine/anim'
 import type { EffectDef, EffectParamDecl, FxValues, Label } from './types'
 
 export type { EffectDef, EffectParamDecl, FxContext, FxValues, Label } from './types'
@@ -47,14 +49,22 @@ export function hexRgb(hex: string): [number, number, number] {
   return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255]
 }
 
-function numberOf(d: EffectParamDecl, v: unknown): number {
-  const n = typeof v === 'number' && Number.isFinite(v) ? v : typeof v === 'boolean' ? Number(v) : NaN
-  if (Number.isFinite(n)) return n
-  return typeof d.default === 'number' ? d.default : d.default === true ? 1 : 0
+const numericDefault = (d: EffectParamDecl) =>
+  typeof d.default === 'number' ? d.default : d.default === true ? 1 : 0
+
+/** A stored numeric param as an Anim: a bare number, an Anim, or the default. */
+export function paramAnim(d: EffectParamDecl, v: unknown): Anim {
+  if (typeof v === 'number' && Number.isFinite(v)) return { value: v }
+  if (v && typeof v === 'object' && Number.isFinite((v as Anim).value)) return v as Anim
+  return { value: numericDefault(d) }
 }
 
-/** Stored params → shader values, with defaults for anything missing or broken. */
-export function resolveValues(def: EffectDef, params: Record<string, unknown>): FxValues {
+/**
+ * Stored params → shader values at clip-local time `t`, with defaults for
+ * anything missing or broken. Evaluated here, before the compositor, so the
+ * motion-blur signature sees the values that are really drawn.
+ */
+export function resolveValues(def: EffectDef, params: Record<string, unknown>, t: number): FxValues {
   const out: FxValues = {}
   for (const [k, d] of Object.entries(def.params)) {
     const v = params[k]
@@ -62,7 +72,8 @@ export function resolveValues(def: EffectDef, params: Record<string, unknown>): 
       const hex = typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v : String(d.default)
       out[k] = hexRgb(hex)
     } else {
-      out[k] = numberOf(d, v)
+      const n = evalAnim(paramAnim(d, v), t)
+      out[k] = Number.isFinite(n) ? n : numericDefault(d)
     }
   }
   return out

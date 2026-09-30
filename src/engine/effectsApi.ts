@@ -1,7 +1,7 @@
 // Per-clip effects for scripts and agents (window.kadrEditor.effects, the
 // kadr_effects tool). Every change is one undo step, like an edit in the
 // Inspector; the effect catalogue is whatever src/gl/effects/ registered.
-import type { Effect } from '@shared/types'
+import type { Anim, Effect } from '@shared/types'
 import { useEditor, findClip, uid } from '@/state/store'
 import { listEffects, getEffect, defaultParams, useEffects } from '@/gl/effects'
 
@@ -39,7 +39,7 @@ export const effectsApi = {
   },
 
   /** add an effect at the end of the clip's chain; returns its id */
-  add(clipId: string, type: string, params: Record<string, number | string> = {}) {
+  add(clipId: string, type: string, params: Record<string, Anim | number | string> = {}) {
     const def = getEffect(type)
     if (!def) throw new Error(`unknown effect «${type}»; known: ${listEffects().map((d) => d.id).join(', ')}`)
     const effect: Effect = { id: uid(), type, enabled: true, params: { ...defaultParams(def), ...params } }
@@ -47,8 +47,12 @@ export const effectsApi = {
     return effect.id
   },
 
-  /** change params (merged) and/or switch the effect on or off */
-  set(clipId: string, effectId: string, patch: { enabled?: boolean; params?: Record<string, number | string> }) {
+  /**
+   * change params (merged) and/or switch the effect on or off; a numeric param
+   * takes a number or an Anim — { value, keyframes: [{ time, value, easing }] }
+   * with clip-local times, exactly like the transform
+   */
+  set(clipId: string, effectId: string, patch: { enabled?: boolean; params?: Record<string, Anim | number | string> }) {
     const effects = clipEffects(clipId)
     const i = indexOf(effects, effectId)
     const e = effects[i]

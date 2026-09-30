@@ -423,6 +423,14 @@ mixes audio and muxes/transcodes per preset.
   would collapse a moving shutter. Programs are cached by a hash of their
   source; a shader that does not compile is SKIPPED (never swapped for
   another), logged, and shown in the effect's block and by `kadr_effects`.
+  NUMERIC PARAMS ARE ANIMS (a bare number is still read): `forEachAnim`
+  walks them, so split/trim/ripple/speed and sanitize treat them like the
+  transform, and `resolveValues(def, params, t)` evaluates them before the
+  compositor. The Inspector writes through `applyValue` (an edit on a keyed
+  param sets the key at the playhead, never wipes the curve) and has a key
+  button per slider; the animation editor has an «Эффекты» mode with its own
+  lane. Colours, selects and toggles do not animate; FX presets store values
+  at the playhead.
   People add effects from the Inspector's grouped «Добавить эффект» menu
   (blocks are generated from the params); agents through
   `kadrEditor.effects` (list/add/set/move/remove, one undo each), the

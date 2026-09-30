@@ -1,6 +1,7 @@
 import type { Project, Clip, Track, MediaAsset } from '@shared/types'
-import { Compositor, type LayerDraw } from '@/gl/compositor'
-import { glowParams } from '@/gl/glow'
+import { Compositor, type FxLink, type LayerDraw } from '@/gl/compositor'
+import { getEffect, resolveValues } from '@/gl/effects'
+import { useEyedropper } from './eyedropper'
 import { getCaptureFrame } from './fragmentCapture'
 import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
@@ -333,8 +334,11 @@ export function frameSignature(
     drawEdgeEffect: (type: string, g: number, op: number) => parts.push(`G${type}|${g}|${op}`),
     drawTransition: (type: string, p: number, op: number) => parts.push(`T${type}|${p}|${op}`),
     drawLayer: (l: LayerDraw) => parts.push(`L${sig(l)}`),
-    drawLayerFx: (layers: LayerDraw[], blur: number, glows: unknown[], rel: number) =>
-      parts.push(`F${blur}|${JSON.stringify(glows)}|${rel}|${layers.map(sig).join('~')}`)
+    // the chain by id and EVALUATED values, and the clock only for effects that
+    // read it: two sub-samples with equal values draw equal pixels
+    drawLayerFx: (layers: LayerDraw[], chain: FxLink[], rel: number) =>
+      parts.push(`F${JSON.stringify(chain.map((f) => [f.def.id, f.values]))}|` +
+        `${chain.some((f) => f.def.timeDependent) ? rel : ''}|${layers.map(sig).join('~')}`)
   }
   try {
     drawFrame(rec as unknown as Compositor, project, t, pool, frames, blends, packed)
@@ -479,17 +483,21 @@ function drawClipLayer(
         : undefined
     }
     if (common.opacity <= 0.001) return
-    // enabled outer glows render the layer through the effect pass; smoke is
-    // clocked by clip-local time, identical in preview and export
-    const glows = (clip.effects ?? []).filter((e) => e.enabled && e.type === 'glow')
-    // gaussian blur effect: size as a fraction of project height, so the
-    // result is identical at any render resolution
-    const blurFx = (clip.effects ?? []).find((e) => e.enabled && e.type === 'blur')
-    const blurSize = typeof blurFx?.params.size === 'number' ? blurFx.params.size : 0
-    const blurFrac = Math.max(0, blurSize) / Math.max(1, project.height)
+    // enabled effects render the layer through the chain (src/gl/effects),
+    // clocked by clip-local time — identical in preview and export; an effect
+    // type this build does not know is skipped, its data kept
+    const chain: FxLink[] = []
+    for (const e of clip.effects ?? []) {
+      const def = e.enabled ? getEffect(e.type) : undefined
+      // the eyedropper waits on this effect: the preview shows the picture without it
+      if (!def || useEyedropper.getState().target?.effectId === e.id) continue
+      const values = resolveValues(def, e.params, rel)
+      if (def.active && !def.active(values, project)) continue
+      chain.push({ def, values })
+    }
     const emit = (...layers: LayerDraw[]) => {
-      if (glows.length || blurFrac > 0.0002) {
-        comp.drawLayerFx(layers, blurFrac, glows.map((g) => glowParams(g.params)), rel)
+      if (chain.length) {
+        comp.drawLayerFx(layers, chain, rel, project.height)
       } else {
         for (const l of layers) comp.drawLayer(l)
       }

@@ -4,6 +4,7 @@ import type {
   VoiceRun, AudioDefect, DefectState, TimelineMarker, MusicSectionLabel
 } from '@shared/types'
 import { isMusicMarker } from '@shared/types'
+import { saveUserStore } from '../engine/userStore'
 
 export const uid = () => Math.random().toString(36).slice(2, 10)
 
@@ -346,7 +347,7 @@ function loadPoseCache(): PosePreset[] {
 }
 
 function persistPosePresets(presets: PosePreset[]) {
-  window.kadr.writeUserStore(POSE_FILE, presets).catch(() => { /* disk hiccup */ })
+  void saveUserStore(POSE_FILE, presets)
   try {
     localStorage.setItem(POSE_LS_KEY, JSON.stringify(presets))
   } catch { /* cache only */ }
@@ -379,7 +380,7 @@ export const usePosePresets = create<PosePresetState>((set) => ({
       } catch { /* cache only */ }
     } else {
       const cached = loadPoseCache()
-      if (cached.length) window.kadr.writeUserStore(POSE_FILE, cached).catch(() => { /* keep cache */ })
+      if (cached.length) void saveUserStore(POSE_FILE, cached)
     }
   } catch { /* file store unavailable — cache keeps working */ }
 })()
@@ -409,7 +410,7 @@ function loadFxCache(): FxPreset[] {
 }
 
 function persistFxPresets(presets: FxPreset[]) {
-  window.kadr.writeUserStore(FX_FILE, presets).catch(() => { /* disk hiccup */ })
+  void saveUserStore(FX_FILE, presets)
   try {
     localStorage.setItem(FX_LS_KEY, JSON.stringify(presets))
   } catch { /* cache only */ }
@@ -498,6 +499,9 @@ interface EditorState {
   /** Remove media files from the bin AND every timeline clip that uses them
       (linked twins share the assetId) — one undo entry. */
   removeAssets(assetIds: string[]): void
+  /** Point assets at other files (relink of offline media): each given asset
+      replaces the one with its id — one undo entry. */
+  relinkAssets(fresh: MediaAsset[]): void
   /** register transcript/text docs in the sources (one undo entry) */
   addTexts(docs: TextDoc[]): void
   /** Land a finished voice-over — asset, script docs, run record and clip — as
@@ -729,6 +733,16 @@ export const useEditor = create<EditorState>((set, get) => ({
   addAsset: (a) =>
     set((s) => ({ project: { ...s.project, assets: [...s.project.assets, a] } })),
 
+  relinkAssets: (fresh) => {
+    const byId = new Map(fresh.map((a) => [a.id, a]))
+    if (!get().project.assets.some((a) => byId.has(a.id))) return
+    get().pushHistory('hRelink')
+    set((st) => {
+      const p = cloneProject(st.project)
+      p.assets = p.assets.map((a) => byId.get(a.id) ?? a)
+      return { project: p }
+    })
+  },
   removeAssets: (assetIds) => {
     const ids = new Set(assetIds)
     const s = get()

@@ -66,8 +66,7 @@ mixes audio and muxes/transcodes per preset.
   keyframes; `evalAnim` interpolates. `tracks[0]` is the top video track
   (drawn last).
 - `electron/main.ts` — window, `kadr://` streaming protocol with manual
-  Range support, IPC: dialogs, project IO (incl. atomic autosave), export,
-  user stores, proxy queue, reversed-media cache, media intake
+  Range support, IPC: dialogs, project IO, export, user stores, proxy queue, reversed-media cache, media intake
   (`media:download` — browser-URL drops fetched into `userData/imported`,
   cached by URL hash; `media:save-blob` — path-less Files / data: URLs /
   clipboard images, cached by content hash; `media:portal-files` — XDG
@@ -89,6 +88,29 @@ mixes audio and muxes/transcodes per preset.
   project loaded through `kadr_eval` never passes main at all, so the
   allowlist would have had holes exactly where a miss means a black preview. Startup sweeps leftover helper processes; shutdown force-exits
   (window-all-closed → app.exit failsafe, render-process-gone → exit).
+  EVERY PROJECT AND USER-STORE WRITE IS ATOMIC (`electron/atomicWrite.ts`):
+  save, autosave and `store:write` write `<path>.part-<pid>`, fsync, then
+  rename over the original — a plain writeFile of a ~78 MB project tears the
+  user's only copy on a crash or a full disk. A failed write leaves the
+  original byte-identical and removes the sidecar; Windows refuses a rename
+  over a file another program holds open (antivirus, sync client), so the
+  rename is retried 3× with backoff first. Test:
+  `node scripts/check-atomic-write.mjs`.
+  NOTHING REPLACES UNSAVED WORK WITHOUT A QUESTION: New, Open and closing
+  the window (×, Alt+F4, a quit) go through `confirmDiscard` in App.tsx —
+  Save / Don't save / Cancel, asked only when `needsConfirm` (the dirty-dot
+  rule, `src/engine/discardGuard.ts`) says so. main cancels the window's
+  `close` (and turns `before-quit` into a close) and waits for the page's
+  `app:close`; a page that has not registered its handler, a crashed or an
+  unresponsive one is not asked, so the window can always be closed.
+  `kadrEditor.openProject(path)` asks too; scripts pass `{ force: true }`.
+  Test: `node scripts/check-discard-guard.mjs`.
+  ONE EDITOR PER userData (`requestSingleInstanceLock`, taken right after
+  `KADR_USER_DATA` is applied — the lock is keyed by that path, so a sandbox
+  runs next to a live Kadr): a second launch quits and hands its argv over;
+  the first focuses and opens a `.kadr` from it through the same question
+  (`app:open-project`; the launch's own `.kadr` is fetched once over
+  `app:argv-project`). Test: `node scripts/check-argv-project.mjs`.
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
   render of a clip's source range, RAM-bounded chunks), `ExportMuxer`
@@ -349,6 +371,21 @@ mixes audio and muxes/transcodes per preset.
   x-moz-url / DownloadURL → portal key), `importDrop` (paths → URLs →
   raw blobs), window-level catch-all drop in App.tsx, drop forensics to
   `window.__dragLog` + `userData/drop-log.jsonl`.
+- `src/engine/offline.ts` + `electron/mediaStat.ts` + `shared/relinkMatch.ts`
+  — OFFLINE MEDIA: a moved or renamed source used to be a silent black clip
+  and an export that failed at the mux. The offline set is RUNTIME ONLY (asset
+  ids, never saved), recomputed by one batched `media:stat-many` pass when the
+  asset paths change, when a project is opened or restored (which also opens
+  the relink dialog if files are missing — the same paths still need a pass),
+  and on window focus. Scheduled with setTimeout, NOT rAF: a window behind
+  others gets no frames and the pass never ran. Clips are hatched, the bin
+  badges the asset, `startExport` refuses naming the files (stat'ed afresh).
+  Relink: «Указать файл», or «Искать в папке» — by name, then by size
+  (`MediaAsset.size`, from the probe since this change) + duration; a
+  candidate must agree with what is known, be the only fit, and one file never
+  serves two assets; older assets without a size are found by name only. Each
+  file is re-probed (another kind is refused), all applied as ONE undo step.
+  Test: `node scripts/check-relink-match.mjs`.
 - Clip speed UX (`Timeline.tsx`): Ctrl-drag on either extend grip or
   clip edge = 0.02–100× with ~16 px snapping to round multipliers AND
   neighbouring clip edges/playhead; a cursor-following ×N badge lights up
@@ -530,8 +567,24 @@ mixes audio and muxes/transcodes per preset.
   a `<video>` over the preview, translucent or in difference mode, never in
   snapshots or exports; selecting a fragment (to drag its sliders) does not
   steal it.
-- `src/engine/autosave.ts` — 5-minute autosave with `activity` flags
-  (paused during export and Claude sessions).
+- `src/engine/autosave.ts` + `electron/backups.ts` + `shared/backups.ts` —
+  autosave every 5 minutes and after 25 history moves, skipped while an
+  export or the voice-over check runs (`activity` flags). NOT during a Claude
+  session: every edit replaces the project object, so a tick never sees half
+  of one. Each tick writes a VERSION to
+  `userData/backups/<projectKey(path) | unsaved-<id>>/<ISO time>.kadr`
+  (+ `source.json` naming the project file) — newest 10, at most 500 MB per
+  project, the newest always kept — and `<name>.autosave.kadr` next to a
+  saved project (never-saved ones no longer land in Downloads).
+  `session.lock` is written at startup and removed in window-all-closed; a
+  lock found at the next start means Kadr died, and the page is offered the
+  newest backup WRITTEN DURING THAT SESSION and newer than its project file
+  (Restore opens it as an unsaved copy). Only that session's backups: an
+  older one was there to offer before, and would come back after every kill.
+  The offer is handed out once per launch, so the page memoizes its ask
+  (StrictMode's double effect otherwise answered null over it). Opening a
+  project sweeps `<path>.part-<pid>` sidecars of dead writers left by a
+  crash mid-save. Test: `node scripts/check-backups.mjs`.
 - `src/engine/chime.ts` — short WebAudio two-note signal when a render
   finishes (wired to export progress in `src/main.tsx`).
 - Timeline markers live in `project.markers` (`addMarker`/`moveMarker`/
@@ -628,7 +681,8 @@ mixes audio and muxes/transcodes per preset.
   fragment render are named after their source (a hash of path+size+mtime),
   so deleting one costs time and nothing else; a reversed clip, a download
   and a voice-over run are stored BY PATH in the project and cannot be
-  derived again. The key formula lives in its own file because a second
+  derived again; backups are REFERENCED too (user data), one folder per
+  project named `projectKey(path)`. The key formula lives in its own file because a second
   copy would drift, and a drifted formula aims a delete button at the
   wrong file. Projects are keyed BY PATH, never by name. `storage:prune`
   FAILS CLOSED: without an explicit `confirm: true` it only counts, so a

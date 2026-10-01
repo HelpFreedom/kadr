@@ -97,6 +97,21 @@ const api: KadrApi = {
   readProject: (path) => ipcRenderer.invoke('project:read', path),
   writeProject: (path, project) => ipcRenderer.invoke('project:write', path, project),
   autosaveProject: (project, mainPath) => ipcRenderer.invoke('project:autosave', project, mainPath),
+  backupOffer: () => ipcRenderer.invoke('backup:offer'),
+  revealBackup: (file) => ipcRenderer.invoke('backup:reveal', file),
+  onCloseRequest: (cb) => {
+    const handler = () => cb()
+    ipcRenderer.on('app:close-request', handler)
+    ipcRenderer.send('app:close-guard')
+    return () => ipcRenderer.removeListener('app:close-request', handler)
+  },
+  closeWindow: () => ipcRenderer.send('app:close'),
+  onOpenProject: (cb) => {
+    const handler = (_e: unknown, path: string) => cb(path)
+    ipcRenderer.on('app:open-project', handler)
+    void ipcRenderer.invoke('app:argv-project').then((p: string | null) => { if (p) cb(p) })
+    return () => ipcRenderer.removeListener('app:open-project', handler)
+  },
 
   storageScan: (projects, open) => ipcRenderer.invoke('storage:scan', projects, open),
   storagePrune: (req) => ipcRenderer.invoke('storage:prune', req),
@@ -161,6 +176,8 @@ const api: KadrApi = {
   },
   fragmentTypecheck: (id) => ipcRenderer.invoke('fragment:typecheck', id),
   probeBasic: (path) => ipcRenderer.invoke('media:probe-basic', path),
+  statMany: (paths) => ipcRenderer.invoke('media:stat-many', paths),
+  relinkScan: (folder, wanted) => ipcRenderer.invoke('media:relink-scan', folder, wanted),
   fragmentMedia: (path, projectDir, opts) => ipcRenderer.invoke('media:fragment-media', path, projectDir, opts),
   fragmentInspect: (id) => ipcRenderer.invoke('fragment:inspect', id),
   fragmentCollide: (id, step) => ipcRenderer.invoke('fragment:collide', id, step),

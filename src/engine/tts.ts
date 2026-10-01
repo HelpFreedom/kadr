@@ -9,6 +9,7 @@ import { create } from 'zustand'
 import { useEditor, uid } from '../state/store'
 import { dirOf, baseOf } from '@shared/paths'
 import { parseSrt } from './subtitles'
+import { saveUserStore } from './userStore'
 import type { MediaAsset, TextDoc, TtsParams, TtsSettings, TtsVoice, VoiceRun } from '@shared/types'
 
 export const TTS_DEFAULTS: TtsSettings = {
@@ -87,7 +88,7 @@ function loadTtsCache(): TtsSettings {
 }
 
 function persistTts(settings: TtsSettings) {
-  window.kadr.writeUserStore(TTS_FILE, settings).catch(() => { /* disk hiccup */ })
+  void saveUserStore(TTS_FILE, settings)
   try {
     localStorage.setItem(TTS_LS_KEY, JSON.stringify(settings))
   } catch { /* cache only */ }

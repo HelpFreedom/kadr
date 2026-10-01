@@ -27,6 +27,7 @@ import { audioStats, silencePreview } from './engine/audio'
 import { previewPoolStats } from './engine/player'
 import { usePopout, openPreviewWindow, dockPreviewWindow, togglePreviewWindow } from './engine/popout'
 import { wireExportChime } from './engine/chime'
+import { wireOffline, useOffline, refreshOffline, relinkTo, relinkFromFolder, openRelink } from './engine/offline'
 import { normalizeClip } from './engine/normalize'
 import { neonWave, neonWaveTsx, NEON_WAVE_DEFAULTS } from './engine/neonWave'
 import { speakText, useTtsSettings, ttsParams, ttsTempo, loadVoices, sanitizeTtsSettings, TTS_DEFAULTS } from './engine/tts'
@@ -50,6 +51,7 @@ wireAutosave()
 wireDropDiagnostics()
 wireModels()
 wireOnion()
+wireOffline()
 
 // Tell main which GPU WebGL really runs on (electron/gpu.ts falls back to the
 // default one when the discrete GPU was asked for and this says otherwise).
@@ -73,6 +75,8 @@ wireOnion()
   PRESETS, startExport, evalAnim, openProject: openProjectAt,
   transcribe: transcribeFlow, parseSrt, cuesToSrt, docTimeToProject, segmentsToCues,
   createFragment, ensureFragmentServer, deleteFragment, fragmentNeedsCapture, autoCaptions, captionsTsx, autosaveNow, activity,
+  // offline media: the runtime set, and relink by map or by folder (one undo)
+  useOffline, refreshOffline, relinkTo, relinkFromFolder, openRelink,
   reverseClip, importFiles, snapshotFrame, contactSheet, normalizeClip, syncProjectFragments,
   runChecks, readingTime, cameraJerks, CHECK_LIMITS, useChecksUi,
   importModels, refreshModels, insertModelFragment, modelFragmentTsx, useModelsUi, prepareForFragment,

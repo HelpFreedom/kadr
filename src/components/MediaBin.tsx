@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { useEditor } from '@/state/store'
 import { useProxyProgress } from '@/engine/proxy'
+import { useOffline, openRelink } from '@/engine/offline'
 import { importFiles, dropPayload, dragHasMedia, dropUsable, importDrop, useImportUi } from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
 import { useTtsUi } from './TtsDialog'
@@ -15,6 +16,7 @@ export function MediaBin() {
   const texts = useEditor((s) => s.project.texts ?? [])
   const ttsReady = useTtsUi((s) => s.hasKey)
   const proxyJobs = useProxyProgress((s) => s.jobs)
+  const offline = useOffline((s) => s.ids)
   const [busy, setBusy] = useState(false)
   const importing = useImportUi((s) => s.active > 0)
   const [sel, setSel] = useState<string[]>([])
@@ -99,6 +101,11 @@ export function MediaBin() {
             <Icon name="trash" size={13} /> {sel.length}
           </button>
         )}
+        {assets.some((a) => offline.has(a.id)) && (
+          <button className="danger" data-act="relink" onClick={() => openRelink()}>
+            <Icon name="unlink" size={13} /> {t('relinkBtn')}
+          </button>
+        )}
         <button data-act="import" onClick={importMedia} disabled={busy || importing}>
           {busy || importing ? '…' : t('import')}
         </button>
@@ -117,8 +124,8 @@ export function MediaBin() {
         {assets.map((a) => (
           <div
             key={a.id}
-            className={sel.includes(a.id) ? 'bin-item selected' : 'bin-item'}
-            title={a.path}
+            className={`bin-item${sel.includes(a.id) ? ' selected' : ''}${offline.has(a.id) ? ' offline' : ''}`}
+            title={offline.has(a.id) ? `${t('offlineBadge')}: ${a.path}` : a.path}
             draggable
             onDragStart={(e) => {
               e.dataTransfer.setData('kadr/asset', a.id)
@@ -135,7 +142,13 @@ export function MediaBin() {
             ) : (
               <div className="bin-audio"><Icon name="audio" size={26} /></div>
             )}
-            {proxyJobs[a.id] !== undefined ? (
+            {offline.has(a.id) ? (
+              <button className="proxy-badge offline" data-offline-badge={a.id} title={t('offlineBadge')}
+                      aria-label={t('offlineBadge')}
+                      onClick={(e) => { e.stopPropagation(); openRelink() }}>
+                <Icon name="unlink" size={10} />
+              </button>
+            ) : proxyJobs[a.id] !== undefined ? (
               <div className="proxy-badge building" title={t('proxyBuilding')}>
                 <Spinner size={9} /> {Math.round(proxyJobs[a.id] * 100)}%
               </div>

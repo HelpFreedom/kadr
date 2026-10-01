@@ -10,6 +10,7 @@ import {
 } from './ffmpeg'
 import { mediaCacheKey, proxySuffix, decodedSuffix, reverseSuffix } from './cacheKeys'
 import { registerStorageIpc } from './storage'
+import { registerMediaStatIpc } from './mediaStat'
 import { registerClaudeIpc } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerTtsIpc } from './tts'
@@ -20,6 +21,9 @@ import { registerFragmentIpc, cancelFragmentRenders, stopAllCaptures } from './f
 import { applyGpuChoice, registerGpuIpc } from './gpu'
 import { registerModelIpc } from './models'
 import { sourceHdr, hdrLut, hdrFilter, fragmentMedia } from './hdr'
+import { atomicWrite, sweepPartSidecars } from './atomicWrite'
+import { beginSession, endSession, registerBackupIpc, writeBackup } from './backups'
+import { argvProject } from '@shared/argvProject'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -41,6 +45,23 @@ protocol.registerSchemesAsPrivileged([
 // (sweepStaleSessions matches helper processes by paths under userData) must
 // never reach the other instance's. Must run before anything reads the path.
 if (process.env.KADR_USER_DATA) app.setPath('userData', process.env.KADR_USER_DATA)
+
+// One editor per userData: two would write over each other's project, stores
+// and autosaves. The lock is keyed by the userData path (so a KADR_USER_DATA
+// sandbox runs next to a live Kadr) and is OS-level — it dies with the process.
+// A second launch hands its argv to the first and quits; a .kadr in it is
+// opened there through the unsaved question (App.tsx, onOpenProject).
+if (!app.requestSingleInstanceLock()) app.exit(0)
+/** a .kadr from the launch argv, handed to the page once it asks */
+let pendingOpen = argvProject(process.argv)
+app.on('second-instance', (_e, argv) => {
+  const path = argvProject(argv)
+  if (!win || win.isDestroyed()) { pendingOpen = path ?? pendingOpen; return }
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+  if (path) win.webContents.send('app:open-project', path)
+})
 
 // the discrete GPU when there is one (electron/gpu.ts) — before 'ready'
 applyGpuChoice()
@@ -80,6 +101,16 @@ process.on('uncaughtException', (err) => {
 })
 
 let win: BrowserWindow | null = null
+// Closing the window with unsaved work asks the page first (src/App.tsx,
+// confirmDiscard). closeGuard: the page has its answer handler up — a page that
+// never loaded or was reloaded has none, and must not make the window unclosable;
+// a crashed or hung renderer is not asked either (the force-exit failsafe below).
+let closeAllowed = false
+let closeGuard = false
+let unresponsive = false
+let quitAfterClose = false
+const mustAsk = () => !!win && !win.isDestroyed() && !closeAllowed && closeGuard &&
+  !unresponsive && !win.webContents.isCrashed()
 /** window.open name of the detached preview — see src/engine/popout.ts */
 const PREVIEW_WIN = 'kadr-preview'
 
@@ -103,13 +134,21 @@ function createWindow() {
   })
   win.setMenuBarVisibility(false)
   const owner = win
+  closeAllowed = closeGuard = unresponsive = false
+  win.on('close', (e) => {
+    if (!mustAsk()) return
+    e.preventDefault()
+    owner.webContents.send('app:close-request')
+  })
+  win.on('unresponsive', () => { unresponsive = true })
+  win.on('responsive', () => { unresponsive = false })
   // A reload of the editor page forgets which fragment capture windows it
   // asked for, but main keeps them — found as windows of a project closed
   // hours earlier, still rendering 60 frames a second offscreen. The new page
   // starts the ones it wants again. Only the top document counts: the
   // fragment iframes navigate inside this same webContents all the time.
   win.webContents.on('did-start-navigation', (details) => {
-    if (details.isMainFrame && !details.isSameDocument) stopAllCaptures()
+    if (details.isMainFrame && !details.isSameDocument) { stopAllCaptures(); closeGuard = false }
   })
   // The preview can be detached into a window of its own (src/engine/popout.ts).
   // The renderer opens an about:blank popup — same origin and same renderer
@@ -139,8 +178,9 @@ function createWindow() {
     // closing the editor must not leave the preview window behind: while one
     // is open window-all-closed never fires and the app would never quit
     const closeChild = () => { if (!child.isDestroyed()) child.destroy() }
-    owner.on('close', closeChild)
-    child.on('closed', () => owner.isDestroyed() || owner.removeListener('close', closeChild))
+    // 'closed', not 'close': a close the user cancels (unsaved work) keeps both
+    owner.on('closed', closeChild)
+    child.on('closed', () => owner.isDestroyed() || owner.removeListener('closed', closeChild))
   })
   // a killed/crashed renderer leaves a dead window and an immortal main
   // process (the running project is lost either way — autosave has it);
@@ -264,7 +304,9 @@ app.whenReady().then(() => {
       return new Response('not found', { status: 404 })
     }
   })
+  beginSession()
   registerIpc()
+  registerBackupIpc()
   void pruneDecodedCache()
   void sweepPartFiles()
   registerClaudeIpc(() => win)
@@ -274,6 +316,7 @@ app.whenReady().then(() => {
   registerEnvelopeIpc()
   registerSoundsIpc()
   registerStorageIpc()
+  registerMediaStatIpc()
   registerGpuIpc()
   registerModelIpc()
   registerFragmentIpc(() => win)
@@ -285,6 +328,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
+    endSession()   // a clean exit: no restore offer next time (a crash never gets here)
     app.quit()
     // an in-flight export/muxer or any stray handle must never keep a
     // windowless process alive — a lingering instance blocks the next
@@ -293,7 +337,15 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (e) => {
+  // a quit (tray, Cmd+Q, OS) goes through the window's question too; nothing
+  // is cancelled until the page said yes
+  if (mustAsk()) {
+    e.preventDefault()
+    quitAfterClose = true
+    win!.close()
+    return
+  }
   exportState?.muxer?.cancel()
   cancelFragmentRenders()
   void cleanupExport()
@@ -570,7 +622,7 @@ async function rememberDir(kind: string, filePath: string) {
       data = JSON.parse(await fs.readFile(userStorePath(DIRS_STORE), 'utf8'))
     } catch { /* fresh store */ }
     data[kind] = dirname(filePath)
-    await fs.writeFile(userStorePath(DIRS_STORE), JSON.stringify(data, null, 1))
+    await atomicWrite(userStorePath(DIRS_STORE), JSON.stringify(data, null, 1))
   } catch { /* best effort */ }
 }
 
@@ -609,7 +661,11 @@ function registerIpc() {
   })
 
   ipcMain.handle('store:write', async (_e, name: string, data: unknown) => {
-    await fs.writeFile(userStorePath(name), JSON.stringify(data, null, 1))
+    const p = userStorePath(name)
+    // the renderer logs this: it names the store's file, not the .part sidecar
+    await atomicWrite(p, JSON.stringify(data, null, 1)).catch((err: NodeJS.ErrnoException) => {
+      throw new Error(`${p}: ${err.code ?? err.message}`)
+    })
   })
 
   ipcMain.handle('media:open-dialog', async () => {
@@ -624,6 +680,14 @@ function registerIpc() {
   })
 
   ipcMain.on('media:token', (e) => { e.returnValue = MEDIA_TOKEN })
+  ipcMain.on('app:close-guard', () => { closeGuard = true })
+  // the launch's own .kadr — handed out once (StrictMode asks twice in dev)
+  ipcMain.handle('app:argv-project', () => { const p = pendingOpen; pendingOpen = null; return p })
+  ipcMain.on('app:close', () => {
+    closeAllowed = true
+    win?.close()
+    if (quitAfterClose) app.quit()
+  })
   ipcMain.handle('media:probe', (_e, path: string) => probeMedia(path))
   ipcMain.handle('media:probe-basic', (_e, path: string) => probeBasic(String(path)))
   ipcMain.handle('media:fragment-media', (_e, path: string, projectDir: string, opts?: { name?: string; maxSide?: number }) =>
@@ -809,25 +873,21 @@ function registerIpc() {
   })
 
   ipcMain.handle('project:read', async (_e, path: string): Promise<Project> => {
+    // a save that died mid-write left its full-size sidecar next to the file
+    void sweepPartSidecars(dirname(path), basename(path) + '.part-')
     return JSON.parse(await fs.readFile(path, 'utf-8'))
   })
 
   ipcMain.handle('project:write', async (_e, path: string, project: Project) => {
-    await fs.writeFile(path, JSON.stringify(project, null, 1), 'utf-8')
+    await atomicWrite(path, JSON.stringify(project, null, 1))
   })
 
-  // periodic safety net: <name>.autosave.kadr next to the saved project
-  // (Downloads for never-saved ones); tmp+rename so a crash mid-write can
-  // never leave a torn file
+  // periodic safety net: a versioned backup in userData/backups (electron/backups.ts),
+  // and <name>.autosave.kadr next to a saved project for those who open it by hand
   ipcMain.handle('project:autosave', async (_e, project: Project, mainPath: string | null) => {
-    const dir = mainPath ? dirname(mainPath) : app.getPath('downloads')
-    const base = mainPath
-      ? basename(mainPath, '.kadr')
-      : (project.name || 'Untitled').replace(/[^\p{L}\p{N}._ -]/gu, '').trim() || 'Untitled'
-    const out = join(dir, `${base}.autosave.kadr`)
-    const tmp = `${out}.tmp`
-    await fs.writeFile(tmp, JSON.stringify(project, null, 1), 'utf-8')
-    await fs.rename(tmp, out)
+    const json = JSON.stringify(project, null, 1)
+    const out = await writeBackup(json, mainPath, project)
+    if (mainPath) await atomicWrite(join(dirname(mainPath), `${basename(mainPath, '.kadr')}.autosave.kadr`), json)
     return out
   })
 

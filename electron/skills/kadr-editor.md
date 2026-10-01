@@ -105,7 +105,8 @@ symlink). Unsaved projects keep fragments in the workspace until the first
 save moves them over. After opening a project through kadr_eval, call
 `await kadrEditor.syncProjectFragments(project, path)` so project-owned
 fragments get their workspace links back (`kadrEditor.openProject(path)` does
-all of it).
+all of it — and asks the user first when the open project has unsaved
+changes; it resolves false if they keep it).
 
 - Keep `fragment = { component, meta }` exported (plus `inspect` —
   kadr-motion) and meta.json's durationInFrames in sync with timing changes.

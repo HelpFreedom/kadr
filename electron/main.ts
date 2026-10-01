@@ -10,16 +10,17 @@ import {
 } from './ffmpeg'
 import { mediaCacheKey, proxySuffix, decodedSuffix, reverseSuffix } from './cacheKeys'
 import { registerStorageIpc } from './storage'
-import { registerClaudeIpc } from './claude'
+import { registerClaudeIpc, sweepStaleSessions } from './claude'
 import { registerTranscribeIpc } from './transcribe'
 import { registerTtsIpc } from './tts'
 import { registerVoiceIpc } from './voice'
 import { registerEnvelopeIpc } from './envelope'
 import { registerSoundsIpc } from './sounds'
-import { registerFragmentIpc, cancelFragmentRenders, stopAllCaptures } from './fragments'
+import { registerFragmentIpc, cancelFragmentRenders, stopAllCaptures, sweepRenderScratch } from './fragments'
 import { applyGpuChoice, registerGpuIpc } from './gpu'
 import { registerModelIpc } from './models'
 import { sourceHdr, hdrLut, hdrFilter, fragmentMedia } from './hdr'
+import { uriListToPaths, readWinFileDrop } from './clipboardFiles'
 import type { ExportJob, Project } from '@shared/types'
 
 // Streamed local media under a privileged scheme so the renderer can play
@@ -278,6 +279,9 @@ app.whenReady().then(() => {
   registerModelIpc()
   registerFragmentIpc(() => win)
   createWindow()
+  // leftovers of a hard-killed run: its helper processes, then the render temp they held.
+  // After the page loads — on Windows the listing is a PowerShell cold start (0.3–1 s).
+  win?.webContents.once('did-finish-load', () => { void sweepStaleSessions().then(sweepRenderScratch) })
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -708,11 +712,13 @@ function registerIpc() {
   ipcMain.handle('media:clipboard-paste', async () => {
     let uriList = ''
     try { uriList = clipboard.read('text/uri-list') || '' } catch { /* format absent */ }
-    const paths: string[] = []
-    for (const line of uriList.split(/\r?\n/)) {
-      const u = line.trim()
-      if (!u.startsWith('file://')) continue
-      try { paths.push(decodeURIComponent(new URL(u).pathname)) } catch { /* malformed */ }
+    let paths = uriListToPaths(uriList)
+    if (!paths.length && process.platform === 'win32' && clipboard.availableFormats().includes('text/uri-list')) {
+      paths = await readWinFileDrop()
+      if (!paths.length) {
+        const first = clipboard.readBuffer('FileNameW').toString('utf16le').replace(/\0+$/, '')
+        if (first) paths = [first]
+      }
     }
     if (paths.length) return paths
     const img = clipboard.readImage()

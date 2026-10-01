@@ -1,8 +1,7 @@
 ---
-name: kadr-motion
-description: Motion graphics in Kadr — titles, captions, callouts, promos, multi-scene fragment pieces. Readability rules with numbers, style defaults that keep work from looking AI-templated, the one-film architecture for pieces made of several fragments, and the checks (kadr_check, kadr_sheet) to run before showing anything. Use together with kadr-editor whenever you write or change a fragment, a title or captions; add kadr-music when there is music and kadr-3d for 3D.
+name: motion
+description: Motion graphics in Kadr — titles, captions, callouts, promos, multi-scene fragment pieces. Readability rules with numbers, style defaults that keep work from looking AI-templated, the one-film architecture for pieces made of several fragments, and the checks (kadr_check, kadr_sheet) to run before showing anything. Use together with kadr:editor whenever you write or change a fragment, a title or captions; add kadr:music when there is music and kadr:3d for 3D.
 ---
-<!-- managed by Kadr: rewritten when Kadr updates (electron/skills/) -->
 
 # Motion in Kadr
 
@@ -91,7 +90,7 @@ export const fragment = { component: Film, meta, inspect: defineInspect({
 Then, before showing the user:
 
 1. `kadr_typecheck <fragmentId>`;
-2. `kadr_check` — events against the bars (with kadr-music), hold times,
+2. `kadr_check` — events against the bars (with kadr:music), hold times,
    moving text, overlapping or simultaneous titles, camera jerks; with
    `pixels:true` also contrast and seams; results in TIMELINE seconds, and the
    «Проверка» button shows the same list to the user with a click to each place;

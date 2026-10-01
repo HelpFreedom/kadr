@@ -51,7 +51,7 @@ mixes audio and muxes/transcodes per preset.
 
 ## Requirements
 - Node.js ≥ 20, system `ffmpeg`/`ffprobe` in PATH
-- Optional: `python3` + `faster-whisper` (speech-to-text), the `claude`
+- Optional: Python + `faster-whisper` (speech-to-text), the `claude`
   CLI (embedded AI assistant), network access for the one-time Remotion
   workspace install
 - Optional for voice-over: an ElevenLabs API key (entered in the app,
@@ -120,7 +120,14 @@ mixes audio and muxes/transcodes per preset.
   `webContents.executeJavaScript`); extra env/command via
   `userData/claude-env.json`, extra MCP servers via
   `userData/claude-mcp.json`; `sweepStaleSessions()` clears leftovers of
-  hard-killed runs at startup.
+  hard-killed runs at startup (after the page loads). On Windows there is no
+  /proc: one PowerShell `Win32_Process` listing, and a process is killed
+  (`taskkill /T`) only if its command line carries a Kadr path AND its parent
+  is gone — the user's own node or ffmpeg in the same folders has a live
+  parent (`electron/orphanSweep.ts`, test `node scripts/check-sweep-match.mjs`).
+  Measured: a `taskkill /F` of Kadr mid-render takes every non-detached
+  helper down with it (libuv's kill-on-close job, the pty's closed console),
+  so what the sweep meets there is a detached one.
   Open and close are SERIALIZED through one promise chain and carry a
   generation: spawning is async (config read, `which`, the node-pty import)
   while a close is instant, so a close that overtakes an in-flight open would
@@ -141,13 +148,19 @@ mixes audio and muxes/transcodes per preset.
   send the request — and a flat refusal of any request carrying an `Origin`.
   The token reaches the MCP server as argv[3] of the generated config; the
   liveness ping on `GET /` stays open.
-  AGENT SKILLS are composable: `electron/skills/*.md` are synced at startup
-  to `~/.claude/skills/<name>/SKILL.md` — `kadr-editor` (the base: LOOK →
-  ACT → VERIFY, the interface, fragments, voice), `kadr-music`,
-  `kadr-motion`, `kadr-3d`, loaded as a project needs them (the system hint
-  says so); their rules are defaults. Every file carries a
-  `<!-- managed by Kadr` mark: a `kadr-*` folder with it that is no longer
-  shipped is removed, one without it (the user's own) never is.
+  AGENT SKILLS are composable and load PER SESSION: `electron/claude-plugin`
+  is a plugin named `kadr` that the panel's claude gets with `--plugin-dir`
+  (args built by the pure `claudeArgs` in `electron/claudeArgs.ts`, test
+  `node scripts/check-claude-args.mjs`) — `kadr:editor` (the base: LOOK →
+  ACT → VERIFY, the interface, fragments, voice), `kadr:music`,
+  `kadr:motion`, `kadr:3d`, loaded as a project needs them (the system hint
+  says so); their rules are defaults. They used to be copied into
+  `~/.claude/skills`, which listed them in EVERY claude session on the
+  machine; at startup `removeManagedSkills` deletes the `kadr-*` copies
+  carrying the old `<!-- managed by Kadr` mark, never a folder without it
+  (the user's own). The plugin's files are LF (`.gitattributes`): the old
+  front-matter regex skipped every skill on a CRLF checkout. An `args`
+  override in claude-env.json replaces the flag too (no skills).
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
   via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
   kadr_snapshot / kadr_sheet / kadr_export / kadr_transcribe /
@@ -158,7 +171,18 @@ mixes audio and muxes/transcodes per preset.
 - `electron/transcribe.ts` + `scripts/transcribe.py` — faster-whisper
   runner (VAD, anti-hallucination thresholds and post-filters, NDJSON
   segments with word timestamps); audio comes from an ExportMuxer mixdown
-  (WYSIWYG).
+  (WYSIWYG). THE INTERPRETER IS RESOLVED, never a bare `python3` — on a
+  stock Windows that name is the Microsoft Store stub. `electron/speechPython.ts`
+  tries `KADR_PYTHON`, the app's own `.venv`, `py -3` (Windows), `python`,
+  `python3` and takes the first that imports faster_whisper (once per launch;
+  a miss names every candidate and why). With its own setting empty, the detector
+  takes that interpreter only if it is ≥ 3.11 and imports torch, else
+  `python3.11` (`detectorPython`). Test:
+  `node scripts/check-python-resolve.mjs`. The runner uses CUDA/float16 when
+  ctranslate2 sees a GPU (`KADR_WHISPER_DEVICE=cpu|cuda|auto`; on Windows the
+  pip `nvidia-*` wheels' DLL folders are registered) and redoes the job on
+  the CPU if the GPU load or its first kernel fails before any segment went
+  out; the session log names the interpreter and the device.
 - `shared/envelope.ts` + `electron/envelope.ts` — loudness envelope of a
   timeline range (Blender "Bake Sound to F-Curves" semantics: channels
   summed, |s|, one-pole follower with 5 ms attack / 200 ms release, frame
@@ -206,8 +230,11 @@ mixes audio and muxes/transcodes per preset.
   REVERSE-ENGINEERED from /brag's published ones (magnitude share in
   4–16 kHz, frames within 18 dB of the loudest; depth-2 trees agree
   96–99 %); inputs must be the channel MEAN (ffmpeg `-ac 1` scales stereo by
-  √2). A sound's HIT (attack of its loudest event) is what `addSound` puts
-  on the beat; a sound with no single event gets hit 0. The user's own
+  √2) over EXACTLY the container duration, zero-padded (`sfxMono`): ffmpeg
+  ≥ 5 applies an Ogg's end trim and decodes up to 128 frames short of it, and
+  a cut-only decode moved activeRatio off /brag's. A sound's HIT (attack of
+  its loudest event) is what `addSound` puts on the beat; a sound with no
+  single event gets hit 0. The user's own
   sounds live in `userData/sfx/<family>/`, analysed once and cached by
   size+mtime+`SFX_ANALYSIS_VERSION`. `placeAudio` picks an audio track FREE
   over the whole span (overlap on one track would crossfade the music).
@@ -242,7 +269,11 @@ mixes audio and muxes/transcodes per preset.
   SIGKILLs a snapshot of the whole process TREE — remotion starts Chrome in
   a process group of its own, and on SIGTERM it launched a fresh Chrome that
   was reparented to init and stayed — then removes the render's
-  `react-motion-render*` frame dir. Content trap: per-frame random noise
+  `react-motion-render*` frame dir. On Windows a render's TEMP is
+  `userData/render-tmp`: a hard kill runs no cancel, and it left the frame
+  dir, Chrome's profile and the webpack bundle behind; only a folder nobody
+  else writes to can be emptied at the next start (`sweepRenderScratch`,
+  after the process sweep). Content trap: per-frame random noise
   (film grain) in a transparent fragment makes every PNG and VP9 frame
   incompressible (measured 119 MB / 144 s vs 3.6 MB / 40 s for 120 frames);
   put grain on its own track as a short looped RGBA clip. Speed note:

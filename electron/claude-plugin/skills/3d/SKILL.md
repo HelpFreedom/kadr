@@ -1,8 +1,7 @@
 ---
-name: kadr-3d
-description: 3D in Kadr fragments — importing real models (STL, 3MF, STEP, OBJ, GLB via kadr_model_import), Kadr's 3D kit ('@kadr/three' - useModel, Scene3D, Studio, cameraPath/Camera, Part with print layers/outline/x-ray, Callout, Balloons, PortraitReveal), one continuous camera, physical honesty (no parts passing through each other - kadr_check collisions), showing what changed, and matching a 3D camera to real footage (onion skin + defineParams sliders). Use together with kadr-editor and kadr-motion whenever a Kadr project shows a model, a product or a mechanism in 3D; add kadr-music if it is cut to music.
+name: 3d
+description: 3D in Kadr fragments — importing real models (STL, 3MF, STEP, OBJ, GLB via kadr_model_import), Kadr's 3D kit ('@kadr/three' - useModel, Scene3D, Studio, cameraPath/Camera, Part with print layers/outline/x-ray, Callout, Balloons, PortraitReveal), one continuous camera, physical honesty (no parts passing through each other - kadr_check collisions), showing what changed, and matching a 3D camera to real footage (onion skin + defineParams sliders). Use together with kadr:editor and kadr:motion whenever a Kadr project shows a model, a product or a mechanism in 3D; add kadr:music if it is cut to music.
 ---
-<!-- managed by Kadr: rewritten when Kadr updates (electron/skills/) -->
 
 # 3D in Kadr
 
@@ -58,7 +57,7 @@ draws 3D on demand at the size it is shown; the render at full size.
 ## Camera
 
 - **One trajectory** for the whole 3D piece (`cameraPath` over `kadr-lib`,
-  sampled by every window of the film — kadr-motion "one film"). A camera that
+  sampled by every window of the film — kadr:motion "one film"). A camera that
   starts from rest and stops in every scene is what "дёргано" means.
 - **No shake, no nudges on impacts** — a camera bump on every click reads as
   jitter, not as an accent. Let light and the part do the accent.
@@ -75,7 +74,7 @@ draws 3D on demand at the size it is shown; the render at full size.
   pairs touching on every frame are reported as an assembly in contact, not an
   error. Only layers in progress and x-ray views are `exempt`.
 - A mechanism moves like one: a ratchet in clicks, a screw in turns, a latch
-  snapping — each a small event on a beat (kadr-music).
+  snapping — each a small event on a beat (kadr:music).
 
 ## Showing what changed
 
@@ -102,7 +101,7 @@ draws 3D on demand at the size it is shown; the render at full size.
    the onion, instead of four rounds of numbers through you. Turn the model on
    its own axis the way it really stands, if needed.
 4. The transition: `PortraitReveal` over the aligned model; its glow can
-   answer the bar (kadr-music).
+   answer the bar (kadr:music).
 
 ## Performance
 

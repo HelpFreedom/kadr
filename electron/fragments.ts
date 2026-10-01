@@ -797,8 +797,16 @@ let renderCancelled = false
 
 /** remotion's frame scratch dirs (PNG per frame — gigabytes on a long render) */
 const RENDER_SCRATCH = /^react-motion-render/
+/**
+ * On Windows the render's TEMP is a folder of Kadr's own: a hard kill (no
+ * cancel, no cleanup) leaves the frame dirs, Chrome's profile and the webpack
+ * bundle behind, and only a folder nobody else writes to can be emptied at the
+ * next start without guessing whose they are (sweepRenderScratch).
+ */
+const renderTmp = () => join(app.getPath('userData'), 'render-tmp')
+const scratchRoot = () => (process.platform === 'win32' ? renderTmp() : tmpdir())
 const scratchDirs = () => {
-  try { return new Set(readdirSync(tmpdir()).filter((n) => RENDER_SCRATCH.test(n))) } catch { return new Set<string>() }
+  try { return new Set(readdirSync(scratchRoot()).filter((n) => RENDER_SCRATCH.test(n))) } catch { return new Set<string>() }
 }
 let scratchBefore = new Set<string>()
 
@@ -836,14 +844,30 @@ export function cancelFragmentRenders() {
   if (!child?.pid) return
   if (process.platform === 'win32') {
     try { execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F']) } catch { /* already gone */ }
-    return
-  }
-  for (const pid of processTree(child.pid)) {
-    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  } else {
+    for (const pid of processTree(child.pid)) {
+      try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+    }
   }
   for (const name of scratchDirs()) {
-    if (!scratchBefore.has(name)) void fs.rm(join(tmpdir(), name), { recursive: true, force: true })
+    // retries: on Windows a just-killed Chrome still holds its files for a moment
+    if (!scratchBefore.has(name)) void fs.rm(join(scratchRoot(), name), { recursive: true, force: true, maxRetries: 5 })
   }
+}
+
+/**
+ * Startup, after the orphan sweep (claude.ts) killed a hard-killed run's
+ * renderer: whatever it left in render-tmp is a corpse. Windows only — POSIX
+ * renders keep the system temp, where other programs' files live too.
+ */
+export async function sweepRenderScratch(): Promise<void> {
+  if (activeRender) return
+  const names = await fs.readdir(renderTmp()).catch(() => [] as string[])
+  let removed = 0
+  for (const name of names) {
+    try { await fs.rm(join(renderTmp(), name), { recursive: true, force: true, maxRetries: 5 }); removed++ } catch { /* still held */ }
+  }
+  if (removed) console.log(`[kadr] removed ${removed} leftover render temp item(s): ${names.join(', ')}`)
 }
 
 async function renderFragment(
@@ -896,13 +920,15 @@ async function renderFragment(
       // inside the queue: the entry is one file shared by every render
       await writeRenderEntry(id)
       await writeRenderConfig()
+      await fs.mkdir(renderTmp(), { recursive: true }) // the TEMP of a Windows render
       await new Promise<void>((resolve, reject) => {
         // remotion runs chrome AND its own ffmpeg under this; a cancel kills
         // the whole tree (cancelFragmentRenders) — killing only npx once left
         // that ffmpeg encoding for minutes as an orphan nobody could reach
+        const tmpEnv = process.platform === 'win32' ? { TEMP: renderTmp(), TMP: renderTmp() } : {}
         const child = spawn('npx', args, {
           cwd: WORKSPACE,
-          env: { ...process.env, ...extraEnv },
+          env: { ...process.env, ...extraEnv, ...tmpEnv },
           stdio: ['ignore', 'pipe', 'pipe'],
           detached: process.platform !== 'win32'
         })

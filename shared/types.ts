@@ -356,6 +356,10 @@ export interface TranscribeResult {
   segments: TranscribeSegment[]
   language: string
   duration: number
+  /** the interpreter that ran faster-whisper, as spawned (`py -3`, a path…) */
+  python?: string
+  /** where it really ran: a failed CUDA load or kernel falls back to the CPU */
+  device?: 'cuda' | 'cpu'
 }
 
 export interface TranscribeRequest {
@@ -1258,6 +1262,9 @@ export interface KadrApi {
   /** Mix the request's audio to a temp wav and run Whisper over it. */
   transcribe(req: TranscribeRequest): Promise<TranscribeResult>
   transcribeCancel(): Promise<void>
+  /** Which Python runs faster-whisper (KADR_PYTHON → the app's .venv → `py -3`
+      on Windows → python → python3; the first that imports it), or what was tried. */
+  speechPython(): Promise<{ command: string; args: string[]; device: 'cuda' | 'cpu' } | { error: string }>
   onTranscribeProgress(cb: (p: { progress: number; text: string }) => void): () => void
 
   /** Flush the user's verdicts into the training corpus of one run. */

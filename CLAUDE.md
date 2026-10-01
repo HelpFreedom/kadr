@@ -19,7 +19,9 @@ mixes audio and muxes/transcodes per preset.
 - Pure node checks — no app, no network:
   `node scripts/check-envelope.mjs` (loudness envelope),
   `check-ttstext.mjs` (text splitting), `check-proxy.mjs` (proxy choice),
-  `check-voicemap.mjs` (time remapping after a splice),
+  `check-voicemap.mjs` (time remapping after a splice);
+  `check-mixdown.mjs` wants ffmpeg too (every segment lands at its own
+  timeline position);
   `check-beats.mjs [resources/music]` (beat analysis; with the folder it is
   compared beat for beat with librosa's own cues), and with ffmpeg
   `check-limiter.mjs` (the export master limiter) and
@@ -92,9 +94,23 @@ mixes audio and muxes/transcodes per preset.
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
   render of a clip's source range, RAM-bounded chunks), `ExportMuxer`
-  (per-segment `volume,atempo*,afade,adelay,apad,atrim` → `amix` with
-  exact level compensation), `RawVideoEncoder` (fallback raw-frame
+  (per-segment `volume,atempo*,afade,adelay,asetpts,apad,atrim` → `amix`
+  with exact level compensation), `RawVideoEncoder` (fallback raw-frame
   encoder; the primary one is spawned by the preload).
+  THE `asetpts` AFTER `adelay` IS LOAD-BEARING: on some builds (seen on
+  gyan.dev git 2025-01-08, Windows) `adelay` stamps its padding NOPTS when
+  the input is an A/V file opened with `-ss`, the `atrim` then throws the
+  padding away, and EVERY segment lands at t=0 — an export whose audio is
+  all of the timeline piled onto the first seconds and silence after the
+  longest clip. Recounting pts from the sample position is version-neutral
+  and costs nothing. Test: `node scripts/check-mixdown.mjs`.
+  KEYFRAMED CLIP GAIN reaches the mix: the collector samples the clip's gain
+  Anim with the preview's own `evalAnim` into `AudioSegment.gainKeys`
+  (segment-local timeline seconds, piecewise linear — eased and smooth spans
+  in ≤ 32 pieces, `shared/gainKeys.ts`), and `segmentChain` applies them
+  after atempo as one `volume='<expr>':eval=frame` in 10 ms steps — so the
+  graph and the premix both get it. A gain that never changes stays a
+  scalar and mixes bit-identically. Test: `node scripts/check-gain-keys.mjs`.
   TWO LIMITS A BIG TIMELINE WALKS INTO, both met on a real 19-minute edit
   carrying ~1000 SFX clips. One graph with N padded inputs costs the ffmpeg
   scheduler roughly QUADRATICALLY in N: that mix ran at a quarter of realtime —
@@ -216,7 +232,14 @@ mixes audio and muxes/transcodes per preset.
   delays by its look-ahead (239 samples at 48 kHz / 5 ms) and never flushes
   it, so the chain pads 239 samples in front and trims them after — bit
   identical and the same length below the limit. Analysis mixdowns pass
-  `master: false`.
+  `master: false`. THE PREVIEW IS LIMITED THE SAME WAY: `shared/previewLimiter.ts`
+  ports alimiter (n7.1, asc and auto-level off) line by line and runs as an
+  AudioWorklet between the preview's master and its analyser, so the meter
+  and `audioStats().peakDb` read after it; `useSettings.previewLimiter`
+  (default on) takes it out. Bit-identical to ffmpeg's on the same float
+  input at 48 and 44.1 kHz. Live it cannot trim its look-ahead: preview audio
+  runs 5 ms behind the picture, far under the player's resync tolerance.
+  Test: `node scripts/check-preview-limiter.mjs`.
 - `electron/fragments.ts` — Remotion workspace (`~/kadr-fragments`):
   scaffold, vite dev server (watchdogged), fragment create/delete,
   `remotion render` once per content hash at near-lossless settings
@@ -353,7 +376,14 @@ mixes audio and muxes/transcodes per preset.
   clip edge = 0.02–100× with ~16 px snapping to round multipliers AND
   neighbouring clip edges/playhead; a cursor-following ×N badge lights up
   when snapped. Preview clamps element playbackRate to Chromium's hard
-  [0.0625, 16] range — out-of-range assignment THROWS.
+  [0.0625, 16] range — out-of-range assignment THROWS. AUDIO HAS ONE SPEED
+  RULE (`shared/audioSpeed.ts`): inside that same [1/16, 16]× it follows the
+  speed exactly (playbackRate; an atempo chain in every mixdown, fed 0.25 s
+  of extra source and cut by sample count — atempo keeps its last window and
+  a 1/16× chain came out 0.3 s short), outside it the clip is SILENT in the
+  preview and the export alike. The export used to clamp atempo to 0.25–8,
+  so a 20× clip's sound ran 2.5× past its end. Test:
+  `node scripts/check-speed-audio.mjs`.
 - `src/engine/player.ts` — pure layer/audio queries, `MediaPool`,
   `drawFrame` (shared by preview and export), `Player` (anchored rAF
   clock, ~4 fps idle when paused; the tick is exception-proof — one bad

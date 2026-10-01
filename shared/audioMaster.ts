@@ -31,12 +31,14 @@
  */
 export const MASTER_LIMIT = 0.891
 export const MASTER_SR = 48000
+export const MASTER_ATTACK_MS = 5
+export const MASTER_RELEASE_MS = 50
 const LOOKAHEAD_SAMPLES = 239
 
 export function masterLimiterChain(): string[] {
   return [
     `apad=pad_len=${LOOKAHEAD_SAMPLES}`,
-    `alimiter=limit=${MASTER_LIMIT}:attack=5:release=50:level=disabled`,
+    `alimiter=limit=${MASTER_LIMIT}:attack=${MASTER_ATTACK_MS}:release=${MASTER_RELEASE_MS}:level=disabled`,
     `atrim=start_sample=${LOOKAHEAD_SAMPLES}`,
     'asetpts=N/SR/TB'
   ]

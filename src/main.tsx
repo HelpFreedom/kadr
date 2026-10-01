@@ -23,7 +23,8 @@ import { runChecks, readingTime, cameraJerks, CHECK_LIMITS, useChecksUi } from '
 import { importModels, refreshModels, insertModelFragment, modelFragmentTsx, useModelsUi, wireModels, prepareForFragment } from './engine/models'
 import { useFragmentParams, setParam, resetParams, flushParamSaves } from './engine/fragmentParams'
 import { useOnion, setOnion, toggleOnion, wireOnion } from './engine/onion'
-import { audioStats, silencePreview } from './engine/audio'
+import { audioStats, silencePreview, wirePreviewLimiter } from './engine/audio'
+import limiterUrl from './engine/limiter.worklet.ts?worker&url'
 import { previewPoolStats } from './engine/player'
 import { usePopout, openPreviewWindow, dockPreviewWindow, togglePreviewWindow } from './engine/popout'
 import { wireExportChime } from './engine/chime'
@@ -43,6 +44,7 @@ import { loadSoundLibrary, findSfx, addSound, setSoundMeta, sfxFamilies, SFX_FAM
 import { useSoundsUi } from './components/SoundsDialog'
 
 wireLog()   // first: everything below may want to report a failure
+wirePreviewLimiter(limiterUrl)
 wireProxies()
 wireFragmentCapture()
 wireExportChime()

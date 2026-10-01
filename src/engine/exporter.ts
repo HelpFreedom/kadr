@@ -4,22 +4,22 @@
 // muxes/transcodes into the final file.
 import { Muxer, StreamTarget } from 'mp4-muxer'
 import type {
-  ExportPreset, ExportProgress, Project, AudioSegment, MediaAsset
+  ExportPreset, ExportProgress, Project, MediaAsset
 } from '@shared/types'
 import { uid } from '@/state/store'
 import { Compositor } from '@/gl/compositor'
 import {
-  MediaPool, drawFrame, frameSignature, videoLayersAt, clipSourceTime, overlapFades,
+  MediaPool, drawFrame, frameSignature, videoLayersAt, clipSourceTime,
   type BlendFrame
 } from './player'
 import { Mp4FrameSource } from './demux'
 import { chromiumCanDecode } from './codecs'
-import { evalAnim } from './anim'
 import { activity } from './autosave'
 import { projectDuration } from '@/state/store'
 import { logInfo, logWarn } from './log'
 import { flushParamSaves } from './fragmentParams'
 import { refreshStaleBakes } from './audioReact'
+import { collectRangeAudio } from './subtitles'
 
 export interface ExportHandle {
   cancel(): void
@@ -31,55 +31,6 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 export interface TimeRange {
   start: number
   end: number
-}
-
-/**
- * Audio segments intersected with the export range and shifted to its start.
- * Clips extended beyond their source loop, which yields several sub-segments;
- * speed is handed to ffmpeg as an atempo chain, fades as afade windows.
- */
-function collectAudioSegments(project: Project, range: TimeRange): AudioSegment[] {
-  const segs: AudioSegment[] = []
-  for (const track of project.tracks) {
-    if (track.muted) continue
-    for (const clip of track.clips) {
-      if (clip.kind !== 'media' || clip.muted) continue
-      const asset = project.assets.find((a) => a.id === clip.assetId)
-      if (!asset?.hasAudio) continue
-      const speed = clip.speed || 1
-      const span = Math.max(0.05, asset.duration - clip.inPoint) // source seconds available
-      const from = Math.max(clip.start, range.start)
-      const to = Math.min(clip.start + clip.duration, range.end)
-      if (to - from < 0.001) continue
-      const gain = evalAnim(clip.gain, 0) * track.gain
-      // overlapping neighbours on the track auto-crossfade
-      const { fadeIn, fadeOut } = overlapFades(track, clip)
-
-      let local = from - clip.start // clip-local timeline position
-      const localEnd = to - clip.start
-      while (local < localEnd - 0.001) {
-        const srcOff = (local * speed) % span
-        const untilWrap = (span - srcOff) / speed // timeline seconds until the loop wraps
-        const segDur = Math.min(untilWrap, localEnd - local)
-        // clip-global fades clipped to this sub-segment's local window
-        const fiLocal = local < fadeIn ? Math.min(fadeIn - local, segDur) : 0
-        const tail = clip.duration - (local + segDur)
-        const foLocal = tail < fadeOut ? Math.min(fadeOut - tail, segDur) : 0
-        segs.push({
-          path: asset.path,
-          inPoint: clip.inPoint + srcOff,
-          duration: segDur * speed,
-          start: clip.start + local - range.start,
-          gain,
-          speed,
-          fadeIn: fiLocal,
-          fadeOut: foLocal
-        })
-        local += segDur
-      }
-    }
-  }
-  return segs
 }
 
 function avcCodecString(width: number, height: number, fps: number): string {
@@ -160,7 +111,7 @@ export function startExport(
       height,
       fps,
       duration,
-      audioSegments: collectAudioSegments(project, span)
+      audioSegments: collectRangeAudio(project, span.start, span.end)
     })
 
     if (preset.audioOnly) {

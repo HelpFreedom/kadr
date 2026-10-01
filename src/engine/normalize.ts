@@ -48,7 +48,7 @@ export async function normalizeClip(clipId: string, opts?: {
   const asset = clip.assetId ? p.assets.find((a) => a.id === clip.assetId) : null
   if (!asset?.hasAudio) throw new Error('clip has no audio')
   if (clip.gain?.keyframes?.length) {
-    throw new Error('clip gain is keyframed — remove the keyframes first')
+    throw new Error('clip volume has keyframes — normalization sets one gain for the whole clip and would overwrite the curve; remove the volume keyframes first')
   }
   if (useNormalizeUi.getState().busy[clip.id]) throw new Error('normalization already running')
 

@@ -4,6 +4,7 @@ import { glowParams } from '@/gl/glow'
 import { getCaptureFrame } from './fragmentCapture'
 import { chromiumCanDecode } from './codecs'
 import { evalAnim } from './anim'
+import { AUDIO_SPEED_MIN, AUDIO_SPEED_MAX, audioFollowsSpeed } from '@shared/audioSpeed'
 import { getTextLayer } from './text'
 import { attachAudio, detachAudio, setElementGain, isRouted, resumeAudio } from './audio'
 import { logError } from './log'
@@ -90,6 +91,7 @@ export function audibleClipsAt(project: Project, t: number): ActiveLayer[] {
     if (track.muted) continue
     for (const clip of track.clips) {
       if (clip.kind !== 'media' || clip.muted) continue
+      if (!audioFollowsSpeed(clip.speed || 1)) continue // silent, as in the export
       if (t < clip.start || t >= clip.start + clip.duration) continue
       const asset = project.assets.find((a) => a.id === clip.assetId)
       if (asset?.hasAudio) out.push({ clip, track, asset })
@@ -798,10 +800,10 @@ export class Player {
       this.pool.setVolume(el, Math.max(0,
         evalAnim(clip.gain, rel) * track.gain * fadeFactor(clip, rel, overlapFades(track, clip))
       ))
-      // Chromium throws on rates outside [0.0625, 16]; beyond the cap the
-      // element free-runs at the clamped rate and the resync below keeps it
-      // on the master clock with periodic seeks
-      el.playbackRate = Math.min(16, Math.max(0.0625, clip.speed || 1))
+      // Chromium throws on rates outside [1/16, 16]; beyond the cap the clip
+      // is muted (shared/audioSpeed.ts), the element free-runs at the clamped
+      // rate and the resync below keeps it on the master clock with seeks
+      el.playbackRate = Math.min(AUDIO_SPEED_MAX, Math.max(AUDIO_SPEED_MIN, clip.speed || 1))
 
       if (el.readyState < 2) loading = true
       if (playing) {

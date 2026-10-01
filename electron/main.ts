@@ -103,6 +103,13 @@ function createWindow() {
   })
   win.setMenuBarVisibility(false)
   const owner = win
+  // hidden fragment capture windows outlive the editor otherwise: while one
+  // exists window-all-closed never fires, and the process stays alive with
+  // no window at all
+  win.on('closed', () => {
+    stopAllCaptures()
+    for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.destroy()
+  })
   // A reload of the editor page forgets which fragment capture windows it
   // asked for, but main keeps them — found as windows of a project closed
   // hours earlier, still rendering 60 frames a second offscreen. The new page

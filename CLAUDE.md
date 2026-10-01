@@ -89,6 +89,9 @@ mixes audio and muxes/transcodes per preset.
   project loaded through `kadr_eval` never passes main at all, so the
   allowlist would have had holes exactly where a miss means a black preview. Startup sweeps leftover helper processes; shutdown force-exits
   (window-all-closed → app.exit failsafe, render-process-gone → exit).
+  The editor window's `closed` stops every fragment capture and destroys
+  any window left: a hidden capture window kept window-all-closed from ever
+  firing, and the process lived on with no window.
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
   render of a clip's source range, RAM-bounded chunks), `ExportMuxer`

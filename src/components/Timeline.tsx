@@ -381,7 +381,7 @@ export function Timeline({ height }: { height: number }) {
           <Icon name="speech" /> {t('ttsButton')}
         </button>
         <DefectButtons />
-        <span className="dim hint-inline">{t('dropHint')}</span>
+        <span className="dim hint-inline" title={t('dropHint')}>{t('dropHint')}</span>
         <span className="flex1" />
         <label className="zoom-ctl">
           {t('trackHeight')}

@@ -1,4 +1,5 @@
 // Keyframe helpers shared by the clip animation editor and track motion.
+import { useLayoutEffect, useState, type RefObject } from 'react'
 import type { Anim, Easing, Keyframe } from '@shared/types'
 import { evalAnim } from '@/engine/anim'
 
@@ -63,6 +64,28 @@ export function windowDrag(
   }
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
+}
+
+// The stage is as wide as the editor's content box. It used to be the panel
+// width minus a constant that knew the padding and the border but not the
+// scrollbar: once the column scrolled, the stage stuck out by the scrollbar's
+// width and a horizontal scrollbar appeared on top. The first render, before
+// the observer reports, falls back to that estimate.
+export function useContentWidth(ref: RefObject<HTMLElement | null>, fallback: number): number {
+  const [w, setW] = useState(0)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const read = () => {
+      const cs = getComputedStyle(el)
+      setW(el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight))
+    }
+    read()
+    const ro = new ResizeObserver(read)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [ref])
+  return w > 0 ? w : fallback
 }
 
 export { evalAnim }

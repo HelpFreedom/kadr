@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Anim, Transform3D } from '@shared/types'
 import { useEditor, projectDuration } from '@/state/store'
-import { KF_EPS, applyValue, evalAnim, resetValue, snap1, windowDrag } from './animUtils'
+import { KF_EPS, applyValue, evalAnim, resetValue, snap1, useContentWidth, windowDrag } from './animUtils'
 import { useT, type TKey } from '@/i18n'
 import { Icon } from './icons'
 
@@ -47,6 +47,8 @@ export function TrackMotionEditor({ width }: { width: number }) {
   const [stageZoom, setStageZoom] = useState(0.6)
   const miniRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
+  const editorRef = useRef<HTMLDivElement>(null)
+  const contentW = useContentWidth(editorRef, width - 28)
   const [view, setView] = useState({ t0: 0, t1: 1 })
   const trackId = track?.id
 
@@ -196,7 +198,7 @@ export function TrackMotionEditor({ width }: { width: number }) {
   }
 
   // ---------------------------------------------------------------- stage
-  const stageW = Math.max(160, width - 22)
+  const stageW = Math.max(160, contentW)
   const stageH = Math.round((stageW * projH) / projW)
   const k = (stageW / projW) * stageZoom
   const cur = {
@@ -303,7 +305,7 @@ export function TrackMotionEditor({ width }: { width: number }) {
   const onKf = kfTimes.some((x) => Math.abs(x - rel) < KF_EPS)
 
   return (
-    <div className="anim-editor">
+    <div className="anim-editor" ref={editorRef}>
       <div className="anim-toolbar">
         <span className="motion-title">{t('trackMotion')} — {track.name}</span>
         <span className="flex1" />

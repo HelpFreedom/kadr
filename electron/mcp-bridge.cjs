@@ -338,7 +338,8 @@ server.registerTool('kadr_export', {
     'Render the current Kadr project (or a time range of it) to a file and wait for completion. ' +
     'Uses the same WYSIWYG pipeline as the editor (GPU composite, effects, transitions, audio mix). ' +
     'presetId comes from kadr_state.exportPresets (default: first mp4). For audio-only output pick ' +
-    'an audioOnly preset (mp3). Returns when the file is fully written.',
+    'an audioOnly preset (mp3). Returns when the file is fully written; if the ffmpeg mux fails it ' +
+    'returns ffmpeg\'s error, and a rendered video stream is kept at the path named in the message.',
   inputSchema: {
     outputPath: z.string().describe('absolute output file path; extension should match the preset container'),
     presetId: z.string().optional(),

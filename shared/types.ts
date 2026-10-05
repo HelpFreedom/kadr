@@ -1204,7 +1204,8 @@ export interface KadrApi {
   ): Promise<number>
   exportRawFrame(data: ArrayBuffer): Promise<void>
   exportRawEnd(): Promise<void>
-  exportVideoDone(): Promise<void>
+  /** resolves after the mux; `error` is set when it failed (a cancel is not an error) */
+  exportVideoDone(): Promise<{ error?: string }>
   exportCancel(): Promise<void>
   onExportProgress(cb: (p: ExportProgress) => void): () => void
 

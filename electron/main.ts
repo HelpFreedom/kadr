@@ -949,13 +949,14 @@ function registerIpc() {
       // the video stream took hours to render; a failed mux must not throw it
       // away — keep the temp file and tell the user where it is
       const keep = !cancelled && !st.job.preset.audioOnly
-      sendProgress({
-        phase: cancelled ? 'cancelled' : 'error',
-        progress: 0,
-        message: String(err?.message ?? err) + (keep ? ` (video kept at ${st.videoTemp})` : '')
-      })
+      const message = String(err?.message ?? err) + (keep ? ` (video kept at ${st.videoTemp})` : '')
+      sendProgress({ phase: cancelled ? 'cancelled' : 'error', progress: 0, message })
       await cleanupExport(keep)
+      // the progress event only reaches listeners; a script awaiting the
+      // export (startExport().done, kadr_export) needs the failure returned
+      if (!cancelled) return { error: message }
     }
+    return {}
   })
 
   ipcMain.handle('export:cancel', async () => {

@@ -113,7 +113,11 @@ mixes audio and muxes/transcodes per preset.
   A FAILED MUX NO LONGER BINS THE VIDEO: the stream is rendered first and can
   take hours, and the mux ran with that temp file scheduled for deletion in
   `finally`. A non-cancelled failure that has video keeps it, and the error
-  message says where it is.
+  message says where it is. THE FAILURE IS RETURNED, NOT ONLY BROADCAST:
+  `export:video-done` resolves to `{ error }`, so `startExport().done` rejects
+  and `kadr_export` reports it. It used to arrive only as an
+  `export:progress` event, and a script awaiting `.done` (the MCP tool among
+  them) reported a written file that did not exist.
 - `electron/claude.ts` — embedded Claude Code: node-pty PTY running the
   user's `claude` CLI inside a watchdog wrapper (kills its process group
   if Electron dies hard), per-session HTTP bridge (POST /eval →

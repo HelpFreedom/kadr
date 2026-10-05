@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Anim, Clip, Effect, FragmentInspect, FragmentParamDecl, FxPreset, TextStyle } from '@shared/types'
-import { useEditor, useFxPresets, findClip, uid } from '@/state/store'
-import { GLOW_DEFAULTS } from '@/gl/glow'
-import { useT } from '@/i18n'
+import { useEditor, useFxPresets, useSettings, findClip, uid } from '@/state/store'
+import { useEffects, defaultParams, labelText, paramAnim, type EffectDef } from '@/gl/effects'
+import { evalAnim } from '@/engine/anim'
+import { applyValue, upsertKf, KF_EPS } from './animUtils'
+import { useT, type TKey } from '@/i18n'
 import { bakeAudio, bakeState, bakePlan } from '@/engine/audioReact'
 import { audibleTracksInRange } from '@/engine/subtitles'
 import { useFragmentParams, paramValues, setParam, resetParams, rememberParamValues } from '@/engine/fragmentParams'
@@ -296,7 +298,7 @@ function FragmentParamsSection({ clip }: { clip: Clip }) {
 }
 
 function Slider({
-  label, value, min, max, step, onChange
+  label, value, min, max, step, onChange, after
 }: {
   label: string
   value: number
@@ -304,6 +306,8 @@ function Slider({
   max: number
   step: number
   onChange: (v: number) => void
+  /** a control after the value (an effect param's keyframe button) */
+  after?: React.ReactNode
 }) {
   return (
     <label className="insp-field fx-slider">
@@ -318,39 +322,57 @@ function Slider({
         onChange={(e) => onChange(Number(e.target.value))}
       />
       <span className="fx-val">{Number(value.toFixed(2))}</span>
+      {after}
     </label>
   )
 }
 
+const FX_GROUPS: { id: EffectDef['group']; label: TKey }[] = [
+  { id: 'color', label: 'fxGroupColor' },
+  { id: 'key', label: 'fxGroupKey' },
+  { id: 'stylize', label: 'fxGroupStylize' },
+  { id: 'light', label: 'fxGroupLight' },
+  { id: 'blur', label: 'fxGroupBlur' }
+]
+
 function EffectsSection({ clip }: { clip: Clip }) {
   const t = useT()
+  const lang = useSettings((s) => s.lang)
+  const defs = useEffects((s) => s.defs)
+  const libraryIssues = useEffects((s) => s.libraryIssues)
+  const libraryDir = useEffects((s) => s.libraryDir)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null)
   const [name, setName] = useState('')
   const fxPresets = useFxPresets((s) => s.presets)
   const update = (effects: Effect[]) => useEditor.getState().updateClip(clip.id, { effects })
   const effects = clip.effects ?? []
-  const addGlow = () => {
+  const add = (def: EffectDef) => {
     useEditor.getState().pushHistory('hEffect')
-    update([...effects, { id: uid(), type: 'glow', enabled: true, params: { ...GLOW_DEFAULTS } }])
-  }
-  const addBlur = () => {
-    useEditor.getState().pushHistory('hEffect')
-    update([...effects, { id: uid(), type: 'blur', enabled: true, params: { size: 20 } }])
+    update([...effects, { id: uid(), type: def.id, enabled: true, params: defaultParams(def) }])
+    setAddMenu(null)
   }
   useEffect(() => {
-    if (!menu) return
-    const close = () => setMenu(null)
+    if (!menu && !addMenu) return
+    const close = () => { setMenu(null); setAddMenu(null) }
     document.addEventListener('pointerdown', close)
     return () => document.removeEventListener('pointerdown', close)
-  }, [menu])
-  // selection moved to another clip — the open menu refers to stale effects
-  useEffect(() => setMenu(null), [clip.id])
+  }, [menu, addMenu])
+  // selection moved to another clip — an open menu refers to stale effects
+  useEffect(() => { setMenu(null); setAddMenu(null) }, [clip.id])
   const saveFx = () => {
     const nm = name.trim()
     if (!nm || !effects.length) return
+    // a preset is a look, not a timing: animated params keep their value at
+    // the playhead (keyframe times would not fit another clip anyway)
+    const rel = Math.max(0, Math.min(clip.duration, useEditor.getState().playhead - clip.start))
     useFxPresets.getState().savePreset({
       name: nm,
-      effects: effects.map((e) => ({ ...e, params: { ...e.params } }))
+      effects: effects.map((e) => ({
+        ...e,
+        params: Object.fromEntries(Object.entries(e.params).map(([k, v]) =>
+          [k, typeof v === 'object' ? evalAnim(v, rel) : v]))
+      }))
     })
     setName('')
   }
@@ -359,6 +381,7 @@ function EffectsSection({ clip }: { clip: Clip }) {
     update(p.effects.map((e) => ({ ...e, id: uid(), params: { ...e.params } })))
     setMenu(null)
   }
+  const byName = (a: EffectDef, b: EffectDef) => labelText(a.name, lang).localeCompare(labelText(b.name, lang))
   return (
     <>
       <div className="insp-section fx-section-head">
@@ -370,28 +393,68 @@ function EffectsSection({ clip }: { clip: Clip }) {
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             const r = e.currentTarget.getBoundingClientRect()
+            setAddMenu(null)
             setMenu(menu ? null : { x: r.left, y: r.bottom + 4 })
           }}
         >
           <Icon name="star" size={12} /> {t('presets')}
         </button>
       </div>
-      {effects.map((fx) =>
-        fx.type === 'glow' ? (
-          <GlowControls key={fx.id} clip={clip} fx={fx} />
-        ) : fx.type === 'blur' ? (
-          <BlurControls key={fx.id} clip={clip} fx={fx} />
-        ) : null
-      )}
-      {!effects.some((e) => e.type === 'glow') && (
-        <button className="fx-add" data-act="add-glow" onClick={addGlow}>
-          <Icon name="plus" size={13} /> <Icon name="glow" size={14} /> {t('fxGlow')}
-        </button>
-      )}
-      {!effects.some((e) => e.type === 'blur') && (
-        <button className="fx-add" data-act="add-blur" onClick={addBlur}>
-          <Icon name="plus" size={13} /> <Icon name="blur" size={14} /> {t('fxBlur')}
-        </button>
+      {effects.map((fx, i) => (
+        <FxBlock key={fx.id} clip={clip} fx={fx} index={i} count={effects.length} />
+      ))}
+      <button
+        className={`fx-add${addMenu ? ' active' : ''}`}
+        data-act="fx-add"
+        aria-haspopup="menu"
+        aria-expanded={!!addMenu}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect()
+          setMenu(null)
+          setAddMenu(addMenu ? null : { x: r.left, y: r.bottom + 4 })
+        }}
+      >
+        <Icon name="plus" size={13} /> {t('fxAdd')}
+      </button>
+      {addMenu && (
+        <CtxMenu x={addMenu.x} y={addMenu.y} className="fx-add-menu">
+          <div role="menu" aria-label={t('fxAdd')} onPointerDown={(e) => e.stopPropagation()}>
+            {FX_GROUPS.map((g) => {
+              const list = Object.values(defs).filter((d) => d.group === g.id && !d.source).sort(byName)
+              if (!list.length) return null
+              return (
+                <div key={g.id} role="group" aria-label={t(g.label)}>
+                  <div className="ctx-title dim">{t(g.label)}</div>
+                  {list.map((d) => (
+                    <button key={d.id} role="menuitem" data-act={`add-${d.id}`} onClick={() => add(d)}>
+                      {labelText(d.name, lang)}
+                    </button>
+                  ))}
+                </div>
+              )
+            })}
+            <div role="group" aria-label={t('fxGroupLibrary')}>
+              <div className="ctx-title dim">{t('fxGroupLibrary')}</div>
+              {Object.values(defs).filter((d) => d.source === 'library').sort(byName).map((d) => (
+                <button key={d.id} role="menuitem" data-act={`add-${d.id}`} title={`kadr-lib/effects/${d.file}`}
+                  onClick={() => add(d)}>
+                  {labelText(d.name, lang)}
+                </button>
+              ))}
+              {libraryIssues.map((f) => (
+                <div key={f.id} className="fx-lib-bad">
+                  <span>{f.file} — {t('fxLibBroken')}</span>
+                  <span className="fx-lib-why">{f.error}</span>
+                </div>
+              ))}
+              {!libraryDir && <div className="ctx-empty dim">{t('fxLibUnsaved')}</div>}
+              {libraryDir && !libraryIssues.length && !Object.values(defs).some((d) => d.source === 'library') && (
+                <div className="ctx-empty dim">{t('fxLibEmpty')}</div>
+              )}
+            </div>
+          </div>
+        </CtxMenu>
       )}
       {menu && (
         <CtxMenu x={menu.x} y={menu.y} className="preset-menu fx-preset-menu">
@@ -429,61 +492,33 @@ function EffectsSection({ clip }: { clip: Clip }) {
   )
 }
 
-function BlurControls({ clip, fx }: { clip: Clip; fx: Effect }) {
+/**
+ * One effect of the clip: its header (on/off, order, remove) and controls
+ * generated from the effect's declared params — no per-effect UI code.
+ */
+function FxBlock({ clip, fx, index, count }: { clip: Clip; fx: Effect; index: number; count: number }) {
   const t = useT()
+  const lang = useSettings((s) => s.lang)
+  const def = useEffects((s) => s.defs[fx.type])
+  const error = useEffects((s) => s.errors[fx.type])
+  const playhead = useEditor((s) => s.playhead)
+  const rel = Math.max(0, Math.min(clip.duration, playhead - clip.start))
+  const inside = playhead >= clip.start - 1e-6 && playhead <= clip.start + clip.duration + 1e-6
   const st = () => useEditor.getState()
+  const list = () => st().project.tracks.flatMap((tr) => tr.clips).find((c) => c.id === clip.id)?.effects ?? []
   const patchFx = (patch: Partial<Effect>) =>
-    st().updateClip(clip.id, {
-      effects: (clip.effects ?? []).map((e) => (e.id === fx.id ? { ...e, ...patch } : e))
-    })
-  const size = typeof fx.params.size === 'number' ? fx.params.size : 20
-  return (
-    <div className="fx-block">
-      <div className="fx-head">
-        <label>
-          <input
-            type="checkbox"
-            checked={fx.enabled}
-            onChange={(e) => {
-              st().pushHistory('hEffect')
-              patchFx({ enabled: e.target.checked })
-            }}
-          />
-          <span><Icon name="blur" size={14} /> {t('fxBlur')}</span>
-        </label>
-        <button
-          className="fx-del"
-          title={t('fxDelete')}
-          onClick={() => {
-            st().pushHistory('hEffect')
-            st().updateClip(clip.id, {
-              effects: (clip.effects ?? []).filter((e) => e.id !== fx.id)
-            })
-          }}
-          aria-label={t('fxDelete')}
-        ><Icon name="trash" size={14} /></button>
-      </div>
-      <Slider label={t('fxBlurSize')} value={size} min={0} max={300} step={1}
-        onChange={(v) => patchFx({ params: { ...fx.params, size: v } })} />
-    </div>
-  )
-}
-
-function GlowControls({ clip, fx }: { clip: Clip; fx: Effect }) {
-  const t = useT()
-  const st = () => useEditor.getState()
-  const patchFx = (patch: Partial<Effect>) =>
-    st().updateClip(clip.id, {
-      effects: (clip.effects ?? []).map((e) => (e.id === fx.id ? { ...e, ...patch } : e))
-    })
-  const setP = (key: string, v: number | string) =>
-    patchFx({ params: { ...fx.params, [key]: v } })
-  const num = (key: keyof typeof GLOW_DEFAULTS) => {
-    const v = fx.params[key]
-    return typeof v === 'number' ? v : (GLOW_DEFAULTS[key] as number)
+    st().updateClip(clip.id, { effects: list().map((e) => (e.id === fx.id ? { ...e, ...patch } : e)) })
+  const setP = (key: string, v: Effect['params'][string]) => patchFx({ params: { ...fx.params, [key]: v } })
+  const move = (to: number) => {
+    const arr = [...list()]
+    const [it] = arr.splice(index, 1)
+    arr.splice(to, 0, it)
+    st().pushHistory('hEffect')
+    st().updateClip(clip.id, { effects: arr })
   }
+  const name = def ? labelText(def.name, lang) : fx.type
   return (
-    <div className="fx-block">
+    <div className="fx-block" data-fx={fx.type}>
       <div className="fx-head">
         <label>
           <input
@@ -494,41 +529,99 @@ function GlowControls({ clip, fx }: { clip: Clip; fx: Effect }) {
               patchFx({ enabled: e.target.checked })
             }}
           />
-          <span><Icon name="glow" size={14} /> {t('fxGlow')}</span>
+          <span>{name}</span>
         </label>
-        <button
-          className="fx-del"
-          title={t('fxDelete')}
-          onClick={() => {
-            st().pushHistory('hEffect')
-            st().updateClip(clip.id, {
-              effects: (clip.effects ?? []).filter((e) => e.id !== fx.id)
-            })
-          }}
-          aria-label={t('fxDelete')}
-        ><Icon name="trash" size={14} /></button>
+        <span className="fx-tools">
+          <button className="fx-tool" data-act="fx-up" disabled={index === 0}
+            title={t('fxMoveUp')} aria-label={`${t('fxMoveUp')}: ${name}`} onClick={() => move(index - 1)}>
+            <Icon name="chevronUp" size={14} />
+          </button>
+          <button className="fx-tool" data-act="fx-down" disabled={index === count - 1}
+            title={t('fxMoveDown')} aria-label={`${t('fxMoveDown')}: ${name}`} onClick={() => move(index + 1)}>
+            <Icon name="chevronDown" size={14} />
+          </button>
+          <button
+            className="fx-del"
+            data-act="fx-del"
+            title={t('fxDelete')}
+            aria-label={`${t('fxDelete')}: ${name}`}
+            onClick={() => {
+              st().pushHistory('hEffect')
+              st().updateClip(clip.id, { effects: list().filter((e) => e.id !== fx.id) })
+            }}
+          ><Icon name="trash" size={14} /></button>
+        </span>
       </div>
-      <label className="insp-field">
-        <span>{t('color')}</span>
-        <input
-          type="color"
-          value={typeof fx.params.color === 'string' ? fx.params.color : GLOW_DEFAULTS.color}
-          onFocus={() => st().pushHistory('hEffect')}
-          onChange={(e) => setP('color', e.target.value)}
-        />
-      </label>
-      <Slider label={t('fxSize')} value={num('size')} min={4} max={400} step={1}
-        onChange={(v) => setP('size', v)} />
-      <Slider label={t('fxIntensity')} value={num('intensity')} min={0} max={3} step={0.05}
-        onChange={(v) => setP('intensity', v)} />
-      <Slider label={t('fxSaturation')} value={num('saturation')} min={0} max={2} step={0.05}
-        onChange={(v) => setP('saturation', v)} />
-      <Slider label={t('fxSmoke')} value={num('smoke')} min={0} max={1} step={0.05}
-        onChange={(v) => setP('smoke', v)} />
-      <Slider label={t('fxSpeed')} value={num('speed')} min={0} max={3} step={0.05}
-        onChange={(v) => setP('speed', v)} />
-      <Slider label={t('fxParticles')} value={num('particles')} min={0} max={1} step={0.05}
-        onChange={(v) => setP('particles', v)} />
+      {!def && <div className="dim ar-hint">{t('fxUnknown')}</div>}
+      {error && <div className="tr-error"><Icon name="alert" size={15} /><span>{error.split('\n')[0]}</span></div>}
+      {def && Object.entries(def.params).map(([k, d]) => {
+        const label = labelText(d.name, lang)
+        const raw = fx.params[k]
+        if (d.kind === 'color') {
+          const v = typeof raw === 'string' && /^#[0-9a-f]{6}$/i.test(raw) ? raw : String(d.default)
+          return (
+            <label key={k} className="insp-field" data-param={k}>
+              <span>{label}</span>
+              <input type="color" value={v} onFocus={() => st().pushHistory('hEffect')}
+                onChange={(e) => setP(k, e.target.value)} />
+            </label>
+          )
+        }
+        const anim = paramAnim(d, raw)
+        const n = evalAnim(anim, rel)
+        if (d.kind === 'toggle') {
+          return (
+            <label key={k} className="insp-field" data-param={k}>
+              <span>{label}</span>
+              <input type="checkbox" checked={n !== 0} onChange={(e) => {
+                st().pushHistory('hEffect')
+                setP(k, e.target.checked ? 1 : 0)
+              }} />
+            </label>
+          )
+        }
+        if (d.kind === 'select') {
+          return (
+            <label key={k} className="insp-field" data-param={k}>
+              <span>{label}</span>
+              <select value={n} onChange={(e) => {
+                st().pushHistory('hEffect')
+                setP(k, Number(e.target.value))
+              }}>
+                {(d.options ?? []).map((o) => <option key={o.value} value={o.value}>{labelText(o.name, lang)}</option>)}
+              </select>
+            </label>
+          )
+        }
+        // numbers animate like the transform: once a param has keyframes, an
+        // edit sets the key at the playhead instead of wiping them
+        const keys = anim.keyframes ?? []
+        const here = keys.find((kf) => Math.abs(kf.time - rel) < KF_EPS)
+        const toggleKey = () => {
+          st().pushHistory('hKeyframe')
+          if (!here) return setP(k, upsertKf(anim, rel, n))
+          const left = keys.filter((kf) => kf !== here)
+          setP(k, left.length ? { ...anim, keyframes: left } : { value: n })
+        }
+        return (
+          <Slider key={k} label={label} value={n} min={d.min ?? 0} max={d.max ?? 1}
+            step={d.step ?? ((d.max ?? 1) - (d.min ?? 0)) / 100}
+            onChange={(v) => setP(k, applyValue(anim, rel, v, false))}
+            after={
+              <button
+                className={`fx-kf${here ? ' on' : keys.length ? ' animated' : ''}`}
+                data-act="fx-kf"
+                disabled={!inside}
+                aria-pressed={!!here}
+                title={here ? t('fxKfRemove') : t('fxKfAdd')}
+                aria-label={`${here ? t('fxKfRemove') : t('fxKfAdd')}: ${label}`}
+                onClick={(e) => { e.preventDefault(); toggleKey() }}
+              >
+                <Icon name="diamond" size={12} />
+              </button>
+            } />
+        )
+      })}
     </div>
   )
 }

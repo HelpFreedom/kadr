@@ -26,8 +26,9 @@ mixes audio and muxes/transcodes per preset.
   `check-sfx-labels.mjs` (sound labels vs /brag's 228) and `check-hdr.mjs`
   (the HDR → SDR maths and ffmpeg's own filter chain against the formula);
   `check-models.mjs` (3MF build items/components/units, STL, OBJ, GLB,
-  decimation) and `check-timeline.mjs` (the timeline's waveform columns and
-  overlap zones must EQUAL the slow code they replaced); plus
+  decimation), `check-effectfile.mjs` (project-library effect headers) and
+  `check-timeline.mjs` (the timeline's waveform columns and overlap zones
+  must EQUAL the slow code they replaced); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
   `node scripts/gen-sfx-catalog.mjs` regenerates
   `resources/sfx/kadr-sfx.json` after a bundled sound or
@@ -144,17 +145,17 @@ mixes audio and muxes/transcodes per preset.
   AGENT SKILLS are composable: `electron/skills/*.md` are synced at startup
   to `~/.claude/skills/<name>/SKILL.md` — `kadr-editor` (the base: LOOK →
   ACT → VERIFY, the interface, fragments, voice), `kadr-music`,
-  `kadr-motion`, `kadr-3d`, loaded as a project needs them (the system hint
-  says so); their rules are defaults. Every file carries a
+  `kadr-motion`, `kadr-3d`, `kadr-effects`, loaded as a project needs them
+  (the system hint says so); their rules are defaults. Every file carries a
   `<!-- managed by Kadr` mark: a `kadr-*` folder with it that is no longer
   shipped is removed, one without it (the user's own) never is.
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
   via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
   kadr_snapshot / kadr_sheet / kadr_export / kadr_transcribe /
   kadr_fragment_create / kadr_typecheck / kadr_check / kadr_fragment_media /
-  kadr_model_import / kadr_models / kadr_neon_wave / kadr_beats /
-  kadr_audio_react / kadr_sounds / kadr_sound_add / kadr_sound_label /
-  kadr_voice_*.
+  kadr_model_import / kadr_models / kadr_effects / kadr_neon_wave /
+  kadr_beats / kadr_audio_react / kadr_sounds / kadr_sound_add /
+  kadr_sound_label / kadr_voice_*.
 - `electron/transcribe.ts` + `scripts/transcribe.py` — faster-whisper
   runner (VAD, anti-hallucination thresholds and post-filters, NDJSON
   segments with word timestamps); audio comes from an ExportMuxer mixdown
@@ -386,7 +387,7 @@ mixes audio and muxes/transcodes per preset.
   and export), software waveform canvases, dropping clip decorations.
 - `src/gl/compositor.ts` — WebGL2 quad compositor: perspective-correct 3D,
   masks (crop + up to 8 shapes), transition FBOs, motion-blur accumulator,
-  glow + gaussian-blur effect passes (`drawLayerFx`), raw-BGRA capture
+  the per-clip effect chain (`drawLayerFx`, see EFFECTS), raw-BGRA capture
   upload, packed colour-over-matte sampling for alpha video
   (`LayerDraw.alphaPacked`), and pipelined readback for the export pipe
   (`startRead`/`finishRead` through a pixel-pack buffer). `holdSources`
@@ -405,9 +406,46 @@ mixes audio and muxes/transcodes per preset.
   worth knowing: `getExtension` returns null on a LOST context (take the
   `WEBGL_lose_context` handle while it is alive), and `restoreContext()`
   is ignored when called from inside the lost event — defer it a turn.
-- `src/gl/transitions.ts` / `src/gl/edges.ts` / `src/gl/glow.ts` — GLSL
-  registries: 14 overlap transitions, 12 edge (tip) transitions, the smoky
-  outer-glow effect.
+- `src/gl/transitions.ts` / `src/gl/edges.ts` — GLSL registries: 14 overlap
+  transitions, 12 edge (tip) transitions.
+- EFFECTS (`src/gl/effects/`): ONE EFFECT IS ONE FILE, `<id>.fx.ts`, whose
+  default export is an `EffectDef` (types.ts): id (stored as `Effect.type` —
+  never rename a shipped one), group, a name and param labels in both
+  languages, declared params (number/colour/select/toggle with ranges and
+  defaults), and either `glsl` — `vec4 effect(vec4 c, vec2 uv)` on STRAIGHT
+  colour, wrapped by `effects/shader.ts` with `u_<param>` uniforms and
+  helpers — or `run(ctx)` for multi-pass work (blur, glow). `index.ts` finds
+  the files with `import.meta.glob`; no list to edit. The chain runs in the
+  clip's order after the transform: 'layer' effects replace the layer
+  (ping-pong between two full-size buffers, blending off), 'under' effects
+  paint beneath it into the destination, then the layer is blitted.
+  `frameSignature` records the chain as ids + EVALUATED values and the clock
+  only when an effect is `timeDependent` — a value that is not recorded
+  would collapse a moving shutter. Programs are cached by a hash of their
+  source; a shader that does not compile is SKIPPED (never swapped for
+  another), logged, and shown in the effect's block and by `kadr_effects`.
+  NUMERIC PARAMS ARE ANIMS (a bare number is still read): `forEachAnim`
+  walks them, so split/trim/ripple/speed and sanitize treat them like the
+  transform, and `resolveValues(def, params, t)` evaluates them before the
+  compositor. The Inspector writes through `applyValue` (an edit on a keyed
+  param sets the key at the playhead, never wipes the curve) and has a key
+  button per slider; the animation editor has an «Эффекты» mode with its own
+  lane. Colours, selects and toggles do not animate; FX presets store values
+  at the playhead.
+  PROJECT-LIBRARY EFFECTS need no build: `<project>/kadr-lib/effects/
+  <name>.glsl` = a `/* kadr-effect {json} */` header (name, group, params —
+  the same declaration shape) + the GLSL body, used as `lib:<name>`. The
+  parser is pure (`shared/effectFile.ts`, `check-effectfile.mjs`); main
+  lists the folder and `fs.watch`es it (`electron/effects.ts`, created on
+  first watch, debounced 150 ms, one project at a time), the renderer
+  re-reads it on every change (`src/engine/effectsLibrary.ts`) and swaps
+  the `lib:*` entries of the registry. A bad file is listed with its reason
+  and never becomes an effect; nothing but GLSL is loaded, so a project from
+  elsewhere runs nothing outside WebGL.
+  People add effects from the Inspector's grouped «Добавить эффект» menu
+  (blocks are generated from the params); agents through
+  `kadrEditor.effects` (list/add/set/move/remove, one undo each), the
+  `kadr_effects` tool and the managed `kadr-effects` skill.
 - `src/engine/exporter.ts` — offline render: fragment materialization →
   fast decode (`src/engine/demux.ts`, mp4box + WebCodecs, element-seek
   fallback, `KADR_DISABLE_FAST_DECODE` kill-switch) → optional 8-sample

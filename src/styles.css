@@ -1272,15 +1272,42 @@ div.tr-error {
 }
 .fx-head label { display: flex; align-items: center; gap: var(--s3); cursor: pointer; font-weight: 500; }
 .fx-head label > span { display: flex; align-items: center; gap: var(--s2); }
-.fx-del {
+/* order and remove: 24 px targets (WCAG 2.5.8), quiet until hovered */
+.fx-tools { display: flex; align-items: center; gap: var(--s1); }
+.fx-tool, .fx-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--c-text-3);
   cursor: pointer;
   padding: 2px;
-  min-height: 22px;
+  min-height: 24px;
+  min-width: 24px;
 }
+.fx-tool:hover:not(:disabled) { background: var(--c-bg-3); color: var(--c-text); }
+.fx-tool:disabled { color: var(--c-text-off); cursor: default; }
 .fx-del:hover:not(:disabled) { background: var(--c-danger-soft); color: var(--c-danger); }
+/* an effect param's keyframe button: dim when static, accent outline when
+   animated, filled accent when a key sits under the playhead */
+.fx-kf {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 2px;
+  background: none;
+  border: none;
+  color: var(--c-text-3);
+  cursor: pointer;
+}
+.fx-kf:hover:not(:disabled) { background: var(--c-bg-3); color: var(--c-text); }
+.fx-kf.animated { color: var(--c-accent-hi); }
+.fx-kf.on { color: var(--c-on-solid); background: var(--c-accent-solid); }
+.fx-kf:disabled { color: var(--c-text-off); cursor: default; }
+.fx-add.active { border-color: var(--c-accent); background: var(--c-accent-soft); color: var(--c-text); }
 .fx-slider input[type='range'] { flex: 1; min-width: 60px; }
 /* fragment parameters: a slider with its exact value beside it */
 .fp-reload { margin-left: auto; display: inline-flex; }
@@ -1910,6 +1937,20 @@ div.tr-error {
   color: var(--c-sel);
 }
 .ctx-empty { padding: var(--s3) var(--s4); font-size: var(--fz-sm); }
+/* the Add effect menu: each group stacks its items; a project file that is
+   not an effect shows its name and, under it, why (readable text, not the
+   disabled colour, which never carries information) */
+.fx-add-menu { max-width: 340px; }
+.fx-add-menu [role='group'] { display: flex; flex-direction: column; }
+.fx-lib-bad {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s3) var(--s4);
+  font-size: var(--fz-sm);
+  color: var(--c-text-2);
+}
+.fx-lib-bad .fx-lib-why { font-size: var(--fz-label); color: var(--c-text-3); overflow-wrap: anywhere; }
 .ctx-dur-row {
   display: flex;
   align-items: center;
@@ -2358,6 +2399,8 @@ div.tr-error {
   grid-template-columns: 1fr 1fr;
   gap: var(--s2) var(--s4);
 }
+/* effect params are named «effect · param»: one per row reads, two did not */
+.anim-values.one-col { grid-template-columns: 1fr; }
 .anim-values label {
   display: flex;
   align-items: center;

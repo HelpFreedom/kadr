@@ -120,7 +120,10 @@ export interface Effect {
   id: string
   type: string
   enabled: boolean
-  params: Record<string, number | string>
+  /** numbers are Anims (keyframes in clip-local seconds, like the transform);
+      a bare number is accepted from scripts and older files; colours stay
+      '#rrggbb' strings */
+  params: Record<string, Anim | number | string>
 }
 
 export interface TextStyle {
@@ -1233,6 +1236,12 @@ export interface KadrApi {
   modelImport(path: string, projectDir: string, opts?: { name?: string; budget?: number; upAxis?: 'y' | 'z' }): Promise<ModelInfo>
   /** the project's imported models, newest first (`dir` = their folder) */
   modelList(projectDir: string): Promise<(ModelInfo & { dir: string })[]>
+  /** the project's own effects, parsed: <projectDir>/kadr-lib/effects/*.glsl — electron/effects.ts */
+  effectsList(projectDir: string): Promise<(import('./effectFile').EffectFile | import('./effectFile').EffectFileError)[]>
+  /** watch that folder (created if missing; null stops watching); resolves to the folder */
+  effectsWatch(projectDir: string | null): Promise<string | null>
+  /** a file in the watched folder changed */
+  onEffectsChanged(cb: () => void): () => void
   /** what a fragment declares about itself (fragment.inspect) — see FragmentInspect */
   fragmentInspect(id: string): Promise<FragmentInspect>
   /** which 3D-kit parts intersect on which frames (player ?collide=1) */

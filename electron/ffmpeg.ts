@@ -832,7 +832,8 @@ export class ExportMuxer {
       }
       filterScript = join(tmpdir(), `kadr-filter-${process.pid}-${Date.now()}.txt`)
       await fsp.writeFile(filterScript, filters.join(';\n'))
-      args.push('-filter_complex_script', filterScript)
+      // ffmpeg 7+ form; -filter_complex_script was removed in ffmpeg 9
+      args.push('-/filter_complex', filterScript)
     }
 
     if (hasVideo) {

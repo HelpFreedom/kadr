@@ -57,8 +57,16 @@ function writeFile(f: GpuFile) {
   try { writeFileSync(file(), JSON.stringify(f, null, 2)) } catch { /* read-only profile: keep defaults */ }
 }
 
+// The recipe above is X11-only: under Wayland Chromium speaks EGL to the
+// compositor, NVIDIA's EGL cannot import the Intel-side buffers, and the GPU
+// process dies on every start (black window). Same test as the dev launcher.
+const onWayland = () =>
+  !!process.env.WAYLAND_DISPLAY &&
+  process.env.ELECTRON_OZONE_PLATFORM_HINT !== 'x11' &&
+  !process.argv.includes('--ozone-platform=x11')
+
 const discreteAvailable = () =>
-  process.platform === 'linux' && existsSync(NV_EGL) && existsSync('/proc/driver/nvidia/version')
+  process.platform === 'linux' && !onWayland() && existsSync(NV_EGL) && existsSync('/proc/driver/nvidia/version')
 
 let applied: 'discrete' | 'default' = 'default'
 let why = ''
@@ -70,7 +78,7 @@ export function applyGpuChoice() {
   const env = process.env.KADR_GPU as GpuPref | undefined
   const pref: GpuPref = env === 'auto' || env === 'discrete' || env === 'integrated' ? env : f.pref ?? 'auto'
   if (pref === 'integrated') { why = 'выбрана встроенная'; return }
-  if (!discreteAvailable()) { why = 'дискретной видеокарты NVIDIA нет'; return }
+  if (!discreteAvailable()) { why = onWayland() ? 'Wayland: дискретная через EGL здесь роняет GPU-процесс' : 'дискретной видеокарты NVIDIA нет'; return }
   if (pref === 'auto') { why = 'по умолчанию: на этой машине дискретная замерена медленнее (PRIME)'; return }
   if (f.fallback) { why = `откат: ${f.fallback.reason}`; return }
   // The GPU process is forked from a zygote that exists before this code

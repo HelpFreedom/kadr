@@ -36,8 +36,10 @@ mixes audio and muxes/transcodes per preset.
   preview stacking, hot reload of a late project-owned fragment), e2e46
   (preview at cuts, snapshots of heavy 3D), e2e47 (project library, fonts,
   render entry, typecheck), e2e48 (checks), e2e49 (3D import, kit,
-  collisions), e2e50 (fragment parameters, onion skin) and e2e51 (bounded
-  preview pool, timeline culling, zoom gestures) replace the open project,
+  collisions), e2e50 (fragment parameters, onion skin), e2e51 (bounded
+  preview pool, timeline culling, zoom gestures) and e2e52 (partial
+  fragment renders, every output frame checked by pixels; the export
+  decoder's first frame and backward jumps) replace the open project,
   so they REFUSE to run over one with clips unless `KADR_E2E_FORCE=1`.
 - `node scripts/preview-bench.mjs <from> <to>` — plays a span of the open
   project and reports editor frames, draws per fragment iframe, iframe
@@ -434,6 +436,15 @@ mixes audio and muxes/transcodes per preset.
   * MOOV AT THE END (any file not written with faststart) is picked up by
     fetching the file's tail (`pumpTail`) instead of dropping to element
     seeks.
+  * A SEEK MUST DROP mp4box's HALF-COLLECTED BATCH: mp4box keeps the
+    samples it was gathering towards the next `nbSamples` callback across
+    `seek()` and sends them FIRST. Init's `jump(0)` met that whenever the
+    head pump had already extracted a batch — on light files (flat
+    graphics, small renders) always. Either the fresh decoder got a later
+    keyframe first and showed that frame for the clip's first request, or
+    it got a delta («A key frame is required»), `open()` returned null and
+    the clip silently exported through element seeks. `jump()` clears the
+    track's `extractedTracks[].samples` after the seek. Test: e2e52.
   * A STATIC SHUTTER collapses: `frameSignature` records what drawFrame
     would draw without touching the GPU, and when every motion-blur
     sub-sample matches, one draw stands in for eight — exact, and
@@ -476,6 +487,22 @@ mixes audio and muxes/transcodes per preset.
   NOT reach this conversion (the scale filter's own `flags` default wins),
   so an A/B on those flags that compares output bytes proves nothing, and
   filter threading is already on by default.
+  ONLY THE FRAMES THE EDIT USES: a film cut as windows of one continuous
+  composition (every scene a fragment whose clip starts at inPoint = its
+  place in the film) used to render each fragment from frame 0 to its end —
+  measured on a 26-minute film, 1.6 million frames for the 93 thousand the
+  edit shows, about 35 hours. `fragmentRenderJobs` (exporter.ts) groups the
+  clips of a fragment by the composition seconds they show (±
+  `FRAGMENT_RANGE_MARGIN` 0.5 s for the shutter, blending and rounding;
+  clips more than `FRAGMENT_RANGE_GAP` 10 s apart get files of their own),
+  main renders `--frames=f0-f1` into `<base>-r<f0>-<f1>.<ext>` and answers
+  `start` (the clips' inPoint moves back by it). Frames are absolute, so the
+  fragment draws exactly what a full render drew; a clip looping past the
+  end is clamped to the last frame, so its loop span is unchanged; a full
+  render already on disk is always taken first. The asset's duration is the
+  PICTURE's (frames / fps): remotion's silent audio runs up to ~60 ms past
+  the last frame, and a looping clip held its last frame that long.
+  Test: e2e52.
   ONE EXPORT AT A TIME: the preload's raw encoder is a single global ffmpeg
   and main's export state and the fragment render queue are shared, so an
   export started while another ran (a script's `startExport` plus the

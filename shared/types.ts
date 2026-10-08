@@ -1245,7 +1245,10 @@ export interface KadrApi {
   onFragmentCaptureLog(cb: (p: { id: string; level: 'error' | 'warn'; msg: string }) => void): () => void
   fragmentCaptureSync(id: string, msg: unknown): void
   onFragmentFrame(cb: (p: { id: string; w: number; h: number; data: Uint8Array }) => void): () => void
-  fragmentRender(id: string, opts?: { transparent?: boolean }): Promise<{ path: string; cached: boolean }>
+  /** `range` = the composition seconds the edit uses; only those frames are
+      rendered, and the file then begins at `start` composition seconds;
+      `duration` = the length of its picture (frames / fps) */
+  fragmentRender(id: string, opts?: { transparent?: boolean; range?: [number, number] }): Promise<{ path: string; cached: boolean; start: number; duration?: number }>
   /** stops the running fragment render (its whole process tree) */
   fragmentCancelRender(): Promise<void>
   /** which GPU Chromium renders on (electron/gpu.ts); a change needs a restart */

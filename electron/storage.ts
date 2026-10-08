@@ -151,7 +151,7 @@ function ownersOf(
       const key = entry.name.split('.')[0]
       mine = keys.get(k.id)?.has(key) ?? false
     } else if (def.match === 'prefix') {
-      // fragment renders are named "<fragmentId>-<hash>-q2[-a].<ext>"
+      // fragment renders are named "<fragmentId>-<hash>-q2[-a][-r<f0>-<f1>].<ext>"
       mine = k.fragmentIds.some((id) => entry.name.startsWith(id + '-'))
     } else if (def.match === 'path') {
       mine = k.assets.some((a) => a === entry.path || inside(entry.path, a)) ||

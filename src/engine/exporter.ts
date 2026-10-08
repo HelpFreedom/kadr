@@ -4,7 +4,7 @@
 // muxes/transcodes into the final file.
 import { Muxer, StreamTarget } from 'mp4-muxer'
 import type {
-  ExportPreset, ExportProgress, Project, AudioSegment, MediaAsset
+  ExportPreset, ExportProgress, Project, AudioSegment, MediaAsset, Clip
 } from '@shared/types'
 import { uid } from '@/state/store'
 import { Compositor } from '@/gl/compositor'
@@ -714,6 +714,49 @@ function intermediateFallback(asset: MediaAsset): Promise<MediaAsset | null> {
   return p.then((alt) => (alt ? { ...asset, path: alt.path } : null))
 }
 
+/** seconds of composition rendered beyond what a clip shows on either side —
+    room for the shutter's sub-samples, frame blending's next frame and rounding */
+const FRAGMENT_RANGE_MARGIN = 0.5
+/** clips of one fragment further apart than this in the composition are
+    rendered as separate files rather than one span with the gap in between */
+const FRAGMENT_RANGE_GAP = 10
+
+/**
+ * Which stretches of which compositions the edit uses. A clip shows
+ * [inPoint, inPoint + duration·speed] of its composition; one that runs past
+ * the end loops, and its end then lies beyond the composition — main clamps it
+ * to the last frame, so a looping clip gets everything from its inPoint on and
+ * the loop span (source end − inPoint) is unchanged. Exported for e2e.
+ */
+export function fragmentRenderJobs(clips: Clip[]): { fragmentId: string; range: [number, number]; clips: Clip[] }[] {
+  const byFrag = new Map<string, Clip[]>()
+  for (const c of clips) {
+    if (!c.fragmentId) continue
+    const list = byFrag.get(c.fragmentId) ?? []
+    list.push(c)
+    byFrag.set(c.fragmentId, list)
+  }
+  const jobs: { fragmentId: string; range: [number, number]; clips: Clip[] }[] = []
+  for (const [fragmentId, list] of byFrag) {
+    const spans = list
+      .map((c) => ({ c, a: c.inPoint || 0, b: (c.inPoint || 0) + c.duration * (c.speed || 1) }))
+      .sort((x, y) => x.a - y.a)
+    let cur: { fragmentId: string; range: [number, number]; clips: Clip[] } | null = null
+    for (const s of spans) {
+      const a = Math.max(0, s.a - FRAGMENT_RANGE_MARGIN)
+      const b = s.b + FRAGMENT_RANGE_MARGIN
+      if (cur && a <= cur.range[1] + FRAGMENT_RANGE_GAP) {
+        cur.range[1] = Math.max(cur.range[1], b)
+        cur.clips.push(s.c)
+      } else {
+        cur = { fragmentId, range: [a, b], clips: [s.c] }
+        jobs.push(cur)
+      }
+    }
+  }
+  return jobs
+}
+
 /**
  * Replace every remotion clip with a media clip over a freshly rendered
  * (or cache-hit) fragment file — full resolution and fps, alpha kept for
@@ -739,28 +782,38 @@ async function materializeFragments(
     logWarn('экспорт', 'не удалось обновить звук под фрагментом — рендер с прежним', err)
   }
   const p = JSON.parse(JSON.stringify(project)) as Project
-  const rendered = new Map<string, string>() // fragmentId → assetId
+  const rendered = new Map<string, string>() // rendered file → assetId
   const todo = p.tracks.flatMap((t) => t.clips).filter((c) => c.kind === 'remotion' && c.fragmentId)
+  const jobs = fragmentRenderJobs(todo)
   let done = 0
   const off = window.kadr.onFragmentProgress(({ progress }) => {
-    onProgress({ phase: 'fragments', progress: (done + progress) / todo.length })
+    onProgress({ phase: 'fragments', progress: (done + progress) / jobs.length })
   })
   try {
-    for (const clip of todo) {
+    for (const job of jobs) {
       if (isCancelled()) throw new Error('cancelled')
-      let assetId = rendered.get(clip.fragmentId!)
+      onProgress({ phase: 'fragments', progress: done / jobs.length })
+      const { path, start, duration } = await window.kadr.fragmentRender(job.fragmentId, {
+        transparent: job.clips[0].fragmentMeta?.transparent,
+        range: job.range
+      })
+      // one render may serve several jobs (a full render already on disk)
+      let assetId = rendered.get(path)
       if (!assetId) {
-        onProgress({ phase: 'fragments', progress: done / todo.length })
-        const { path } = await window.kadr.fragmentRender(clip.fragmentId!, {
-          transparent: clip.fragmentMeta?.transparent
-        })
         const { asset } = await window.kadr.probeMedia(path)
         assetId = uid()
+        // the picture's length, not the container's (a looping clip wraps
+        // exactly where the fragment's own player does)
+        if (duration && duration > 0) asset.duration = duration
         p.assets.push({ id: assetId, ...asset })
-        rendered.set(clip.fragmentId!, assetId)
+        rendered.set(path, assetId)
       }
-      clip.kind = 'media'
-      clip.assetId = assetId
+      for (const clip of job.clips) {
+        clip.kind = 'media'
+        clip.assetId = assetId
+        // the file begins `start` seconds into the composition
+        clip.inPoint = Math.max(0, clip.inPoint - (start || 0))
+      }
       done++
     }
   } finally {

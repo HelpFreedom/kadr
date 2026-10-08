@@ -384,6 +384,17 @@ export class Mp4FrameSource {
     // seek in unshifted media time so the chosen keyframe is never late
     const shiftSec = this.sampleScale > 0 ? this.ctsShift / this.sampleScale : 0
     const si = this.file.seek(Math.max(0, srcT + shiftSec), true)
+    // mp4box keeps the batch it was collecting (up to nbSamples) across a
+    // seek and sends it with the first samples after it: the fresh decoder
+    // then got a keyframe from BEFORE the jump first and handed out that frame
+    // for the target (found 2026-10-08: the first frame of a clip read 1.0 s
+    // of a light fragment render instead of 0.5 — init's own jump(0) hit it
+    // whenever the head pump had already extracted a batch or two)
+    try {
+      for (const t of (this.file as unknown as { extractedTracks?: { id: number; samples: unknown[] }[] }).extractedTracks ?? []) {
+        if (t.id === this.trackId) t.samples = []
+      }
+    } catch { /* mp4box internals changed — the decode below still runs */ }
     this.file.start()
     void this.pump(si.offset)
   }

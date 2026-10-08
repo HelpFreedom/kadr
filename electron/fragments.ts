@@ -848,23 +848,57 @@ export function cancelFragmentRenders() {
 
 async function renderFragment(
   id: string,
-  opts: { transparent?: boolean } | undefined,
+  opts: { transparent?: boolean; range?: [number, number] } | undefined,
   onProgress: (p: number) => void
-): Promise<{ path: string; cached: boolean }> {
+): Promise<{ path: string; cached: boolean; start: number; duration?: number }> {
   await ensureWorkspace()
   let transparent = !!opts?.transparent
+  let fps = 0
+  let total = 0
   try {
     const meta = JSON.parse(await fs.readFile(join(FRAG_DIR(), id, 'meta.json'), 'utf8'))
     if (opts?.transparent === undefined) transparent = !!meta.transparent
+    fps = Number(meta.fps) || 0
+    total = Math.floor(Number(meta.durationInFrames) || 0)
   } catch { /* meta is optional for the decision */ }
   const ext = transparent ? 'webm' : 'mp4'
   // 'q2' marks the render settings generation — old low-quality cache misses
   const base = `${id}-${fragmentHash(id)}-q2${transparent ? '-a' : ''}`
-  const out = join(renderDir(), `${base}.${ext}`)
+  const full = join(renderDir(), `${base}.${ext}`)
+  // the picture's own length: the container runs longer (remotion's silent
+  // audio track ends up to ~60 ms after the last frame), and a clip looping
+  // past its end held the last frame for that long before wrapping
+  const lengthOf = (frames: number) => (fps > 0 && frames > 0 ? frames / fps : undefined)
   try {
-    await fs.access(out)
-    return { path: out, cached: true } // exact content already rendered
+    await fs.access(full)
+    return { path: full, cached: true, start: 0, duration: lengthOf(total) } // exact content already rendered
   } catch { /* not yet */ }
+  // ONLY THE FRAMES THE EDIT USES (2026-10-08, an overnight export at 50 % after
+  // 8 h). A project cut as windows of one continuous film (every scene a
+  // fragment whose clip starts at inPoint = its place in the film) rendered each
+  // fragment from frame 0 to its end: 33 scenes of a 26-minute film were
+  // 1.6 million frames for the 93 thousand the edit shows, each scene slower
+  // than the one before, about 35 hours in all. `range` is the stretch of the
+  // composition (seconds) the clips need; frames are absolute, so the fragment
+  // draws exactly what it drew in a full render, and the file simply starts at
+  // `start` (the caller moves the clips' inPoint back by it). A full render
+  // already on disk is always taken first — it contains every range.
+  let f0 = 0
+  let f1 = total - 1
+  if (opts?.range && fps > 0 && total > 0) {
+    f0 = Math.max(0, Math.min(total - 1, Math.floor(opts.range[0] * fps)))
+    f1 = Math.max(f0, Math.min(total - 1, Math.ceil(opts.range[1] * fps)))
+  }
+  const partial = total > 0 && (f0 > 0 || f1 < total - 1)
+  const out = partial ? join(renderDir(), `${base}-r${f0}-${f1}.${ext}`) : full
+  const start = partial ? f0 / fps : 0
+  const duration = lengthOf(partial ? f1 - f0 + 1 : total)
+  if (partial) {
+    try {
+      await fs.access(out)
+      return { path: out, cached: true, start, duration }
+    } catch { /* not yet */ }
+  }
   await fs.mkdir(renderDir(), { recursive: true })
   // Render into a sidecar and rename on success, so the presence of the cache
   // file always means "finished". Renderers get killed — the app quits, the
@@ -874,7 +908,7 @@ async function renderFragment(
   // fragment would at least fail loudly (an mp4 without its moov box does not
   // probe), but a transparent one is a WebM: it parses fine and just ends
   // early, so the clip would silently freeze on its last rendered frame.
-  const tmp = join(renderDir(), `${base}.part.${ext}`)
+  const tmp = out.slice(0, -(ext.length + 1)) + `.part.${ext}`
 
   // Quality matters more than render time here (one cached render per
   // content hash): PNG frames avoid Remotion's default JPEG-80 pass, VP9
@@ -884,6 +918,7 @@ async function renderFragment(
   const args = ['remotion', 'render', '--config=kadr.remotion.config.ts', 'src/_entries/current.tsx', id, tmp, '--log=error', '--image-format=png']
   if (transparent) args.push('--codec=vp9', '--pixel-format=yuva420p', '--crf=12')
   else args.push('--codec=h264', '--crf=15')
+  if (partial) args.push(`--frames=${f0}-${f1}`)
 
   const extraEnv = await netEnv()
   const job = renderChain.then(async () => {
@@ -945,7 +980,7 @@ async function renderFragment(
   renderChain = job.catch(() => { /* keep the queue alive */ })
   const cached = await job
   onProgress(1)
-  return { path: out, cached }
+  return { path: out, cached, start, duration }
 }
 
 // ------------------------------------------------------------------ inspect
@@ -1198,7 +1233,7 @@ export function registerFragmentIpc(getWin: () => BrowserWindow | null) {
     writeFragmentFile(id, name, content))
   ipcMain.handle('fragment:params-write', (_e, id: string, patch: Record<string, unknown> | null) =>
     writeFragmentParams(id, patch))
-  ipcMain.handle('fragment:render', (_e, id: string, opts?: { transparent?: boolean }) => {
+  ipcMain.handle('fragment:render', (_e, id: string, opts?: { transparent?: boolean; range?: [number, number] }) => {
     renderCancelled = false
     return renderFragment(id, opts, (p) => send(id, 'render', p))
   })

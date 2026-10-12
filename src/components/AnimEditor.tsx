@@ -4,18 +4,20 @@
 // mini-timeline with draggable keyframe diamonds.
 import { useEffect, useRef, useState } from 'react'
 import type { Anim, Clip, Keyframe, MaskShape, MaskShapeType } from '@shared/types'
-import { useEditor, findClip, usePosePresets, type PosePreset } from '@/state/store'
+import { useEditor, useSettings, findClip, usePosePresets, type PosePreset } from '@/state/store'
 import { evalAnim } from '@/engine/anim'
 import { videoLayersAt } from '@/engine/player'
 import { useT, type TKey } from '@/i18n'
 import { Icon, type IconName } from './icons'
 import { CtxMenu } from './CtxMenu'
+import { useEffects, labelText, paramAnim, type EffectParamDecl } from '@/gl/effects'
 
 const KF_EPS = 0.02
 
 interface ParamDef {
   key: string
-  label: TKey
+  /** an i18n key, or ready text (effect params carry their own names) */
+  label: TKey | { text: string }
   step: number
   min?: number
   max?: number
@@ -59,6 +61,18 @@ function shapeParam(
     key: `s${i}.${field}`, label, step, min, max,
     get: (c) => shapesOf(c)[i]?.[field] ?? defAnim(field === 'featherIn' || field === 'featherOut' ? 0 : 0.5),
     patch: (c, a) => patchShapes(shapesOf(c).map((s, j) => (j === i ? { ...s, [field]: a } : s)))
+  }
+}
+
+/** A numeric param of one of the clip's effects, keyframed like the transform. */
+function fxParam(fxId: string, key: string, text: string, d: EffectParamDecl): ParamDef {
+  return {
+    key: `fx.${fxId}.${key}`, label: { text }, step: d.step ?? ((d.max ?? 1) - (d.min ?? 0)) / 100,
+    min: d.min, max: d.max,
+    get: (c) => paramAnim(d, c.effects?.find((e) => e.id === fxId)?.params[key]),
+    patch: (c, a) => ({
+      effects: (c.effects ?? []).map((e) => (e.id === fxId ? { ...e, params: { ...e.params, [key]: a } } : e))
+    })
   }
 }
 
@@ -142,7 +156,9 @@ export function AnimEditor({ width }: { width: number }) {
     const f = s.animClipId ? findClip(s.project, s.animClipId) : null
     return f?.clip.assetId ? s.project.assets.find((a) => a.id === f.clip.assetId) : undefined
   })
-  const [mode, setMode] = useState<'transform' | 'mask'>('transform')
+  const [mode, setMode] = useState<'transform' | 'mask' | 'effects'>('transform')
+  const fxDefsReg = useEffects((s) => s.defs)
+  const lang = useSettings((s) => s.lang)
   const [tool, setTool] = useState<Tool>('edges')
   const [linked, setLinked] = useState(false)
   const [snapOn, setSnapOn] = useState(true)
@@ -227,6 +243,14 @@ export function AnimEditor({ width }: { width: number }) {
   const clip = found.clip
   const is3D = !!clip.transform.rotX
   const transformDefs = is3D ? [...TRANSFORM_PARAMS, ...TRANSFORM_3D_PARAMS] : TRANSFORM_PARAMS
+  // every numeric param of the clip's known effects, named «effect · param»
+  const fxDefs: ParamDef[] = (clip.effects ?? []).flatMap((e) => {
+    const def = fxDefsReg[e.type]
+    if (!def) return []
+    return Object.entries(def.params)
+      .filter(([, d]) => d.kind === 'number')
+      .map(([k, d]) => fxParam(e.id, k, `${labelText(def.name, lang)} · ${labelText(d.name, lang)}`, d))
+  })
   let rel = Math.max(0, Math.min(clip.duration, playhead - clip.start))
   // land exactly on the clip edges so frame-0 keyframes are possible
   if (rel < KF_EPS) rel = 0
@@ -321,7 +345,7 @@ export function AnimEditor({ width }: { width: number }) {
       startDrawShape(e)
       return
     }
-    if (mode === 'mask') return
+    if (mode !== 'transform') return
     push(gestureLabel())
     const x0 = cur.x
     const y0 = cur.y
@@ -579,7 +603,7 @@ export function AnimEditor({ width }: { width: number }) {
     if (!f) return
     let c = { ...f.clip }
     let patch: Partial<Clip> = {}
-    for (const p of [...transformDefs, ...MASK_PARAMS, ...allShapeParams]) {
+    for (const p of [...transformDefs, ...MASK_PARAMS, ...allShapeParams, ...fxDefs]) {
       const a = p.get(c)
       if (a.keyframes?.length) continue
       const na: Anim = {
@@ -607,7 +631,7 @@ export function AnimEditor({ width }: { width: number }) {
   }
 
   // smooth (parabolic) interpolation per mode
-  const modeDefs = mode === 'transform' ? transformDefs : [...MASK_PARAMS, ...allShapeParams]
+  const modeDefs = mode === 'transform' ? transformDefs : mode === 'effects' ? fxDefs : [...MASK_PARAMS, ...allShapeParams]
   const smoothOn = modeDefs.some((p) => p.get(clip).smooth)
   const toggleSmooth = () => {
     push('hEdit')
@@ -633,7 +657,21 @@ export function AnimEditor({ width }: { width: number }) {
     if (!f) return
     const reset = (a: Anim, def: number): Anim =>
       a.keyframes?.length ? upsertKf(a, rel, def) : { ...a, value: def }
-    if (mode === 'transform') {
+    if (mode === 'effects') {
+      // every effect param back to its declared default
+      let c = { ...f.clip }
+      let patch: Partial<Clip> = {}
+      for (const e of c.effects ?? []) {
+        const def = fxDefsReg[e.type]
+        for (const [k, d] of Object.entries(def?.params ?? {})) {
+          if (d.kind !== 'number') continue
+          const p = fxParam(e.id, k, k, d)
+          patch = { ...patch, ...p.patch(c, reset(p.get(c), Number(d.default))) }
+          c = { ...c, ...patch }
+        }
+      }
+      st.updateClip(clip.id, patch)
+    } else if (mode === 'transform') {
       const tr = f.clip.transform
       st.updateClip(clip.id, {
         transform: {
@@ -678,6 +716,9 @@ export function AnimEditor({ width }: { width: number }) {
   const maskDefs = [...MASK_PARAMS, ...allShapeParams]
   const rowT = kfTimes(transformDefs)
   const rowM = kfTimes(maskDefs)
+  const rowF = kfTimes(fxDefs)
+  const modeRow = mode === 'transform' ? rowT : mode === 'effects' ? rowF : rowM
+  const modeKfDefs = mode === 'transform' ? transformDefs : mode === 'effects' ? fxDefs : maskDefs
 
   const removeKfsAt = (defs: ParamDef[], time: number) => {
     push('hKeyframe')
@@ -718,7 +759,7 @@ export function AnimEditor({ width }: { width: number }) {
   }
 
   const jumpKf = (dir: -1 | 1) => {
-    const times = mode === 'transform' ? rowT : rowM
+    const times = modeRow
     const target =
       dir > 0
         ? times.find((x) => x > rel + KF_EPS)
@@ -782,7 +823,8 @@ export function AnimEditor({ width }: { width: number }) {
     { id: 'triangle', icon: 'triangle', title: 'toolTriangle' }
   ]
 
-  const params = mode === 'transform' ? transformDefs : [...MASK_PARAMS, ...selShapeParams]
+  const params = mode === 'transform' ? transformDefs : mode === 'effects' ? fxDefs : [...MASK_PARAMS, ...selShapeParams]
+  const labelOf = (p: ParamDef) => (typeof p.label === 'string' ? t(p.label) : p.label.text)
   const sel = shapes[selIdx]
   const selFi = sel ? evalAnim(sel.featherIn, rel) : 0
   const selFo = sel ? evalAnim(sel.featherOut, rel) : 0
@@ -796,7 +838,10 @@ export function AnimEditor({ width }: { width: number }) {
         <button className={mode === 'mask' ? 'active' : ''} onClick={() => setMode('mask')}>
           {t('modeMask')}
         </button>
-        <button
+        <button className={mode === 'effects' ? 'active' : ''} data-act="anim-effects" onClick={() => setMode('effects')}>
+          {t('modeEffects')}
+        </button>
+        {mode !== 'effects' && <button
           className={presetMenu ? 'active' : ''}
           title={t('presetsHint')}
           onClick={(e) => {
@@ -805,7 +850,7 @@ export function AnimEditor({ width }: { width: number }) {
           }}
         >
           <Icon name="star" size={14} /> {t('presets')}
-        </button>
+        </button>}
         <span className="flex1" />
         <button className={`link-toggle ${linked ? 'on' : ''}`} title={t('linkHint')} onClick={toggleLink}>
           <Icon name={linked ? 'link' : 'unlink'} size={14} /> {t('linkToTimeline')}
@@ -1087,10 +1132,11 @@ export function AnimEditor({ width }: { width: number }) {
         </CtxMenu>
       )}
 
-      <div className="anim-values">
+      {mode === 'effects' && !fxDefs.length && <div className="dim anim-hint">{t('animFxEmpty')}</div>}
+      <div className={`anim-values${mode === 'effects' ? ' one-col' : ''}`}>
         {params.map((p) => (
-          <label key={p.key} title={t(p.label)}>
-            <span>{t(p.label)}</span>
+          <label key={p.key} title={labelOf(p)}>
+            <span>{labelOf(p)}</span>
             <input
               type="number"
               step={p.step}
@@ -1124,9 +1170,9 @@ export function AnimEditor({ width }: { width: number }) {
           </button>
           <button
             title={t('kfDelete')}
-            disabled={!(mode === 'transform' ? rowT : rowM).some((x) => Math.abs(x - rel) < KF_EPS)}
+            disabled={!modeRow.some((x) => Math.abs(x - rel) < KF_EPS)}
             aria-label={t('kfDelete')}
-            onClick={() => removeKfsAt(mode === 'transform' ? transformDefs : maskDefs, rel)}
+            onClick={() => removeKfsAt(modeKfDefs, rel)}
           >
             <Icon name="diamondMinus" size={14} />
           </button>
@@ -1143,7 +1189,8 @@ export function AnimEditor({ width }: { width: number }) {
         </div>
         {[
           { label: t('modeTransform'), times: rowT, defs: transformDefs },
-          { label: t('modeMask'), times: rowM, defs: maskDefs }
+          { label: t('modeMask'), times: rowM, defs: maskDefs },
+          ...(fxDefs.length ? [{ label: t('modeEffects'), times: rowF, defs: fxDefs }] : [])
         ].map((row) => (
           <div className="mini-row" key={row.label}>
             <span className="mini-label">{row.label}</span>

@@ -166,6 +166,13 @@ const api: KadrApi = {
   fragmentCollide: (id, step) => ipcRenderer.invoke('fragment:collide', id, step),
   modelImport: (path, projectDir, opts) => ipcRenderer.invoke('model:import', path, projectDir, opts),
   modelList: (projectDir) => ipcRenderer.invoke('model:list', projectDir),
+  effectsList: (projectDir) => ipcRenderer.invoke('effects:list', projectDir),
+  effectsWatch: (projectDir) => ipcRenderer.invoke('effects:watch', projectDir),
+  onEffectsChanged: (cb) => {
+    const handler = () => cb()
+    ipcRenderer.on('effects:changed', handler)
+    return () => ipcRenderer.removeListener('effects:changed', handler)
+  },
   fragmentCaptureResize: (id, w, h) => ipcRenderer.invoke('fragment:capture-resize', id, w, h),
   onFragmentCaptureLog: (cb) => {
     const handler = (_e: unknown, p: { id: string; level: 'error' | 'warn'; msg: string }) => cb(p)

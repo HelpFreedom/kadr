@@ -19,6 +19,7 @@ import { registerSoundsIpc } from './sounds'
 import { registerFragmentIpc, cancelFragmentRenders, stopAllCaptures } from './fragments'
 import { applyGpuChoice, registerGpuIpc } from './gpu'
 import { registerModelIpc } from './models'
+import { registerEffectIpc } from './effects'
 import { sourceHdr, hdrLut, hdrFilter, fragmentMedia } from './hdr'
 import type { ExportJob, Project } from '@shared/types'
 
@@ -276,6 +277,7 @@ app.whenReady().then(() => {
   registerStorageIpc()
   registerGpuIpc()
   registerModelIpc()
+  registerEffectIpc()
   registerFragmentIpc(() => win)
   createWindow()
   app.on('activate', () => {

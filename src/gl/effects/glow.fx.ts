@@ -3,9 +3,10 @@
 // turns that field into a smoky, particle-laden halo emanating from the
 // object's edges. All parameters are user-adjustable; time comes from the
 // clip-local clock so preview and export render identical smoke.
+import type { EffectDef } from './types'
 
 /** Blurred-silhouette field pass: golden-angle spiral disc blur of alpha. */
-export const GLOW_FIELD_FS = `#version 300 es
+const GLOW_FIELD_FS = `#version 300 es
 precision mediump float;
 in vec2 vUV;
 uniform sampler2D uTex;   // full-res layer (premultiplied)
@@ -28,7 +29,7 @@ void main() {
 }`
 
 /** Composite pass: field → smoky colored halo drawn under the layer. */
-export const GLOW_FS = `#version 300 es
+const GLOW_FS = `#version 300 es
 precision highp float;
 in vec2 vUV;
 uniform sampler2D uField; // blurred silhouette (low-res, linear-filtered)
@@ -152,42 +153,64 @@ void main() {
   outColor = vec4(col * min(g, 1.3), clamp(g, 0.0, 1.0) * 0.92);
 }`
 
-/** Per-draw uniforms of one glow instance, parsed from Effect.params. */
-export interface GlowParams {
-  color: [number, number, number]
-  sizePx: number
-  intensity: number
-  saturation: number
-  smoke: number
-  speed: number
-  particles: number
-}
+const glow: EffectDef = {
+  id: 'glow',
+  group: 'light',
+  name: { ru: 'Внешнее сияние', en: 'Outer glow' },
+  params: {
+    color: { kind: 'color', default: '#7fc4ff', name: { ru: 'Цвет', en: 'Color' } },
+    size: { kind: 'number', default: 70, min: 4, max: 400, step: 1, name: { ru: 'Размер', en: 'Size' } },
+    intensity: { kind: 'number', default: 1, min: 0, max: 3, step: 0.05, name: { ru: 'Яркость', en: 'Intensity' } },
+    saturation: { kind: 'number', default: 1, min: 0, max: 2, step: 0.05, name: { ru: 'Насыщенность', en: 'Saturation' } },
+    smoke: { kind: 'number', default: 0.65, min: 0, max: 1, step: 0.05, name: { ru: 'Дымность', en: 'Smokiness' } },
+    speed: { kind: 'number', default: 1, min: 0, max: 3, step: 0.05, name: { ru: 'Скорость дыма', en: 'Smoke speed' } },
+    particles: { kind: 'number', default: 0.5, min: 0, max: 1, step: 0.05, name: { ru: 'Частицы', en: 'Particles' } }
+  },
+  stage: 'under',
+  timeDependent: true,
+  run(ctx, v) {
+    const { gl } = ctx
+    const ratio = ctx.width / Math.max(1, ctx.height)
+    const size = (v.size as number) / Math.max(1, ctx.height)
+    // blurred silhouette at reduced resolution (radius taps stay cheap)
+    const field = ctx.small()
+    gl.bindFramebuffer(gl.FRAMEBUFFER, field.fbo)
+    gl.viewport(0, 0, field.w, field.h)
+    gl.disable(gl.BLEND)
+    const fp = ctx.program('glow-field', GLOW_FIELD_FS)
+    gl.useProgram(fp.prog)
+    gl.uniform1i(fp.u('uTex'), 0)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, ctx.src)
+    gl.uniform1f(fp.u('uSize'), size)
+    gl.uniform1f(fp.u('ratio'), ratio)
+    ctx.quad()
+    gl.enable(gl.BLEND)
+    gl.viewport(0, 0, ctx.width, ctx.height)
 
-export const GLOW_DEFAULTS = {
-  color: '#7fc4ff',
-  size: 70,
-  intensity: 1,
-  saturation: 1,
-  smoke: 0.65,
-  speed: 1,
-  particles: 0.5
-}
-
-/** Effect.params (with defaults) → shader-ready GlowParams. */
-export function glowParams(params: Record<string, number | string>): GlowParams {
-  const num = (k: keyof typeof GLOW_DEFAULTS) => {
-    const v = params[k]
-    return typeof v === 'number' && Number.isFinite(v) ? v : (GLOW_DEFAULTS[k] as number)
-  }
-  const hex = typeof params.color === 'string' ? params.color : GLOW_DEFAULTS.color
-  const v = parseInt(hex.replace('#', ''), 16)
-  return {
-    color: [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255],
-    sizePx: num('size'),
-    intensity: num('intensity'),
-    saturation: num('saturation'),
-    smoke: num('smoke'),
-    speed: num('speed'),
-    particles: num('particles')
+    // smoky halo under the layer, into the current composite destination
+    gl.bindFramebuffer(gl.FRAMEBUFFER, ctx.dest)
+    const gp = ctx.program('glow', GLOW_FS)
+    gl.useProgram(gp.prog)
+    gl.uniform1i(gp.u('uField'), 0)
+    gl.uniform1i(gp.u('uTex'), 1)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, field.tex)
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, ctx.src)
+    const c = v.color as [number, number, number]
+    gl.uniform3f(gp.u('uColor'), c[0], c[1], c[2])
+    gl.uniform1f(gp.u('uSize'), size)
+    gl.uniform1f(gp.u('uIntensity'), v.intensity as number)
+    gl.uniform1f(gp.u('uSat'), v.saturation as number)
+    gl.uniform1f(gp.u('uSmoke'), v.smoke as number)
+    gl.uniform1f(gp.u('uSpeed'), v.speed as number)
+    gl.uniform1f(gp.u('uParticles'), v.particles as number)
+    gl.uniform1f(gp.u('uTime'), ctx.time)
+    gl.uniform1f(gp.u('ratio'), ratio)
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+    ctx.quad()
+    gl.activeTexture(gl.TEXTURE0)
   }
 }
+export default glow

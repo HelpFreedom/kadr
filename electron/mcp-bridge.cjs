@@ -286,6 +286,21 @@ server.registerTool('kadr_models', {
   } catch (e) { return asError(e) }
 })
 
+server.registerTool('kadr_effects', {
+  description:
+    'The per-clip effects this editor can draw (src/gl/effects/): id, group, stage, and every param with ' +
+    'its kind, range and default, plus a compile error if an effect is broken. Add and change them through ' +
+    'kadr_eval with window.kadrEditor.effects: add(clipId, type, params?) → effectId, set(clipId, effectId, ' +
+    '{ enabled?, params? }), move(clipId, effectId, index), remove(clipId, effectId) — each one undo step. ' +
+    'The chain runs in list order ("layer" effects change the layer, "under" ones such as glow paint beneath it), ' +
+    'after the clip transform, in project pixels. Look at the result with kadr_snapshot.',
+  inputSchema: {}
+}, async () => {
+  try {
+    return asText(await editorEval('return window.kadrEditor.effects.list()'))
+  } catch (e) { return asError(e) }
+})
+
 server.registerTool('kadr_check', {
   description:
     'CHECK the motion piece against the music and the rules of readable motion, before showing it. ' +

@@ -1272,15 +1272,24 @@ div.tr-error {
 }
 .fx-head label { display: flex; align-items: center; gap: var(--s3); cursor: pointer; font-weight: 500; }
 .fx-head label > span { display: flex; align-items: center; gap: var(--s2); }
-.fx-del {
+/* order and remove: 24 px targets (WCAG 2.5.8), quiet until hovered */
+.fx-tools { display: flex; align-items: center; gap: var(--s1); }
+.fx-tool, .fx-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--c-text-3);
   cursor: pointer;
   padding: 2px;
-  min-height: 22px;
+  min-height: 24px;
+  min-width: 24px;
 }
+.fx-tool:hover:not(:disabled) { background: var(--c-bg-3); color: var(--c-text); }
+.fx-tool:disabled { color: var(--c-text-off); cursor: default; }
 .fx-del:hover:not(:disabled) { background: var(--c-danger-soft); color: var(--c-danger); }
+.fx-add.active { border-color: var(--c-accent); background: var(--c-accent-soft); color: var(--c-text); }
 .fx-slider input[type='range'] { flex: 1; min-width: 60px; }
 /* fragment parameters: a slider with its exact value beside it */
 .fp-reload { margin-left: auto; display: inline-flex; }

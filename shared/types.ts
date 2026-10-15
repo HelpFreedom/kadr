@@ -120,7 +120,10 @@ export interface Effect {
   id: string
   type: string
   enabled: boolean
-  params: Record<string, number | string>
+  /** numbers are Anims (keyframes in clip-local seconds, like the transform);
+      a bare number is accepted from scripts and older files; colours stay
+      '#rrggbb' strings */
+  params: Record<string, Anim | number | string>
 }
 
 export interface TextStyle {

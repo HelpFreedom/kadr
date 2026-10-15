@@ -541,11 +541,14 @@ interface EditorState {
   moveTrack(trackId: string, toIndex: number): void
   updateTrack(trackId: string, patch: Partial<Track>): void
 
-  insertClipFromAsset(assetId: string, trackId: string | null, at: number): void
+  /** returns the new clip ids: the clip first, then its linked audio twin (if any) */
+  insertClipFromAsset(assetId: string, trackId: string | null, at: number): string[]
   /** Place several assets back-to-back starting at `at` (one undo entry);
       audio assets go to an audio track regardless of the drop lane. */
-  insertClipsFromAssets(assetIds: string[], trackId: string | null, at: number): void
-  insertTextClip(at: number): void
+  /** returns the new clip ids in placement order, each clip followed by its audio twin */
+  insertClipsFromAssets(assetIds: string[], trackId: string | null, at: number): string[]
+  /** returns the new clip's id, or null when there is no unlocked video track */
+  insertTextClip(at: number): string | null
   /** Add a track-independent timeline marker (auto-numbered); returns id. */
   addMarker(time: number): string
   moveMarker(id: string, time: number): void
@@ -1231,12 +1234,14 @@ export const useEditor = create<EditorState>((set, get) => ({
     const found = assetIds
       .map((id) => s.project.assets.find((a) => a.id === id))
       .filter((a): a is MediaAsset => !!a)
-    if (!found.length) return
+    if (!found.length) return []
     s.pushHistory('hInsert')
+    // the ids go back to the caller: a script placing a clip had to diff the
+    // clip ids before and after to find the one it just made
+    const ids: string[] = []
     set((st) => {
       const p = cloneProject(st.project)
       let cursor = Math.max(0, at)
-      const ids: string[] = []
       for (const asset of found) {
         const wantKind: TrackKind = asset.kind === 'audio' ? 'audio' : 'video'
         let track = trackId ? p.tracks.find((t) => t.id === trackId) : undefined
@@ -1279,6 +1284,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (!ids.length) return st
       return { project: p, selection: ids }
     })
+    return ids
   },
 
   setClipSpeed: (clipId, speed, duration, start) =>
@@ -1369,6 +1375,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   insertTextClip: (at) => {
     const s = get()
     s.pushHistory('hInsert')
+    let id: string | null = null
     set((st) => {
       const p = cloneProject(st.project)
       const track = p.tracks.find((t) => t.kind === 'video' && !t.locked)
@@ -1385,8 +1392,10 @@ export const useEditor = create<EditorState>((set, get) => ({
         ...newClipDefaults()
       }
       track.clips.push(clip)
+      id = clip.id
       return { project: p, selection: [clip.id] }
     })
+    return id
   },
 
   updateClip: (clipId, patch) =>

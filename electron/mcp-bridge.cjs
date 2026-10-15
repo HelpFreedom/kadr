@@ -149,8 +149,9 @@ server.registerTool('kadr_eval', {
     'pushHistory(label) (call ONCE before a discrete low-level edit like updateClip — enables undo; ' +
     'high-level actions such as addTrack/insertClipFromAsset/splitAtPlayhead push their own), ' +
     'updateClip(clipId, patch), ' +
-    'insertClipFromAsset(assetId, trackId, startSec), insertClipsFromAssets([ids], trackId, at) ' +
-    '(back-to-back, audio → audio track), removeAssets([assetIds]) (drops the bin entries AND every ' +
+    'insertClipFromAsset(assetId, trackId, startSec) → [clipId, linked audio clipId?], ' +
+    'insertClipsFromAssets([ids], trackId, at) → new clip ids in order ' +
+    '(back-to-back, audio → audio track), insertTextClip(at) → clipId|null, removeAssets([assetIds]) (drops the bin entries AND every ' +
     'clip using them, one undo), setClipDuration(clipId, sec), setClipSpeed(clipId, speed, duration) ' +
     '(speed 0.02–100), addAsset(asset), ' +
     'addTrack(kind), select([ids]), setPlayhead(sec), setProject(project), splitAtPlayhead(), ' +
@@ -178,7 +179,7 @@ server.registerTool('kadr_eval', {
     'const { asset } = await window.kadr.probeMedia("/path/v.mp4");\n' +
     'const id = ed.uid(); st().pushHistory("hInsert"); st().addAsset({ id, ...asset });\n' +
     'const tr = st().project.tracks.find(t => t.name === "V1");\n' +
-    'st().insertClipFromAsset(id, tr.id, 2); return st().project.tracks.length;',
+    'const [clipId] = st().insertClipFromAsset(id, tr.id, 2); return clipId;',
   inputSchema: { code: z.string().describe('async function body to run in the editor page') }
 }, async ({ code }) => {
   try { return asText(await editorEval(code)) } catch (e) { return asError(e) }

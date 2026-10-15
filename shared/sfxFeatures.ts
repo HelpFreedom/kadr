@@ -14,7 +14,7 @@
  * 0.0001 on all 228 files.
  *
  * Input: mono PCM (the mean of the channels — ffmpeg's -ac 1 matrix would scale
- * a stereo file by √2) trimmed to the container duration.
+ * a stereo file by √2) exactly as long as the container duration: `sfxMono`.
  * Pure TypeScript, no node/electron imports.
  */
 
@@ -25,7 +25,31 @@ const HOP = 256
  * Bump whenever a feature or a rule below changes: catalogues cached by an
  * older version are re-analysed (the user's hand-written uses/notes survive).
  */
-export const SFX_ANALYSIS_VERSION = 2
+export const SFX_ANALYSIS_VERSION = 3
+
+/**
+ * The input `sfxFeatures` is defined on, from ffmpeg's interleaved f32 decode:
+ * the channel mean over exactly round(duration·sr) frames — cut when the decode
+ * is longer, ZERO-PADDED when it is shorter. The length is the point: ffmpeg
+ * ≥ 5 applies an Ogg stream's end trim and ends up to 128 frames short of the
+ * duration ffprobe reports, 4.x decoded past it, and /brag's numbers are on
+ * that duration. Cutting alone made activeRatio (loud time / length) drift by
+ * a median 0.006 on 6.0 and 7.1 builds — every sample value was identical.
+ * The frames padded are ones the stream marks as codec padding, so silence.
+ * No duration (NaN, 0): the decode as it is.
+ */
+export function sfxMono(inter: Float32Array, channels: number, duration: number, sr: number): Float32Array {
+  const ch = Math.max(1, channels | 0)
+  const have = Math.floor(inter.length / ch)
+  const frames = duration > 0 ? Math.round(duration * sr) : have
+  const mono = new Float32Array(frames)
+  for (let i = 0; i < Math.min(frames, have); i++) {
+    let s = 0
+    for (let c = 0; c < ch; c++) s += inter[i * ch + c]
+    mono[i] = s / ch
+  }
+  return mono
+}
 
 export interface SfxFeatures {
   duration: number

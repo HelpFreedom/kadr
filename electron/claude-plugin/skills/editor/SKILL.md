@@ -1,8 +1,7 @@
 ---
-name: kadr-editor
-description: Editing the LIVE project inside the Kadr video editor through its kadr_* MCP tools (kadr_state, kadr_snapshot, kadr_sheet, kadr_eval, kadr_check, kadr_export, kadr_transcribe, kadr_fragment_create, kadr_typecheck, kadr_fragment_media, kadr_model_import, kadr_models, kadr_beats, kadr_audio_react, kadr_sounds, kadr_sound_add, kadr_sound_label, kadr_neon_wave, kadr_voice_*). The base skill — use it whenever those tools are available and the task concerns the open timeline, its clips, audio, captions, titles or motion graphics; it says which of kadr-music, kadr-motion and kadr-3d to add. Not for standalone Remotion authoring — a dedicated remotion skill, if installed, owns composition internals.
+name: editor
+description: Editing the LIVE project inside the Kadr video editor through its kadr_* MCP tools (kadr_state, kadr_snapshot, kadr_sheet, kadr_eval, kadr_check, kadr_export, kadr_transcribe, kadr_fragment_create, kadr_typecheck, kadr_fragment_media, kadr_model_import, kadr_models, kadr_beats, kadr_audio_react, kadr_sounds, kadr_sound_add, kadr_sound_label, kadr_neon_wave, kadr_voice_*). The base skill — use it whenever those tools are available and the task concerns the open timeline, its clips, audio, captions, titles or motion graphics; it says which of kadr:music, kadr:motion and kadr:3d to add. Not for standalone Remotion authoring — a dedicated remotion skill, if installed, owns composition internals.
 ---
-<!-- managed by Kadr: rewritten when Kadr updates (electron/skills/) -->
 
 # Editing in Kadr
 
@@ -16,9 +15,9 @@ load the ones the project calls for — often two or three together:
 
 | the project has… | add |
 |---|---|
-| music, or anything meant to land on a beat | **kadr-music** — the music map, bar hierarchy, sound design |
-| titles, captions, fragments, any motion graphics | **kadr-motion** — readability, style defaults, one-film architecture, checks |
-| 3D models, a product or a mechanism shown in 3D, a 3D→footage match cut | **kadr-3d** — models, kit, camera, physical honesty |
+| music, or anything meant to land on a beat | **kadr:music** — the music map, bar hierarchy, sound design |
+| titles, captions, fragments, any motion graphics | **kadr:motion** — readability, style defaults, one-film architecture, checks |
+| 3D models, a product or a mechanism shown in 3D, a 3D→footage match cut | **kadr:3d** — models, kit, camera, physical honesty |
 
 A cut of plain footage needs only this one. A lyric video needs music + motion;
 a product film to a song needs all three. The rules in those skills are
@@ -33,7 +32,7 @@ rhythm, readability or physical sense — not a technical failure. So:
    what counts as "template-looking" to them, how much text, whether there is
    sound design and of what kind, what the real facts and sources are. Two or
    three pointed questions, not a questionnaire.
-2. **Show the plan before the build**: for music, the music map (kadr-music);
+2. **Show the plan before the build**: for music, the music map (kadr:music);
    then a storyboard — a table of sections/bars → what happens, what it says,
    where the camera is — and 4–6 KEY FRAMES (`kadr_sheet`) of a rough version.
    Build the rest only after a yes.
@@ -85,7 +84,7 @@ rhythm, readability or physical sense — not a technical failure. So:
   overlap, legibility). For anything with scenes or transitions, look at every
   scene SETTLED and every transition at its MIDDLE: overflow, collisions, low
   contrast and muddy double exposures show up there and nowhere else.
-- Fragments: `kadr_check` (see kadr-motion) before showing the user.
+- Fragments: `kadr_check` (see kadr:motion) before showing the user.
 - After audio edits: for exact numbers export a short range with the mp3
   preset and run ffmpeg loudnorm measurement on it.
 - After timeline restructuring: `kadr_state` again — confirm starts,
@@ -108,7 +107,7 @@ fragments get their workspace links back (`kadrEditor.openProject(path)` does
 all of it).
 
 - Keep `fragment = { component, meta }` exported (plus `inspect` —
-  kadr-motion) and meta.json's durationInFrames in sync with timing changes.
+  kadr:motion) and meta.json's durationInFrames in sync with timing changes.
 - **Shared code, once.** A saved project has `<projectDir>/kadr-lib/`; every
   fragment of the project imports from it as `'@lib/…'` — modules, models
   (`@lib/models/…`), media (`@lib/media/…`), anything. Never copy a module into
@@ -266,12 +265,12 @@ control outlines at 3:1 against what they sit on.
   times, Read it, describe; correlate with kadr_state clips.
 - "Добавь субтитры" → kadr_transcribe (word-precise cues) → SRT lands in
   project.texts; for animated captions use autoCaptions or a fragment
-  (kadr-motion for the reading rules).
+  (kadr:motion for the reading rules).
 - «Озвучь текст» → kadr_voice_speak; then, if asked to check it,
   kadr_voice_check → report the must-review list with TIMELINE timecodes and
   stop: the verdicts are the user's to give.
-- Anything to music → kadr-music. Titles, a promo, an intro → kadr-motion (and
-  kadr-music if there is music). A model, a product, a mechanism → kadr-3d.
+- Anything to music → kadr:music. Titles, a promo, an intro → kadr:motion (and
+  kadr:music if there is music). A model, a product, a mechanism → kadr:3d.
 - Long operations (transcribe, export, reverse, first fragment render, a voice
   check, `kadr_check` with collisions) take minutes — warn the user, then call
   and wait; don't retry mid-flight.

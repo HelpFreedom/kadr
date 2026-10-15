@@ -23,14 +23,7 @@ function decode(path) {
   const ch = info.streams[0].channels
   const raw = execFileSync('ffmpeg', ['-v', 'error', '-i', path, '-ar', String(SR), '-f', 'f32le', '-'], { maxBuffer: 1 << 30 })
   const inter = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength >> 2)
-  const frames = Math.min(Math.floor(inter.length / ch), Math.round(Number(info.format.duration) * SR))
-  const mono = new Float32Array(frames)
-  for (let i = 0; i < frames; i++) {
-    let s = 0
-    for (let c = 0; c < ch; c++) s += inter[i * ch + c]
-    mono[i] = s / ch
-  }
-  return mono
+  return F.sfxMono(inter, ch, Number(info.format.duration), SR)
 }
 
 const sfxRoot = join(root, 'resources', 'sfx')

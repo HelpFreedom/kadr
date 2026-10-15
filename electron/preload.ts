@@ -214,6 +214,7 @@ const api: KadrApi = {
 
   transcribe: (req) => ipcRenderer.invoke('transcribe:run', req),
   transcribeCancel: () => ipcRenderer.invoke('transcribe:cancel'),
+  speechPython: () => ipcRenderer.invoke('speech:python'),
   onTranscribeProgress: (cb) => {
     const handler = (_e: unknown, p: { progress: number; text: string }) => cb(p)
     ipcRenderer.on('transcribe:progress', handler)

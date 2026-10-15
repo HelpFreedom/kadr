@@ -26,19 +26,59 @@ def emit(obj):
     sys.stdout.flush()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--audio", required=True)
-    ap.add_argument("--model", default="large-v3")
-    ap.add_argument("--language", default="auto")
-    ap.add_argument("--duration", type=float, default=0.0)
-    args = ap.parse_args()
+def _register_nvidia_dlls():
+    """pip wheels nvidia-cublas-cu12 / nvidia-cudnn-cu12 drop their DLLs under
+    site-packages/nvidia/<lib>/bin, which is not on the Windows search path.
+    Register those folders so ctranslate2 can find cublas64_12.dll & co."""
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+    try:
+        import nvidia  # namespace package from the wheels
+    except ImportError:
+        return
+    for root in getattr(nvidia, "__path__", []):
+        for lib in os.listdir(root):
+            d = os.path.join(root, lib, "bin")
+            if os.path.isdir(d):
+                try:
+                    os.add_dll_directory(d)
+                    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+                except OSError:
+                    pass
 
-    from faster_whisper import WhisperModel
 
+def pick_device():
+    """cuda when ctranslate2 sees a GPU, cpu otherwise.
+    KADR_WHISPER_DEVICE=cpu|cuda|auto overrides (default auto)."""
+    want = os.environ.get("KADR_WHISPER_DEVICE", "auto").strip().lower()
+    if want == "cpu":
+        return "cpu"
+    _register_nvidia_dlls()
+    try:
+        import ctranslate2
+        has_cuda = ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        has_cuda = False
+    if not has_cuda and want == "cuda":
+        sys.stderr.write("whisper: KADR_WHISPER_DEVICE=cuda but no CUDA device; using cpu\n")
+    return "cuda" if has_cuda else "cpu"
+
+
+def load_model(WhisperModel, name, device):
+    if device == "cuda":
+        try:
+            m = WhisperModel(name, device="cuda", compute_type="float16")
+            sys.stderr.write("whisper: cuda/float16\n")
+            return m
+        except Exception as e:  # noqa: BLE001 — any load failure means "use cpu"
+            sys.stderr.write(f"whisper: cuda load failed ({e}); falling back to cpu\n")
     threads = max(4, (os.cpu_count() or 8) - 2)
-    model = WhisperModel(args.model, device="cpu", compute_type="int8", cpu_threads=threads)
+    m = WhisperModel(name, device="cpu", compute_type="int8", cpu_threads=threads)
+    sys.stderr.write(f"whisper: cpu/int8 x{threads}\n")
+    return m
 
+
+def run(model, args, progress):
     segments, info = model.transcribe(
         args.audio,
         language=None if args.language == "auto" else args.language,
@@ -78,6 +118,7 @@ def main():
         else:
             prev_text = text
             repeats = 0
+        progress["segments"] += 1
         emit({
             "type": "segment",
             "start": round(seg.start, 3),
@@ -90,6 +131,35 @@ def main():
 
     emit({"type": "done", "language": getattr(info, "language", args.language),
           "duration": total})
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--audio", required=True)
+    ap.add_argument("--model", default="large-v3")
+    ap.add_argument("--language", default="auto")
+    ap.add_argument("--duration", type=float, default=0.0)
+    args = ap.parse_args()
+
+    from faster_whisper import WhisperModel
+
+    device = pick_device()
+    model = load_model(WhisperModel, args.model, device)
+
+    progress = {"segments": 0}
+    try:
+        run(model, args, progress)
+    except Exception as e:  # noqa: BLE001
+        # only retry while nothing has reached the editor yet — a CPU
+        # rerun after partial GPU output would stream every segment twice
+        if device != "cuda" or progress["segments"]:
+            raise
+        # cuBLAS/cuDNN missing, VRAM exhausted, driver too old: the load
+        # succeeded but the first kernel did not. Do the job on the CPU
+        # instead of failing the user's transcription.
+        sys.stderr.write(f"whisper: cuda inference failed ({e}); retrying on cpu\n")
+        model = load_model(WhisperModel, args.model, "cpu")
+        run(model, args, progress)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,59 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The runner image pins Ubuntu's ffmpeg (24.04 ships 6.1.x); Windows
+        # downloads one fixed gyan.dev release. check-hdr, check-limiter,
+        # check-mixdown and check-sfx-labels depend on the ffmpeg build.
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # --ignore-scripts: no node-pty rebuild and no Electron binary; the
+      # checks run in plain node.
+      - run: npm ci --ignore-scripts
+
+      - name: ffmpeg (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: ffmpeg (Windows, gyan.dev 7.1)
+        if: runner.os == 'Windows'
+        run: |
+          curl -fsSL -o ffmpeg.zip https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip
+          7z x -y -o"$RUNNER_TEMP" ffmpeg.zip > /dev/null
+          echo "$RUNNER_TEMP/ffmpeg-7.1-essentials_build/bin" >> "$GITHUB_PATH"
+
+      - run: ffmpeg -version | head -1
+
+      - run: npm run typecheck
+
+      # Every pure check. check-beats runs without the music folder
+      # (synthetic material only). One failing check turns the job red,
+      # but all of them run so the log shows every failure at once.
+      - name: pure checks
+        run: |
+          failed=""
+          for f in scripts/check-*.mjs; do
+            echo "::group::$f"
+            node "$f" || failed="$failed $f"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then echo "::error::failed:$failed"; exit 1; fi

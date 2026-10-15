@@ -168,7 +168,8 @@ server.registerTool('kadr_eval', {
     '- await window.kadr.probeMedia(path) → { asset } (probe a media file to import: then ' +
     'addAsset({ id: uid(), ...asset })); window.kadr.writeProject(path, project); ' +
     'window.kadr.readProject(path).\n' +
-    'Times are seconds. Animatable scalars (clip gain, transform.x/y/scale/rotation/opacity) are ' +
+    'Times are seconds. Animatable scalars (clip gain, transform.x/y/scale/rotation/opacity, numeric ' +
+    'effect params) are ' +
     'Anim objects — write { value: 0.5 }, NEVER a bare number. ' +
     'Mutations: always pushHistory first; the store is zustand — re-read ' +
     'getState() after each action. NEVER return whole project/asset objects — asset ' +
@@ -283,6 +284,23 @@ server.registerTool('kadr_models', {
       await window.kadrEditor.refreshModels()
       return window.kadrEditor.useModelsUi.getState().models.map((m) => ({ name: m.name, import: "@lib/models/" + m.file, sizeMm: m.sizeMm,
         parts: m.parts.map((p) => p.name), source: m.source }))`))
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_effects', {
+  description:
+    'The per-clip effects this editor can draw (src/gl/effects/): id, group, stage, and every param with ' +
+    'its kind, range and default, plus a compile error if an effect is broken. Add and change them through ' +
+    'kadr_eval with window.kadrEditor.effects: add(clipId, type, params?) → effectId, set(clipId, effectId, ' +
+    '{ enabled?, params? }), move(clipId, effectId, index), remove(clipId, effectId) — each one undo step. ' +
+    'A numeric param is a number or an Anim ({ value, keyframes: [{ time, value, easing }] }, clip-local ' +
+    'seconds); colours are "#rrggbb". ' +
+    'The chain runs in list order ("layer" effects change the layer, "under" ones such as glow paint beneath it), ' +
+    'after the clip transform, in project pixels. Look at the result with kadr_snapshot.',
+  inputSchema: {}
+}, async () => {
+  try {
+    return asText(await editorEval('return window.kadrEditor.effects.list()'))
   } catch (e) { return asError(e) }
 })
 

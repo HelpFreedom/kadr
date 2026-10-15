@@ -27,6 +27,12 @@ export function registerPreviewCanvas(
   previewPlayer = player ?? null
 }
 
+/** The preview canvas (null while none is mounted) — the eyedropper's target. */
+export const previewCanvasEl = () => previewCanvas
+
+/** Redraw the preview now (after something that is not in the project changed). */
+export const redrawPreview = () => previewPlayer?.drawNow()
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 const hasFragmentsNear = (t: number): boolean => {

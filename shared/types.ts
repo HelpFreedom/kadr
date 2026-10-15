@@ -1,6 +1,8 @@
 // Core project model shared between main and renderer processes.
 // All times are in seconds, all dimensions in pixels.
 
+import type { RelinkWanted } from './relinkMatch'
+
 export type AssetKind = 'video' | 'audio' | 'image'
 
 /** Audacity-style waveform: per-bin peak and RMS, base64-encoded Uint8 (0..255). */
@@ -21,6 +23,9 @@ export interface MediaAsset {
   height: number
   fps: number
   hasAudio: boolean
+  /** bytes, from the probe (absent on assets imported before it was kept) —
+      the relink search matches a renamed file by size + duration */
+  size?: number
   /** data: URL of a poster frame, generated on import */
   thumbnail?: string
   /** poster of the last frame (clip tails show it on the timeline) */
@@ -970,9 +975,19 @@ export interface ProbeResult {
 
 /* ------------------------------ disk storage ------------------------------ */
 
+/** A backup written during a session that died, newer than its project file (electron/backups.ts). */
+export interface BackupOffer {
+  file: string
+  /** ms since the epoch */
+  time: number
+  /** the project it is a version of; null when it was never saved */
+  projectPath: string | null
+  name: string
+}
+
 export type StorageGroupId =
   | 'proxies' | 'decoded' | 'fragments' | 'ttsqcCache'
-  | 'reversed' | 'imported' | 'voiceRuns'
+  | 'reversed' | 'imported' | 'voiceRuns' | 'backups'
 
 /** A project, reduced to what identifies the files it owns on disk. */
 export interface StorageProject {
@@ -1101,6 +1116,10 @@ export interface FragmentParamDecl {
 export interface KadrApi {
   openMediaDialog(): Promise<string[]>
   probeMedia(path: string): Promise<ProbeResult>
+  /** one pass over many paths: the size of each, null where there is no file (offline media) */
+  statMany(paths: string[]): Promise<(number | null)[]>
+  /** «Искать в папке»: assetId → the file under `folder` to relink it to (shared/relinkMatch.ts) */
+  relinkScan(folder: string, wanted: RelinkWanted[]): Promise<Record<string, string>>
   fileUrl(path: string): string
   /** Absolute path of a File dropped from the OS (File.path is gone since
       Electron 32 — this goes through webUtils.getPathForFile). */
@@ -1124,7 +1143,17 @@ export interface KadrApi {
   readProject(path: string): Promise<Project>
   writeProject(path: string, project: Project): Promise<void>
   /** write <name>.autosave.kadr next to the project (atomic); returns path */
+  /** a backup version in userData/backups (+ <name>.autosave.kadr next to a saved project); resolves to the backup's path */
   autosaveProject(project: Project, mainPath: string | null): Promise<string>
+  /** after an unclean exit: the backup to offer (asked once per launch) */
+  backupOffer(): Promise<BackupOffer | null>
+  /** show a backup in the file manager (paths inside userData/backups only) */
+  revealBackup(file: string): Promise<void>
+  /** closing the window asks the page first: `cb` decides, then calls closeWindow() to go on */
+  onCloseRequest(cb: () => void): () => void
+  closeWindow(): void
+  /** a .kadr to open: the launch's own argv (once), then any a second launch hands over */
+  onOpenProject(cb: (path: string) => void): () => void
 
   /** App-wide JSON stores in userData (presets etc.) — survive any restart. */
   storageScan(projects: string[], open: StorageProject | null): Promise<StorageScan>

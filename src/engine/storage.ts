@@ -4,6 +4,7 @@
 import type { StorageProject, StoragePruneRequest } from '@shared/types'
 import { useEditor } from '@/state/store'
 import { logWarn } from './log'
+import { saveUserStore } from './userStore'
 
 const STORE = 'recent-projects'
 const CAP = 20
@@ -48,7 +49,7 @@ export async function recentProjects(): Promise<string[]> {
 
 export async function forgetProject(path: string): Promise<void> {
   cache = (await read()).filter((r) => r.path !== path)
-  try { await window.kadr.writeUserStore(STORE, cache) } catch { /* stays for now */ }
+  await saveUserStore(STORE, cache)
 }
 
 /** The open project, whether or not it has ever been saved. */

@@ -20,6 +20,8 @@ import { projectDuration } from '@/state/store'
 import { logInfo, logWarn } from './log'
 import { flushParamSaves } from './fragmentParams'
 import { refreshStaleBakes } from './audioReact'
+import { missingForExport } from './offline'
+import { tr } from '../i18n'
 
 export interface ExportHandle {
   cancel(): void
@@ -123,6 +125,10 @@ export function startExport(
   }
 
   async function run(): Promise<void> {
+    // a moved or renamed source used to render black and fail at the mux:
+    // refuse up front (before the busy check: nothing awaits between it and the flag) and say which files
+    const missing = await missingForExport(project, range)
+    if (missing.length) throw new Error(`${tr('exportOffline')}: ${missing.join(', ')}`)
     // ONE export at a time. The raw encoder in the preload is a single global
     // ffmpeg, and main's export state and the fragment render queue are shared
     // too: a second export started while one ran (a script's and the dialog's,

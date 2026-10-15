@@ -4,7 +4,6 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { useEditor } from '@/state/store'
 import { dirOf } from '@shared/paths'
-import { activity } from '@/engine/autosave'
 import { useT } from '@/i18n'
 import { token } from '@/theme'
 import { Icon } from './icons'
@@ -96,7 +95,6 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
   // leave the panel attached to a session the cleanup already killed
   useEffect(() => {
     if (!holder.current) return
-    activity.claude = true
     const term = new Terminal({
       fontSize: 13,
       fontFamily: 'monospace',
@@ -140,7 +138,6 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
 
     return () => {
       dead = true
-      activity.claude = false
       ro.disconnect()
       onData.dispose()
       offData()

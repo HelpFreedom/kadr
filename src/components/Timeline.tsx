@@ -11,6 +11,7 @@ import { TRANSITIONS } from '@/gl/transitions'
 import { EDGE_TRANSITIONS } from '@/gl/edges'
 import { CtxMenu } from './CtxMenu'
 import { reverseClip, useReverseUi } from '@/engine/reverse'
+import { useOffline } from '@/engine/offline'
 import { normalizeClip, useNormalizeUi } from '@/engine/normalize'
 import { dropPayload, dragHasMedia, dropUsable, importDrop } from '@/engine/mediaImport'
 import { useTextUi } from './TextTools'
@@ -1541,6 +1542,7 @@ const ClipView = memo(function ClipView({
     clip.assetId ? s.project.assets.find((a) => a.id === clip.assetId) : undefined
   )
   const reversing = useReverseUi((s) => s.busy[clip.id]) // 0..1 or undefined
+  const offline = useOffline((s) => !!clip.assetId && s.ids.has(clip.assetId))
   const drag = useRef<DragState | null>(null)
   const waveRef = useRef<HTMLCanvasElement>(null)
   const [levelDrag, setLevelDrag] = useState<number | null>(null)
@@ -1904,7 +1906,7 @@ const ClipView = memo(function ClipView({
   const isText = clip.kind === 'text'
   const fadeIn = clip.fadeIn ?? 0
   const fadeOut = clip.fadeOut ?? 0
-  const cls = `clip ${track.kind} ${selected ? 'selected' : ''} ${isText ? 'text-clip' : ''} ${clip.kind === 'remotion' ? 'remotion-clip' : ''}`
+  const cls = `clip ${track.kind} ${selected ? 'selected' : ''} ${isText ? 'text-clip' : ''} ${clip.kind === 'remotion' ? 'remotion-clip' : ''}${offline ? ' offline' : ''}`
   // A clip a few pixels wide shows nothing but its colour: its handles, level
   // line, label and waveform can be neither seen nor grabbed. Zoomed out on a
   // long project that is most of them (a 19-minute project: ~600 clips on
@@ -1949,7 +1951,7 @@ const ClipView = memo(function ClipView({
         className={cls}
         data-clip={clip.id}
         style={{ left: zpx(clip.start), width: `max(4px, ${zpx(clip.duration)})` }}
-        title={clip.label ?? asset?.name}
+        title={offline ? t('offlineClip') : clip.label ?? asset?.name}
         onPointerDown={onPointerDown}
         onDoubleClick={onDoubleClick}
         onContextMenu={onContextMenu}
@@ -1998,6 +2000,7 @@ const ClipView = memo(function ClipView({
         <div key={x} className="loop-mark" style={{ left: zpx(x) }} title="loop" />
       ))}
       <span className="clip-label">
+        {offline && <span className="clip-offline" title={t('offlineClip')}><Icon name="unlink" size={11} /></span>}
         {clip.kind === 'remotion' && <Icon name="atom" size={11} />}
         {clip.linkId && <Icon name="link" size={11} />}
         <span>

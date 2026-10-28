@@ -189,8 +189,19 @@ function startBridge(
   })
 }
 
+const WIN = process.platform === 'win32'
+
 function which(cmd: string): Promise<string | null> {
   return new Promise((resolve) => {
+    if (WIN) {
+      // `where` lists every match; an npm install puts an extensionless sh
+      // script next to claude.cmd — only .exe/.cmd/.bat are startable here
+      execFile('where.exe', [cmd], (err, stdout) => {
+        const hits = err ? [] : stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+        resolve(hits.find((h) => /\.exe$/i.test(h)) ?? hits.find((h) => /\.(cmd|bat)$/i.test(h)) ?? null)
+      })
+      return
+    }
     execFile('/bin/sh', ['-c', `command -v ${cmd}`], (err, stdout) => {
       resolve(err ? null : stdout.trim() || null)
     })
@@ -319,7 +330,16 @@ async function spawnSession(
     const wrapper =
       `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
       `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
-    const p = pty.spawn('/bin/bash', ['-c', wrapper, bin, ...args], {
+    // Windows has no bash for the watchdog — and needs none: the session runs
+    // in a ConPTY, and closing it (our handles die with us) ends every process
+    // attached to that console; pty.kill() does the same on a close. A .cmd
+    // shim (npm install of claude) only starts through cmd.exe.
+    const [file, argv] = !WIN
+      ? ['/bin/bash', ['-c', wrapper, bin, ...args]]
+      : /\.(cmd|bat)$/i.test(bin)
+        ? ['cmd.exe', ['/d', '/c', bin, ...args]]
+        : [bin, args]
+    const p = pty.spawn(file, argv, {
       name: 'xterm-256color',
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
@@ -358,6 +378,12 @@ function killSession() {
   // HUP the whole process group (claude + its MCP server children), then
   // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
   const pid = s.pty.pid
+  if (WIN) {
+    // no process groups: node-pty kills every process on the ConPTY console
+    try { s.pty.kill() } catch { /* dead */ }
+    s.server.close()
+    return
+  }
   try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
   setTimeout(() => {
     try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
@@ -427,7 +453,9 @@ async function syncSkill(): Promise<void> {
     const root = join(app.getPath('home'), '.claude', 'skills')
     const shipped = new Set<string>()
     for (const file of (await fs.readdir(srcDir)).filter((f) => f.endsWith('.md')).sort()) {
-      const src = await fs.readFile(join(srcDir, file), 'utf8')
+      // a Windows checkout (core.autocrlf) has CRLF: the front-matter match
+      // below never hit, and no skill was ever installed
+      const src = (await fs.readFile(join(srcDir, file), 'utf8')).replace(/\r\n/g, '\n')
       const name = src.match(/^---\n[\s\S]*?^name:\s*([a-z0-9-]+)\s*$/m)?.[1]
       if (!name || !src.includes(SKILL_MARK)) {
         console.warn(`[claude] skill ${file}: no name in its front matter or no managed mark — skipped`)

@@ -17,6 +17,7 @@ import type { CriticChain } from '@shared/critic'
 import { useEditor, projectDuration } from '@/state/store'
 import { toTimeline } from './checks'
 import { loadSoundLibrary } from './sounds'
+import { tipSpans } from './timelineMath'
 
 /** frames a review round's plan holds at most (the ledger allows 60 per round) */
 export const PLAN_FRAMES = 36
@@ -99,8 +100,10 @@ export async function criticPlan(opts: {
         }
         const next = clips[i + 1]
         if (next && next.start < end - f1) add((next.start + end) / 2, 'середина перехода', 1)
-        if (c.transitionIn?.duration) add(c.start + c.transitionIn.duration / 2, 'середина появления', 1)
-        if (c.transitionOut?.duration) add(end - c.transitionOut.duration / 2, 'середина ухода', 1)
+        // the middle of what the tips really PLAY (shared out on a short clip)
+        const tips = tipSpans(c)
+        if (tips.tin) add(c.start + tips.tin / 2, 'середина появления', 1)
+        if (tips.tout) add(end - tips.tout / 2, 'середина ухода', 1)
       }
     }
   }

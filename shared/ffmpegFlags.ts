@@ -30,3 +30,33 @@ export function passthroughFrameArgs(versionOutput: string): [string, string] {
   const modern = !m || Number(m[1]) > 5 || (Number(m[1]) === 5 && Number(m[2]) >= 1)
   return modern ? ['-fps_mode', 'passthrough'] : ['-vsync', 'passthrough']
 }
+
+/** the major release in `ffmpeg -version` output; Infinity for a development build or no answer */
+export function ffmpegMajor(versionOutput: string): number {
+  const m = /ffmpeg version\s+n?(\d+)\.\d+/i.exec(versionOutput)
+  return m ? Number(m[1]) : Infinity
+}
+
+/** colormatrix's own name for an ffprobe colour space; null = it has no such matrix */
+export function colormatrixName(space: string): string | null {
+  if (space === 'bt2020nc' || space === 'bt2020c') return 'bt2020'
+  return ['bt709', 'fcc', 'bt601', 'bt470', 'bt470bg', 'smpte170m', 'smpte240m', 'bt2020'].includes(space) ? space : null
+}
+
+/**
+ * The packed alpha intermediate's colour step: the picture → BT.709 limited,
+ * a pure matrix change ('' = nothing to do, the samples are copied).
+ *
+ * swscale's own matrix change (`scale=in_color_matrix=…`) was measured on
+ * ffmpeg 9 against a float BT.601→BT.709 reference: up to 2.5 levels off on
+ * in-gamut colours, and neutral grey 126,128,128 → 125,128,127. colormatrix
+ * lands within 0.64 and keeps grey exact. Releases before 8 keep the swscale
+ * step they were checked with — nothing here can measure them. A BT.709
+ * source needs no conversion at all.
+ */
+export function packedColourChain(versionOutput: string, matrix: string): string {
+  if (matrix === 'bt709') return ''
+  const cm = colormatrixName(matrix)
+  if (cm && ffmpegMajor(versionOutput) >= 8) return `colormatrix=${cm}:bt709`
+  return `scale=in_color_matrix=${matrix}:out_color_matrix=bt709`
+}

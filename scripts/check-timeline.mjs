@@ -5,7 +5,10 @@
 //      covers, over zooms, speeds, in-points, device pixel ratios and the end of
 //      the array;
 //   2. trackOverlaps (one sweep) vs comparing every pair of clips, over random
-//      tracks with equal starts, butt joints and nested clips.
+//      tracks with equal starts, butt joints and nested clips;
+//   3. tipSpans (edge tips, HelpFreedom/kadr#28): tips that fit keep their
+//      length to the bit, tips longer than the clip share it in proportion and
+//      meet exactly — never overlapping, never past the clip.
 //
 // Pure node, no app.  Run: node scripts/check-timeline.mjs
 import { readFileSync } from 'fs'
@@ -15,7 +18,7 @@ import { transformSync } from 'esbuild'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const js = transformSync(readFileSync(join(root, 'src', 'engine', 'timelineMath.ts'), 'utf8'), { loader: 'ts', format: 'esm' }).code
-const { waveColumns, trackOverlaps } = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'))
+const { waveColumns, trackOverlaps, tipSpans } = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'))
 
 let fails = 0
 const check = (name, ok, detail = '') => {
@@ -115,6 +118,42 @@ check('overlap zones and joints are exactly the pairwise result', diff === 0, `$
 const big = Array.from({ length: 5000 }, (_, i) => ({ id: 'b' + i, start: i * 0.9, duration: 1 + (i % 7) * 0.3 }))
 const t0 = performance.now(); trackOverlaps(big); const fast = performance.now() - t0
 check('a 5000-clip track in a few milliseconds', fast < 50, `${fast.toFixed(1)} ms`)
+
+// ---- 3. edge tips -----------------------------------------------------------
+{
+  const tip = (d) => (d ? { type: 'rgbSplit', duration: d } : undefined)
+  const span = (duration, a, b) => tipSpans({ duration, transitionIn: tip(a), transitionOut: tip(b) })
+  const fits = span(2, 0.5, 0.3)
+  check('tips that fit keep their length exactly', fits.tin === 0.5 && fits.tout === 0.3, JSON.stringify(fits))
+  const full = span(1, 0.5, 0.5)
+  check('tips that exactly fill the clip keep their length', full.tin === 0.5 && full.tout === 0.5, JSON.stringify(full))
+  const beat = span(1 / 3, 0.5, 0.5)
+  check('two 0.5 s tips on a 1/3 s clip share it and meet in the middle',
+    Math.abs(beat.tin - 1 / 6) < 1e-12 && beat.tin + beat.tout === 1 / 3, JSON.stringify(beat))
+  const uneven = span(0.3, 1, 0.5)
+  check('… in proportion to their lengths (1 s : 0.5 s → 0.2 : 0.1)',
+    Math.abs(uneven.tin - 0.2) < 1e-12 && Math.abs(uneven.tout - 0.1) < 1e-12, JSON.stringify(uneven))
+  const lone = span(0.2, 0, 1)
+  check('a lone tip fills at most the whole clip', lone.tin === 0 && lone.tout === 0.2, JSON.stringify(lone))
+  const blend = tipSpans({ duration: 1, transitionIn: { type: 'crossfade', duration: 0 }, transitionOut: tip(0.3) })
+  check('a transitionIn of length 0 (an overlap blend) is not a tip', blend.tin === 0 && blend.tout === 0.3, JSON.stringify(blend))
+  check('a clip of no length has no tips', JSON.stringify(span(0, 0.5, 0.5)) === '{"tin":0,"tout":0}')
+  let wrong = 0, first = ''
+  for (let run = 0; run < 5000; run++) {
+    const d = 0.02 + rnd() * 3
+    const a0 = rnd() < 0.2 ? 0 : rnd() * 2, b0 = rnd() < 0.2 ? 0 : rnd() * 2
+    const r = span(d, a0, b0)
+    const a = a0 > 0.001 ? a0 : 0, b = b0 > 0.001 ? b0 : 0 // 1 ms or less is no tip (as in edgeAt)
+    const ok = r.tin >= 0 && r.tout >= 0 && r.tin <= a && r.tout <= b &&
+      r.tin + r.tout <= d + 1e-12 &&                                      // never overlap, never past the clip
+      (a + b <= d ? r.tin === a && r.tout === b                            // fit: untouched
+        : Math.abs(r.tin + r.tout - d) < 1e-12 &&                          // share: meet exactly
+          (a === 0 || b === 0 || Math.abs(r.tin / r.tout - a / b) < 1e-9 * (a / b)))  // in proportion
+    if (!ok) { wrong++; first ||= JSON.stringify({ d, a, b, r }) }
+  }
+  check('5000 random clips: tips never overlap or run past the clip, keep their length when they fit, share in proportion when not',
+    wrong === 0, `${wrong} wrong${first ? '; first ' + first : ''}`)
+}
 
 console.log(fails ? `\n${fails} FAILED` : '\nall passed')
 process.exitCode = fails ? 1 : 0

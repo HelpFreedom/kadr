@@ -8,7 +8,6 @@ import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
 import type { IPty } from 'node-pty'
 import { criticOp, criticTurn, criticNewSession, registerCriticIpc } from './critic'
 import { syncSkills } from './skillSync'
@@ -72,7 +71,9 @@ export async function sweepStaleSessions(): Promise<number> {
   const marks = [
     join(app.getPath('userData'), 'kadr-mcp.json'),
     join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'),
-    join(tmpdir(), 'kadr-export'), // raw encoder + muxer temp files
+    // raw encoder + muxer temp files — next to the export's output now, in the
+    // temp folder only as a fallback (shared/exportTemp.ts), so by name
+    '/kadr-export-',
     join(app.getPath('userData'), 'proxies'),
     join(app.getPath('userData'), 'reversed'),
     join(app.getPath('userData'), 'decoded'),
@@ -202,7 +203,9 @@ function startBridge(
 
 function which(cmd: string): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile('/bin/sh', ['-c', `command -v ${cmd}`], (err, stdout) => {
+    // the name goes in as $1, never into the script: a command from
+    // claude-env.json with a space or a quote in it must not become shell
+    execFile('/bin/sh', ['-c', 'command -v "$1"', 'sh', cmd], (err, stdout) => {
       resolve(err ? null : stdout.trim() || null)
     })
   })
@@ -390,11 +393,13 @@ async function spawnSession(
     // as the wrapper, TUI unaffected); a background subshell nukes the whole
     // process group if this Electron process dies hard — otherwise a busy
     // claude tree survives holding inherited Chromium sockets (CDP port)
-    // and blocks the next launch.
+    // and blocks the next launch. POSIX sh only ($$, kill -0, kill to a
+    // negative pid, exec "$0" "$@"): /bin/bash does not exist everywhere —
+    // NixOS and Guix have only /bin/sh (HelpFreedom/kadr#50).
     const wrapper =
       `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
       `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
-    const p = pty.spawn('/bin/bash', ['-c', wrapper, bin, ...args], {
+    const p = pty.spawn('/bin/sh', ['-c', wrapper, bin, ...args], {
       name: 'xterm-256color',
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),

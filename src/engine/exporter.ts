@@ -14,7 +14,7 @@ import {
 } from './player'
 import { Mp4FrameSource } from './demux'
 import { chromiumCanDecode } from './codecs'
-import { evalAnim } from './anim'
+import { evalAnim, gainCurveField } from './anim'
 import { activity } from './autosave'
 import { projectDuration } from '@/state/store'
 import { logInfo, logWarn } from './log'
@@ -73,7 +73,9 @@ function collectAudioSegments(project: Project, range: TimeRange): AudioSegment[
           gain,
           speed,
           fadeIn: fiLocal,
-          fadeOut: foLocal
+          fadeOut: foLocal,
+          // keyframed gain, as the preview plays it (kadr#41)
+          ...gainCurveField(clip.gain, track.gain, local, segDur)
         })
         local += segDur
       }
@@ -140,6 +142,13 @@ export function startExport(
     }
   }
 
+  // main's audio mix + mux. A failure there must fail `done` (kadr#27); an
+  // older main answered nothing at all, which still means success
+  async function finishMux(): Promise<void> {
+    const r = await window.kadr.exportVideoDone()
+    if (r && r.ok === false) throw new Error(r.cancelled ? 'cancelled' : r.error)
+  }
+
   async function runInner(): Promise<void> {
     // remotion fragments render exactly once (content-hash cached) and turn
     // into ordinary media clips for the rest of the pipeline
@@ -164,7 +173,7 @@ export function startExport(
     })
 
     if (preset.audioOnly) {
-      await window.kadr.exportVideoDone()
+      await finishMux()
       return
     }
 
@@ -232,6 +241,7 @@ export function startExport(
     //   4 slots → 45.3 fps (read 12.8, encode 8.1)
     // Pixels were identical at every depth; only the pacing changed.
     let rawDirect: string | null = null
+    let handedOver = false // main has the direct encoder's file (exportUseVideo)
     const slots: Uint8Array[] = []
     const slotPending: (Promise<void> | null)[] = [null, null]
     if (useRaw) {
@@ -239,7 +249,7 @@ export function startExport(
       try {
         rawDirect = await window.kadr.rawEncodeStart({
           width: rw, height: rh, outWidth: width, outHeight: height,
-          fps, codec, bitrate: preset.videoBitrate
+          fps, codec, bitrate: preset.videoBitrate, outputPath
         })
         for (let s = 0; s < 2; s++) slots.push(new Uint8Array(rw * rh * 4))
       } catch (err) {
@@ -458,6 +468,7 @@ export function startExport(
           for (const p of slotPending) if (p) await p
           await window.kadr.rawEncodeEnd()
           await window.kadr.exportUseVideo(rawDirect)
+          handedOver = true
         } else {
           if (rawWs) {
             // TCP delivers in order: once our close handshake completes, main
@@ -480,9 +491,19 @@ export function startExport(
       if (comp.contextLost()) throw new Error('GPU context lost while rendering the final frame — restart Kadr and export again')
       // hand off to ffmpeg in the main process (audio mix + mux);
       // further progress arrives via onExportProgress events
-      await window.kadr.exportVideoDone()
+      await finishMux()
     } catch (err) {
-      if (rawDirect) window.kadr.rawEncodeKill()
+      // before main took the stream over, a partial file is nobody's: drop it.
+      // After, main owns it — a failed mux keeps it and says where
+      if (rawDirect) {
+        if (handedOver) window.kadr.rawEncodeKill()
+        else window.kadr.rawEncodeDiscard()
+      }
+      // the frames still in flight reject once the encoder is gone; `err`
+      // already says why the export stopped, and left unawaited they landed
+      // in the session log as two «unhandled rejection» failures on every
+      // ordinary cancel (HelpFreedom/kadr#17)
+      for (const p of slotPending) p?.catch(() => { /* superseded by err */ })
       await window.kadr.exportCancel().catch(() => { /* already gone */ })
       throw err
     } finally {

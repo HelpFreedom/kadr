@@ -234,9 +234,11 @@ export default function App() {
     const up = () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up) // ends like pointerup: no pointerup follows a cancel
   }
 
   const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -254,9 +256,11 @@ export default function App() {
     const up = () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up) // ends like pointerup: no pointerup follows a cancel
   }
 
   const undoTitle = t('undo') + (undoLabel ? `: ${t(undoLabel as TKey)}` : '')

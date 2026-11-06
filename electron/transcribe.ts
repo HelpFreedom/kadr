@@ -67,7 +67,9 @@ async function run(win: BrowserWindow, req: TranscribeRequest): Promise<Transcri
         job.py = null
         if (job.cancelled) reject(new Error('cancelled'))
         else if (code === 0) resolve()
-        else reject(new Error(err.slice(0, 800) || `transcribe.py exited ${code}`))
+        // the TAIL: the script's own message (and its hint) is the last thing
+        // it writes, after whatever the libraries printed on the way
+        else reject(new Error(err.trim().slice(-800) || `transcribe.py exited ${code}`))
       })
     })
     send(1, '')

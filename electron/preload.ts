@@ -1,9 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
+import { rm, accessSync, constants as fsConstants } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
 import type { KadrApi, ExportProgress, CriticView } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
+import { exportTempPath } from '@shared/exportTemp'
 
 // Direct export encoder: ffmpeg is spawned HERE, in the renderer process
 // (sandbox is off), so raw frames go straight from JS memory into its stdin
@@ -13,20 +14,38 @@ import { rawEncodeArgs } from '@shared/rawEncode'
 let rawEnc: ChildProcess | null = null
 let rawEncErr = ''
 let rawEncExit: Promise<void> | null = null
+/** the file the current direct encode writes — this module's own, so
+ *  rawEncodeDiscard can remove it without taking a path from anyone */
+let rawEncOut: string | null = null
+
+function killRawEncoder() {
+  try { rawEnc?.kill('SIGKILL') } catch { /* gone */ }
+  rawEnc = null
+  rawEncExit = null
+}
 
 // capability token for the kadr:// media protocol (issue #13). Sync on purpose:
 // fileUrl must work from the renderer's very first frame.
 const MEDIA_TOKEN: string = ipcRenderer.sendSync('media:token')
 
 const api: KadrApi = {
-  rawEncodeStart: (o) => {
-    const out = join(tmpdir(), `kadr-export-raw-${Date.now()}.mp4`)
+  rawEncodeStart: ({ outputPath, ...o }) => {
+    // next to the output, not in a tmpfs /tmp (shared/exportTemp.ts, kadr#17)
+    const out = exportTempPath(outputPath, 'raw', tmpdir(), (dir) => {
+      try { accessSync(dir, fsConstants.W_OK); return true } catch { return false }
+    })
+    rawEncOut = out
     const child = spawn(process.env.KADR_FFMPEG || 'ffmpeg', rawEncodeArgs({ ...o, out }), {
       stdio: ['pipe', 'ignore', 'pipe']
     })
     rawEnc = child
     rawEncErr = ''
     child.stderr!.on('data', (c) => { rawEncErr += c })
+    // a killed or crashed ffmpeg breaks its stdin (EPIPE). That failure
+    // reaches the export already — through the write callback and the exit
+    // code — but a stream with no 'error' listener ALSO throws it as an
+    // uncaught exception: one more failure in the log for every cancel (kadr#17)
+    child.stdin!.on('error', () => { /* reported by rawEncodeFrame / rawEncExit */ })
     rawEncExit = new Promise<void>((resolve, reject) => {
       child.on('close', (code) => {
         rawEnc = null
@@ -65,10 +84,16 @@ const api: KadrApi = {
     await rawEncExit
     rawEncExit = null
   },
-  rawEncodeKill: () => {
-    try { rawEnc?.kill('SIGKILL') } catch { /* gone */ }
-    rawEnc = null
-    rawEncExit = null
+  rawEncodeKill: () => killRawEncoder(),
+  // A cancelled or failed export used to leave its partial video in the temp
+  // folder — on a tmpfs /tmp that is RAM, held until reboot, one file per
+  // cancel. Only for a stream main has NOT taken over (exportUseVideo): after
+  // that, a failed mux keeps the file on purpose and names it to the user.
+  rawEncodeDiscard: () => {
+    const out = rawEncOut
+    rawEncOut = null
+    killRawEncoder()
+    if (out) rm(out, { force: true }, () => { /* nothing to remove */ })
   },
 
   openMediaDialog: () => ipcRenderer.invoke('media:open-dialog'),

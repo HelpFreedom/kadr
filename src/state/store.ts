@@ -1,9 +1,10 @@
 import { create } from 'zustand'
 import type {
   Project, Track, Clip, Anim, MediaAsset, TrackKind, TextStyle, TextDoc, FragmentSpec,
-  VoiceRun, AudioDefect, DefectState, TimelineMarker, MusicSectionLabel
+  VoiceRun, AudioDefect, DefectState, TimelineMarker, MusicSectionLabel, Effect
 } from '@shared/types'
 import { isMusicMarker } from '@shared/types'
+import { EASINGS } from '@/engine/anim'
 
 export const uid = () => Math.random().toString(36).slice(2, 10)
 
@@ -77,6 +78,29 @@ export function findClip(p: Project, clipId: string): { track: Track; clip: Clip
 }
 
 /**
+ * A clip's effects as the rest of the editor expects them: entries without an
+ * id or a type dropped, `params` always an object of numbers and strings.
+ * An effect set from a script or a foreign file without `params` threw in the
+ * Inspector's render — no error boundary, so the whole window went blank — and
+ * in drawFrame (HelpFreedom/kadr#15). Valid entries come back key for key.
+ */
+export function sanitizeEffects(v: unknown): Effect[] {
+  if (!Array.isArray(v)) return []
+  const out: Effect[] = []
+  for (const e of v) {
+    if (!e || typeof e !== 'object' || typeof e.id !== 'string' || typeof e.type !== 'string') continue
+    const params: Record<string, number | string> = {}
+    if (e.params && typeof e.params === 'object' && !Array.isArray(e.params)) {
+      for (const [k, x] of Object.entries(e.params as Record<string, unknown>)) {
+        if (typeof x === 'string' || (typeof x === 'number' && Number.isFinite(x))) params[k] = x
+      }
+    }
+    out.push({ ...e, enabled: e.enabled === true, params })
+  }
+  return out
+}
+
+/**
  * Heal foreign or script-written projects on load. Anim slots written as
  * plain numbers (e.g. `gain: 0.5` from a kadr_eval script) become `{value}`,
  * non-finite values and broken keyframes are dropped — a single NaN reaching
@@ -89,6 +113,9 @@ export function sanitizeProject(p: Project): Project {
     const o = a as Anim
     if (o.keyframes) {
       o.keyframes = o.keyframes.filter((k) => Number.isFinite(k?.time) && Number.isFinite(k?.value))
+      // an easing the editor does not know is drawn linear (evalAnim): say so
+      // in the project too, so the Inspector shows what plays
+      for (const k of o.keyframes) if (!(EASINGS as readonly unknown[]).includes(k.easing)) k.easing = 'linear'
       if (!o.keyframes.length) delete o.keyframes
     }
     if (!Number.isFinite(o.value)) o.value = o.keyframes?.[0]?.value ?? fallback
@@ -172,7 +199,7 @@ export function sanitizeProject(p: Project): Project {
       if (!Number.isFinite(c.speed) || c.speed <= 0) c.speed = 1
       c.transform = { ...newClipDefaults().transform, ...(c.transform ?? {}) }
       c.gain = anim(c.gain, 1)
-      c.effects ??= []
+      c.effects = sanitizeEffects(c.effects)
       if (c.audioBake !== undefined && !(c.audioBake && typeof c.audioBake.hash === 'string' &&
           typeof c.audioBake.source === 'string')) delete c.audioBake
       forEachAnim(c, (a) => anim(a, Number.isFinite((a as Anim)?.value) ? (a as Anim).value : 0))
@@ -1393,7 +1420,11 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((s) => {
       const p = cloneProject(s.project)
       const f = findClip(p, clipId)
-      if (f) Object.assign(f.clip, patch)
+      if (f) {
+        Object.assign(f.clip, patch)
+        // every patch passes here — the Inspector's and a script's alike
+        if ('effects' in patch) f.clip.effects = sanitizeEffects(patch.effects)
+      }
       return { project: p }
     }),
 

@@ -1335,6 +1335,19 @@ div.tr-error {
 .tl-toolbar::-webkit-scrollbar { height: 0; }
 .tl-toolbar button { min-height: 24px; }
 .hint-inline { font-size: var(--fz-sm); color: var(--c-text-3); }
+/* the controls hint stays on ONE line: it used to wrap, and in a 1000–1100 px
+   window it made the toolbar 152 px tall in English and 222 px in Russian,
+   taken from the tracks — so switching the language moved the whole layout
+   (HelpFreedom/kadr#26). It shrinks first and ends in an ellipsis; the full
+   text is in its title. The buttons keep their size (the toolbar scrolls). */
+.tl-toolbar > * { flex-shrink: 0; }
+.tl-toolbar > .hint-inline {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .zoom-ctl {
   display: flex;
   align-items: center;
@@ -2126,6 +2139,9 @@ div.tr-error {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  /* the scrollbar's room is always kept, so the stage (sized from the
+     measured content width) cannot flip-flop as a scrollbar comes and goes */
+  scrollbar-gutter: stable;
   padding: var(--s4);
   gap: var(--s4);
 }
@@ -2143,7 +2159,14 @@ div.tr-error {
   background: var(--c-accent-soft);
   color: var(--c-accent-hi);
 }
-.link-toggle { white-space: nowrap; }
+.link-toggle {
+  white-space: nowrap;
+  /* the narrowest side panel (200 px) is narrower than the label: end it in
+     an ellipsis rather than scroll the editor sideways (the hint says it all) */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .link-toggle.on {
   background: var(--c-accent-solid);
   border-color: var(--c-accent-solid);
@@ -2375,7 +2398,10 @@ div.tr-error {
 
 .anim-values {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* two columns while both fit; in the narrow side panel a label with its
+     field («Позиция Y» + input, 130 px) does not, and two forced columns ran
+     80–122 px past the panel — one column there instead (kadr#26) */
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
   gap: var(--s2) var(--s4);
 }
 .anim-values label {
@@ -2399,6 +2425,7 @@ div.tr-error {
 }
 .mini-head {
   display: flex;
+  flex-wrap: wrap; /* its buttons wrap in the 200 px panel instead of scrolling it */
   align-items: center;
   gap: var(--s2);
   font-size: var(--fz-label);

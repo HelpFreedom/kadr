@@ -1,4 +1,5 @@
 // Keyframe helpers shared by the clip animation editor and track motion.
+import { useLayoutEffect, useState } from 'react'
 import type { Anim, Easing, Keyframe } from '@shared/types'
 import { evalAnim } from '@/engine/anim'
 
@@ -59,10 +60,38 @@ export function windowDrag(
   const onUp = () => {
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onUp)
     done?.(moved)
   }
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp) // ends like pointerup: no pointerup follows a cancel
+}
+
+/**
+ * The width of an element's content box, followed as it changes. The editors'
+ * stage was `panel width − 22`, a constant that knew the padding and the
+ * border but not the vertical scrollbar: once the column scrolled, the stage
+ * stuck out by a few pixels and the column scrolled sideways too (kadr#26).
+ * A CALLBACK ref, not a ref object: both editors render nothing while their
+ * clip or track is missing, and an effect keyed on a ref object would run
+ * once against no element and never look again. Null until measured.
+ */
+export function useContentWidth(): [(el: HTMLElement | null) => void, number | null] {
+  const [el, setEl] = useState<HTMLElement | null>(null)
+  const [w, setW] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    if (!el) return
+    const read = () => {
+      const cs = getComputedStyle(el)
+      setW(el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight))
+    }
+    read()
+    const ro = new ResizeObserver(read)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [el])
+  return [setEl, w]
 }
 
 export { evalAnim }

@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, clipboard } from 'electron'
 import { join, dirname, basename } from 'path'
-import { promises as fs, createReadStream, statSync, existsSync, appendFileSync } from 'fs'
+import { promises as fs, createReadStream, statSync, existsSync, appendFileSync, accessSync, constants as fsConstants } from 'fs'
 import { tmpdir } from 'os'
 import { createHash, randomBytes } from 'crypto'
 import { execFile } from 'child_process'
@@ -21,6 +21,7 @@ import { applyGpuChoice, registerGpuIpc } from './gpu'
 import { registerModelIpc } from './models'
 import { sourceHdr, hdrLut, hdrFilter, fragmentMedia } from './hdr'
 import type { ExportJob, Project } from '@shared/types'
+import { exportTempPath } from '@shared/exportTemp'
 
 // Streamed local media under a privileged scheme so the renderer can play
 // file content regardless of its own origin (http in dev, file in prod).
@@ -110,6 +111,16 @@ function createWindow() {
   // fragment iframes navigate inside this same webContents all the time.
   win.webContents.on('did-start-navigation', (details) => {
     if (details.isMainFrame && !details.isSameDocument) stopAllCaptures()
+  })
+  // The hidden helper windows — fragment captures, the inspect and collide
+  // pages — are windows too: while one was open, closing the editor never
+  // fired window-all-closed, app.quit never ran, and before-quit (which is
+  // what stops the captures) never came — a windowless process stayed alive
+  // (HelpFreedom/kadr#42; reproduced on Linux, e2e55). With the editor gone
+  // none of them has a reader left.
+  win.on('closed', () => {
+    stopAllCaptures()
+    for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.destroy()
   })
   // The preview can be detached into a window of its own (src/engine/popout.ts).
   // The renderer opens an about:blank popup — same origin and same renderer
@@ -843,7 +854,8 @@ function registerIpc() {
 
   ipcMain.handle('export:begin', async (_e, job: ExportJob) => {
     await cleanupExport()
-    const videoTemp = join(tmpdir(), `kadr-export-${Date.now()}.mp4`)
+    // next to the output, not in a tmpfs /tmp (shared/exportTemp.ts, kadr#17)
+    const videoTemp = exportTempPath(job.outputPath, 'mux', tmpdir(), writableDir)
     const fh = job.preset.audioOnly ? null : await fs.open(videoTemp, 'w')
     exportState = {
       job, videoTemp, fh, muxer: null, raw: null, rawEncoded: false,
@@ -944,17 +956,21 @@ function registerIpc() {
       await st.muxer.run(job, st.videoTemp, sendProgress)
       sendProgress({ phase: 'done', progress: 1 })
       await cleanupExport()
+      return { ok: true as const }
     } catch (err: any) {
       const cancelled = err?.message === 'cancelled'
       // the video stream took hours to render; a failed mux must not throw it
       // away — keep the temp file and tell the user where it is
       const keep = !cancelled && !st.job.preset.audioOnly
-      sendProgress({
-        phase: cancelled ? 'cancelled' : 'error',
-        progress: 0,
-        message: String(err?.message ?? err) + (keep ? ` (video kept at ${st.videoTemp})` : '')
-      })
+      const message = String(err?.message ?? err) + (keep ? ` (video kept at ${st.videoTemp})` : '')
+      sendProgress({ phase: cancelled ? 'cancelled' : 'error', progress: 0, message })
       await cleanupExport(keep)
+      // the CALLER must hear it too, not only the progress listeners: this
+      // used to resolve like a success, so startExport().done resolved and
+      // kadr_export told the agent a file had been written when none was
+      // (HelpFreedom/kadr#27). Returned rather than thrown — an IPC rejection
+      // reaches the page wrapped in «Error invoking remote method …»
+      return { ok: false as const, cancelled, error: message }
     }
   })
 
@@ -966,6 +982,10 @@ function registerIpc() {
       sendProgress({ phase: 'cancelled', progress: 0 })
     }
   })
+}
+
+function writableDir(dir: string): boolean {
+  try { accessSync(dir, fsConstants.W_OK); return true } catch { return false }
 }
 
 async function cleanupExport(keepVideo = false) {

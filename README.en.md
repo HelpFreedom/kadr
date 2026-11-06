@@ -225,7 +225,7 @@ captions to this part”, watch it happen live in the preview.
 |---|---|---|
 | Node.js ≥ 20 | everything | |
 | ffmpeg + ffprobe | import, audio mix, export | in PATH; the filter-graph-from-file syntax is picked per version (before 7.0 and from 7.0, 9.x included) |
-| python3 + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | speech-to-text, auto-captions | `pip install faster-whisper`; models download on first use |
+| python3 + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | speech-to-text, auto-captions | `pip install faster-whisper "av<19"` (faster-whisper 1.2.1 does not work with PyAV 19); models download on first use |
 | [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | the “Claude” panel | optional; uses your existing login |
 | network (one-time) | Remotion fragments workspace | `~/kadr-fragments`, ~150 MB |
 | an [ElevenLabs](https://elevenlabs.io) key | voice-over | optional; entered in the voice-over settings and kept outside the project |

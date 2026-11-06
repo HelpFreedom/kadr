@@ -7,19 +7,22 @@ import { join, basename } from 'path'
 import { tmpdir } from 'os'
 import type { ProbeResult, ExportJob, ExportProgress, WaveformData, AudioSegment } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
-import { filterFileFlag, type FilterFileFlag } from '@shared/ffmpegFlags'
+import { filterFileFlag, packedColourChain, type FilterFileFlag } from '@shared/ffmpegFlags'
 
 const execFileP = promisify(execFile)
 
 export const FFMPEG = process.env.KADR_FFMPEG || 'ffmpeg'
 export const FFPROBE = process.env.KADR_FFPROBE || 'ffprobe'
 
-/** the installed ffmpeg's spelling for "filter graph from this file" (shared/ffmpegFlags.ts), asked once */
-let filterFlag: Promise<FilterFileFlag> | null = null
+/** `ffmpeg -version` of the installed ffmpeg, asked once ('' when it does not answer);
+    the spellings that differ between releases are picked from it (shared/ffmpegFlags.ts) */
+let versionText: Promise<string> | null = null
+function ffmpegVersionText(): Promise<string> {
+  versionText ??= execFileP(FFMPEG, ['-hide_banner', '-version']).then(({ stdout }) => stdout, () => '')
+  return versionText
+}
 function filterFileFlagOfFfmpeg(): Promise<FilterFileFlag> {
-  filterFlag ??= execFileP(FFMPEG, ['-hide_banner', '-version'])
-    .then(({ stdout }) => filterFileFlag(stdout), () => filterFileFlag(''))
-  return filterFlag
+  return ffmpegVersionText().then(filterFileFlag)
 }
 
 const IMAGE_EXT = /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i
@@ -357,6 +360,7 @@ export async function makeDecoded(
   onProgress?: (p: number) => void,
   opts?: { alpha?: boolean; codec?: string; packed?: boolean; matrix?: string; vfPre?: string }
 ): Promise<void> {
+  const colour = opts?.packed ? packedColourChain(await ffmpegVersionText(), opts.matrix || 'bt601') : ''
   const args = opts?.packed ? [
     // ALPHA FAST PATH. Chromium's WebCodecs cannot decode alpha at all
     // (VP9-alpha WebM carries it as container side data; ProRes 4444 is
@@ -378,16 +382,23 @@ export async function makeDecoded(
     // the picture's samples are copied verbatim — no colour conversion is
     // applied here or tagged on the file, so the decoder treats it exactly
     // like the original (guaranteed by the BT.709/HD gate in requestDecoded)
-    // The picture is converted to BT.709 limited — a pure matrix change
-    // (swscale, no gamma or gamut transform), a no-op when the source is
+    // The picture is converted to BT.709 limited — a pure matrix change (no
+    // gamma or gamut transform; which filter does it depends on the ffmpeg
+    // release, see packedColourChain), and nothing at all when the source is
     // BT.709 already. It has to be BT.709: Chromium runs its own colour
     // transform on any other space while uploading the frame, and that
     // transform would also sweep over the bottom half and lift the alpha
     // matte (128 → 143). A matte is not colour and must arrive verbatim.
-    `[c]format=yuv420p,scale=in_color_matrix=${opts.matrix || 'bt601'}:out_color_matrix=bt709[col];` +
+    `[c]format=yuv420p${colour ? ',' + colour : ''}[col];` +
     // the matte rides in the luma plane, mapped into the same limited range
-    // the decoder will expand back — verified to round-trip bit-exactly
-    '[a]alphaextract,format=yuv420p,scale=in_range=pc:out_range=tv[m];' +
+    // the decoder will expand back. The range is mapped BEFORE the pixel
+    // format: from ffmpeg 8 on, gray→yuv420p lands in limited range by
+    // itself, and mapping after it compressed the matte twice — opaque 255
+    // packed as 217 and clear 0 as 29, so every transparent fragment of an
+    // export let ~8 % of the layer under it through and veiled its empty
+    // parts (HelpFreedom/kadr#48). Round-trips exactly in this order on
+    // either behaviour; scripts/check-packed-alpha.mjs runs it.
+    '[a]alphaextract,scale=in_range=pc:out_range=tv,format=yuv420p[m];' +
     '[col][m]vstack=inputs=2[v]',
     '-map', '[v]', '-an',
     '-c:v', 'libx264', '-preset', 'veryfast', '-qp', '0', '-pix_fmt', 'yuv420p',
@@ -527,7 +538,12 @@ export function audioCodecArgs(outPath: string): string[] {
 
 export function atempoChain(speed: number): string[] {
   const out: string[] = []
-  let s = Math.min(8, Math.max(0.25, speed))
+  // EXACTLY the clip's speed. A clamp to 0.25–8× used to sit here while a clip
+  // goes 0.02–100×: the input is cut to duration × speed source seconds, so a
+  // 20× clip's sound played 8× and ran 2.5 times past the clip's end, a 0.1×
+  // one stopped early (HelpFreedom/kadr#41). The chain reaches any factor in
+  // ×2 / ×0.5 steps; inside the old range nothing changes
+  let s = speed > 0 && Number.isFinite(speed) ? speed : 1
   while (s > 2) {
     out.push('atempo=2')
     s /= 2
@@ -667,14 +683,62 @@ export class RawVideoEncoder {
   }
 }
 
+/**
+ * How a segment's source is opened. atempo keeps its last window when its
+ * input ends, so a sped-up or slowed segment came out SHORT of its place on
+ * the timeline — 20 ms at 0.5×, 0.15 s at 0.1× (HelpFreedom/kadr#41). It gets
+ * TEMPO_TAIL more source to flush with, and segmentChain cuts its output to
+ * the exact sample count. A 1× segment is opened exactly as before.
+ */
+const TEMPO_TAIL = 0.25
+function segmentInput(s: AudioSegment): string[] {
+  const tempo = Math.abs((s.speed || 1) - 1) > 1e-4
+  return ['-ss', String(s.inPoint), '-t', String(tempo ? s.duration + TEMPO_TAIL : s.duration), '-i', s.path]
+}
+
+/**
+ * A piecewise-linear gain curve as one flat ffmpeg expression in `t` (a sum of
+ * windowed pieces — no nesting, so no depth limit however many keyframes).
+ * Evaluated once per 10 ms frame at the frame's MIDDLE: the points are shifted
+ * by half a frame instead of writing `t+0.005` into every term.
+ */
+export function gainExpr(curve: { t: number; v: number }[]): string {
+  const H = 0.005
+  // a negative number goes in parentheses: `t--0.005` and `+-2` are left to
+  // no parser's goodwill
+  const n = (x: number) => {
+    if (Math.abs(x) < 5e-10) return '0'
+    const v = x.toFixed(9).replace(/\.?0+$/, '')
+    return x < 0 ? `(${v})` : v
+  }
+  const p = curve.map((c) => ({ t: c.t - H, v: c.v }))
+  const terms = [`lt(t,${n(p[0].t)})*${n(p[0].v)}`]
+  for (let i = 0; i + 1 < p.length; i++) {
+    const a = p[i], b = p[i + 1]
+    if (b.t - a.t < 1e-9) continue // a step: the next piece starts at the new value
+    const slope = (b.v - a.v) / (b.t - a.t)
+    terms.push(`gte(t,${n(a.t)})*lt(t,${n(b.t)})*(${n(a.v)}+${n(slope)}*(t-${n(a.t)}))`)
+  }
+  terms.push(`gte(t,${n(p[p.length - 1].t)})*${n(p[p.length - 1].v)}`)
+  return terms.join('+')
+}
+
 /** per-segment filter chain shared by the single-graph mix and the premix */
 function segmentChain(s: AudioSegment): string[] {
   const speed = s.speed || 1
   const outDur = s.duration / speed // timeline-domain length after atempo
+  const curve = s.gainCurve?.length ? s.gainCurve : null
   return [
     'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
-    `volume=${s.gain.toFixed(4)}`,
-    ...(Math.abs(speed - 1) > 1e-4 ? atempoChain(speed) : []),
+    // a plain gain: one scalar, exactly as always
+    ...(curve ? [] : [`volume=${s.gain.toFixed(4)}`]),
+    ...(Math.abs(speed - 1) > 1e-4
+      ? [...atempoChain(speed), `atrim=end_sample=${Math.round(outDur * MIX_RATE)}`]
+      : []),
+    // keyframed gain: in the TIMELINE domain (after atempo), in 10 ms frames
+    // timed from the segment's first sample — finer than the preview, which
+    // sets the gain once per drawn frame
+    ...(curve ? ['asetnsamples=n=480:p=0', 'asetpts=N/SR/TB', `volume='${gainExpr(curve)}':eval=frame`] : []),
     ...(s.fadeIn > 0.001 ? [`afade=t=in:st=0:d=${Math.min(s.fadeIn, outDur).toFixed(3)}`] : []),
     ...(s.fadeOut > 0.001
       ? [`afade=t=out:st=${Math.max(0, outDur - s.fadeOut).toFixed(3)}:d=${Math.min(s.fadeOut, outDur).toFixed(3)}`]
@@ -718,7 +782,7 @@ export async function premixSegments(
       const room = mix.length - offset
       if (room <= 0) { done++; continue }
       const args = [
-        '-v', 'error', '-nostdin', '-ss', String(s.inPoint), '-t', String(s.duration), '-i', s.path,
+        '-v', 'error', '-nostdin', ...segmentInput(s),
         '-af', segmentChain(s).join(','), '-f', 'f32le', '-ac', String(MIX_CH), '-ar', String(MIX_RATE), 'pipe:1'
       ]
       await new Promise<void>((resolve, reject) => {
@@ -806,22 +870,33 @@ export class ExportMuxer {
 
     if (hasVideo) args.push('-i', videoTemp)
     for (const s of segs) {
-      args.push('-ss', String(s.inPoint), '-t', String(s.duration), '-i', s.path)
+      args.push(...segmentInput(s))
     }
 
     const filters: string[] = []
     if (segs.length > 0) {
       const labels: string[] = []
+      // A clip is placed by putting exactly round(start × 48000) samples of
+      // silence in front of it, joined with concat — not with adelay. On
+      // recent ffmpeg (9.0.2 measured, 8.1 reported in HelpFreedom/kadr#47)
+      // adelay lost its delay: ALWAYS for a clip run through atempo (a sped-up
+      // clip from 12.5 s played at 0:00), and now and then for a plain one,
+      // with the same command. concat emits its inputs in order by
+      // construction, and the prefix is sample-exact where adelay rounded to
+      // 1 ms. scripts/check-audio-placement.mjs runs the real graph.
+      const pad = `apad,atrim=0:${job.duration.toFixed(3)}`
       segs.forEach((s, i) => {
         const idx = i + (hasVideo ? 1 : 0)
-        const ms = Math.round(s.start * 1000)
-        const chain = [
-          ...segmentChain(s),
-          `adelay=${ms}|${ms}`,
-          'apad',
-          `atrim=0:${job.duration.toFixed(3)}`
-        ]
-        filters.push(`[${idx}:a]${chain.join(',')}[a${i}]`)
+        const lead = Math.round(s.start * MIX_RATE)
+        const clip = `[${idx}:a]${segmentChain(s).join(',')}`
+        if (lead <= 0) {
+          filters.push(`${clip},${pad}[a${i}]`)
+        } else {
+          filters.push(`${clip}[s${i}]`)
+          filters.push(`anullsrc=r=${MIX_RATE}:cl=stereo,atrim=end_sample=${lead},` +
+            `aformat=sample_fmts=fltp:sample_rates=${MIX_RATE}:channel_layouts=stereo[z${i}]`)
+          filters.push(`[z${i}][s${i}]concat=n=2:v=0:a=1,${pad}[a${i}]`)
+        }
         labels.push(`[a${i}]`)
       })
       // the master stage: a transparent-below-the-limit peak limiter on real

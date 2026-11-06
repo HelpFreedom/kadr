@@ -1167,7 +1167,18 @@ async function captureStart(
       id, w: size.width, h: size.height, data: image.getBitmap()
     })
   })
-  await win.loadURL(url)
+  try {
+    await win.loadURL(url)
+  } catch (err) {
+    // the window is already in `captures`, and captureStart returns early for
+    // an id it holds: left there on Chromium's error page, every retry of this
+    // fragment "succeeded" without loading anything and it never painted
+    // (HelpFreedom/kadr#14, e2e55). Only OUR entry goes — a stop and a fresh
+    // start may have replaced it while the load was failing.
+    if (captures.get(id) === win) captures.delete(id)
+    if (!win.isDestroyed()) win.destroy()
+    throw err
+  }
 }
 
 /** Snapshots ask for the project's full width; live preview stays ≤1280

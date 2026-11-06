@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { type WaveBins, waveColumns, trackOverlaps } from '@/engine/timelineMath'
+import { type WaveBins, waveColumns, trackOverlaps, tipSpans } from '@/engine/timelineMath'
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
 import type { AudioDefect, Clip, MediaAsset, TimelineMarker, Track } from '@shared/types'
@@ -101,13 +101,18 @@ function windowDrag(
 ) {
   const startX = e.clientX
   const onMove = (ev: PointerEvent) => move(ev.clientX - startX, ev)
+  // a gesture the system takes over (touch, pen) ends with pointercancel and
+  // never sends pointerup: without this the drag went on following the
+  // pointer with no button held (kadr#24, e2e56)
   const onUp = () => {
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onUp)
     done?.()
   }
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +386,7 @@ export function Timeline({ height }: { height: number }) {
           <Icon name="speech" /> {t('ttsButton')}
         </button>
         <DefectButtons />
-        <span className="dim hint-inline">{t('dropHint')}</span>
+        <span className="dim hint-inline" title={t('dropHint')}>{t('dropHint')}</span>
         <span className="flex1" />
         <label className="zoom-ctl">
           {t('trackHeight')}
@@ -653,7 +658,10 @@ function TrackMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) 
             className="danger"
             onClick={() => {
               const st = useEditor.getState()
-              st.select(withLinked(st.project, [menu.clipId!]))
+              // the menu acts on the selection it was opened on (right-click
+              // keeps one that holds the clip), as the Delete key does — it
+              // used to narrow it to this clip first (kadr#24)
+              if (!st.selection.includes(menu.clipId!)) st.select(withLinked(st.project, [menu.clipId!]))
               st.deleteSelection()
               onClose()
             }}
@@ -1727,7 +1735,9 @@ const ClipView = memo(function ClipView({
           }
         }
         if (d.group) {
-          const delta = ns - d.origStart
+          // the group stops when its EARLIEST clip reaches 0: clamped one by
+          // one (setClipStarts), it piled up there instead (kadr#24)
+          const delta = Math.max(ns - d.origStart, -Math.min(...d.group.map((g) => g.start)))
           // shift the whole group across tracks by the grabbed clip's offset
           // within its own track kind (audio partners move in parallel)
           const tracks = s.project.tracks
@@ -1772,6 +1782,7 @@ const ClipView = memo(function ClipView({
     const onUp = () => {
       window.removeEventListener('pointermove', onMoveTracked)
       window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
       drag.current = null
       // a plain click (no drag) parks the playhead at the click position;
       // dragging keeps the red cursor where it was so clips can snap to it
@@ -1779,6 +1790,7 @@ const ClipView = memo(function ClipView({
     }
     window.addEventListener('pointermove', onMoveTracked)
     window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp) // see windowDrag
   }
 
   // ------------------------------------------------------------ fade drags
@@ -1915,6 +1927,8 @@ const ClipView = memo(function ClipView({
   // edge (tip) transitions: AE-style effects on the clip head/tail
   const tipIn = clip.transitionIn && clip.transitionIn.duration > 0.001 ? clip.transitionIn : null
   const tipOut = clip.transitionOut && clip.transitionOut.duration > 0.001 ? clip.transitionOut : null
+  // drawn as long as they PLAY: a clip shorter than its tips shares them out
+  const tips = tipSpans(clip)
   const openTipMenu = (edge: 'in' | 'out') => (e: React.MouseEvent) => {
     e.stopPropagation()
     onMenu({ x: e.clientX, y: e.clientY, kind: 'edge', clipId: clip.id, edge })
@@ -2014,8 +2028,8 @@ const ClipView = memo(function ClipView({
       {reversing !== undefined && (
         <div className="reverse-progress" style={{ width: `${Math.round(reversing * 100)}%` }} />
       )}
-      {tipIn && <div className="tip-strip left" style={{ width: zpx(tipIn.duration) }} />}
-      {tipOut && <div className="tip-strip right" style={{ width: zpx(tipOut.duration) }} />}
+      {tipIn && <div className="tip-strip left" style={{ width: zpx(tips.tin) }} />}
+      {tipOut && <div className="tip-strip right" style={{ width: zpx(tips.tout) }} />}
       {track.kind === 'video' && w > 40 && (
         <>
           <div

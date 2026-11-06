@@ -955,6 +955,10 @@ export interface AudioSegment {
   /** local fade windows in timeline seconds */
   fadeIn: number
   fadeOut: number
+  /** a KEYFRAMED clip gain (× track gain) as a piecewise-linear curve over the
+   *  segment's own timeline seconds (0 = its start); absent for a plain gain,
+   *  which `gain` carries alone (src/engine/anim.ts gainCurve) */
+  gainCurve?: { t: number; v: number }[]
 }
 
 export interface ExportProgress {
@@ -1193,11 +1197,16 @@ export interface KadrApi {
   rawEncodeStart(o: {
     width: number; height: number; outWidth?: number; outHeight?: number
     fps: number; codec: string; bitrate: number
+    /** the export's output: the stream is written next to it (shared/exportTemp.ts) */
+    outputPath?: string
   }): Promise<string>
   /** resolves when ffmpeg's stdin accepted the memory — only then reuse it */
   rawEncodeFrame(view: Uint8Array): Promise<void>
   rawEncodeEnd(): Promise<void>
   rawEncodeKill(): void
+  /** kill the direct encoder AND delete the partial file it was writing —
+   *  for an export that stops before main took the stream over */
+  rawEncodeDiscard(): void
   exportUseVideo(path: string): Promise<void>
 
   /** main-process fallback raw encode: frames over WS (port > 0) or IPC */
@@ -1207,7 +1216,9 @@ export interface KadrApi {
   ): Promise<number>
   exportRawFrame(data: ArrayBuffer): Promise<void>
   exportRawEnd(): Promise<void>
-  exportVideoDone(): Promise<void>
+  /** the final ffmpeg pass (audio mix + mux); a failure is RETURNED, with
+   *  ffmpeg's reason and, for a video export, where the rendered stream was kept */
+  exportVideoDone(): Promise<{ ok: true } | { ok: false; cancelled: boolean; error: string }>
   exportCancel(): Promise<void>
   onExportProgress(cb: (p: ExportProgress) => void): () => void
 

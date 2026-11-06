@@ -13,7 +13,7 @@ import { transformSync } from 'esbuild'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const js = transformSync(readFileSync(join(root, 'shared', 'ffmpegFlags.ts'), 'utf8'), { loader: 'ts', format: 'esm' }).code
-const { filterFileFlag, passthroughFrameArgs } = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'))
+const { filterFileFlag, passthroughFrameArgs, ffmpegMajor, colormatrixName, packedColourChain } = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'))
 
 let fails = 0
 const check = (name, ok, detail = '') => {
@@ -48,6 +48,26 @@ for (const [line, want] of [
 ]) {
   const got = passthroughFrameArgs(line)
   check(`passthrough «${line.slice(0, 40) || 'no answer'}» → ${want}`, got[0] === want && got[1] === 'passthrough', got.join(' '))
+}
+
+// the packed alpha intermediate's colour step (electron/ffmpeg.ts makeDecoded)
+check('ffmpegMajor reads releases and calls a development build the newest',
+  ffmpegMajor('ffmpeg version n9.0.2 Copyright') === 9 && ffmpegMajor('ffmpeg version 4.4.2-0ubuntu0.22.04.1') === 4 &&
+  ffmpegMajor('ffmpeg version N-118000-g1234abcd') === Infinity && ffmpegMajor('') === Infinity)
+check('colormatrix names: ffprobe spaces map onto its own, unknown ones refuse',
+  colormatrixName('smpte170m') === 'smpte170m' && colormatrixName('bt470bg') === 'bt470bg' &&
+  colormatrixName('bt2020nc') === 'bt2020' && colormatrixName('gbr') === null && colormatrixName('ycgco') === null)
+for (const [line, matrix, want] of [
+  ['ffmpeg version n9.0.2', 'bt601', 'colormatrix=bt601:bt709'],
+  ['ffmpeg version 8.1.2', 'smpte170m', 'colormatrix=smpte170m:bt709'],
+  ['ffmpeg version 8.1.2', 'bt2020nc', 'colormatrix=bt2020:bt709'],
+  ['ffmpeg version 7.1', 'bt601', 'scale=in_color_matrix=bt601:out_color_matrix=bt709'],
+  ['ffmpeg version 4.4.2', 'bt601', 'scale=in_color_matrix=bt601:out_color_matrix=bt709'],
+  ['ffmpeg version n9.0.2', 'ycgco', 'scale=in_color_matrix=ycgco:out_color_matrix=bt709'],
+  ['ffmpeg version n9.0.2', 'bt709', ''],
+  ['ffmpeg version 4.4.2', 'bt709', '']
+]) {
+  check(`packed colour: ${line.split(' ').pop()} ${matrix} → ${want || 'nothing'}`, packedColourChain(line, matrix) === want, packedColourChain(line, matrix))
 }
 
 const v = spawnSync('ffmpeg', ['-hide_banner', '-version'], { encoding: 'utf8' })

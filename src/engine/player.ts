@@ -7,6 +7,7 @@ import { evalAnim } from './anim'
 import { getTextLayer } from './text'
 import { attachAudio, detachAudio, setElementGain, isRouted, resumeAudio } from './audio'
 import { logError } from './log'
+import { tipSpans } from './timelineMath'
 
 export interface ActiveLayer {
   clip: Clip
@@ -264,15 +265,16 @@ export class MediaPool {
  * cut sits at 0.5 — two tips at a butt joint read as one continuous move.
  */
 export function edgeAt(clip: Clip, rel: number): { type: string; g: number } | null {
-  const tin = clip.transitionIn
-  if (tin && tin.duration > 0.001 && rel < tin.duration) {
-    return { type: tin.type, g: 0.5 + 0.5 * Math.max(0, rel / tin.duration) }
+  // the lengths the tips really run — shared in proportion on a clip shorter
+  // than both together (timelineMath.tipSpans, kadr#28)
+  const { tin, tout } = tipSpans(clip)
+  if (tin > 0 && rel < tin) {
+    return { type: clip.transitionIn!.type, g: 0.5 + 0.5 * Math.max(0, rel / tin) }
   }
-  const tout = clip.transitionOut
-  if (tout && tout.duration > 0.001) {
-    const from = clip.duration - tout.duration
+  if (tout > 0) {
+    const from = clip.duration - tout
     if (rel >= from) {
-      return { type: tout.type, g: 0.5 * Math.min(1, (rel - from) / tout.duration) }
+      return { type: clip.transitionOut!.type, g: 0.5 * Math.min(1, (rel - from) / tout) }
     }
   }
   return null
@@ -485,11 +487,11 @@ function drawClipLayer(
     // gaussian blur effect: size as a fraction of project height, so the
     // result is identical at any render resolution
     const blurFx = (clip.effects ?? []).find((e) => e.enabled && e.type === 'blur')
-    const blurSize = typeof blurFx?.params.size === 'number' ? blurFx.params.size : 0
+    const blurSize = typeof blurFx?.params?.size === 'number' ? blurFx.params.size : 0
     const blurFrac = Math.max(0, blurSize) / Math.max(1, project.height)
     const emit = (...layers: LayerDraw[]) => {
       if (glows.length || blurFrac > 0.0002) {
-        comp.drawLayerFx(layers, blurFrac, glows.map((g) => glowParams(g.params)), rel)
+        comp.drawLayerFx(layers, blurFrac, glows.map((g) => glowParams(g.params ?? {})), rel)
       } else {
         for (const l of layers) comp.drawLayer(l)
       }

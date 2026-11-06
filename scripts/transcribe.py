@@ -97,4 +97,9 @@ if __name__ == "__main__":
         main()
     except Exception as e:  # noqa: BLE001 — single funnel to the caller
         sys.stderr.write(f"transcribe failed: {e}\n")
+        # faster-whisper 1.2.1 (the latest release, 2025-10-31) passes
+        # av.open(..., metadata_errors=...), which PyAV 19 removed — a plain
+        # `pip install faster-whisper` gets exactly this (HelpFreedom/kadr#46)
+        if "metadata_errors" in str(e):
+            sys.stderr.write('PyAV 19 is too new for this faster-whisper: pip install "av<19"\n')
         sys.exit(1)

@@ -436,7 +436,7 @@ function BlurControls({ clip, fx }: { clip: Clip; fx: Effect }) {
     st().updateClip(clip.id, {
       effects: (clip.effects ?? []).map((e) => (e.id === fx.id ? { ...e, ...patch } : e))
     })
-  const size = typeof fx.params.size === 'number' ? fx.params.size : 20
+  const size = typeof fx.params?.size === 'number' ? fx.params.size : 20
   return (
     <div className="fx-block">
       <div className="fx-head">
@@ -479,7 +479,7 @@ function GlowControls({ clip, fx }: { clip: Clip; fx: Effect }) {
   const setP = (key: string, v: number | string) =>
     patchFx({ params: { ...fx.params, [key]: v } })
   const num = (key: keyof typeof GLOW_DEFAULTS) => {
-    const v = fx.params[key]
+    const v = fx.params?.[key]
     return typeof v === 'number' ? v : (GLOW_DEFAULTS[key] as number)
   }
   return (

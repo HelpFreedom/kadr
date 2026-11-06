@@ -229,7 +229,7 @@ Kadr — многодорожечный видеоредактор (Electron + R
 |---|---|---|
 | Node.js ≥ 20 | всё | |
 | ffmpeg + ffprobe | импорт, аудиомикс, экспорт | в PATH; синтаксис графа из файла подбирается под версию (до 7.0 и с 7.0, включая 9.x) |
-| python3 + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | распознавание речи, авто-субтитры | `pip install faster-whisper`; модели скачаются при первом запуске |
+| python3 + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | распознавание речи, авто-субтитры | `pip install faster-whisper "av<19"` (faster-whisper 1.2.1 не работает с PyAV 19); модели скачаются при первом запуске |
 | [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | панель «Claude» | опционально; использует ваш существующий вход |
 | сеть (один раз) | workspace Remotion-фрагментов | `~/kadr-fragments`, ~150 МБ |
 | ключ [ElevenLabs](https://elevenlabs.io) | озвучка | опционально; вводится в настройках озвучки и хранится вне проекта |

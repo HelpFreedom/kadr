@@ -1087,9 +1087,17 @@ async function typecheckFragment(id: string): Promise<{ ok: boolean; errors: Fra
   await fs.writeFile(join(WORKSPACE, cfgName), JSON.stringify(cfg, null, 2))
   try {
     const out = await new Promise<string>((resolve) => {
-      const child = spawn(join(WORKSPACE, 'node_modules', '.bin', 'tsc'), ['-p', cfgName, '--pretty', 'false'], {
-        cwd: WORKSPACE, stdio: ['ignore', 'pipe', 'pipe']
-      })
+      // On Windows .bin/tsc is a POSIX shim next to tsc.cmd, and spawn() runs
+      // neither (ENOENT; a .cmd needs a shell) — the error text came back as
+      // "no errors". TypeScript's own bin script under node runs everywhere.
+      const args = ['-p', cfgName, '--pretty', 'false']
+      const child = process.platform === 'win32'
+        ? spawn('node', [join(WORKSPACE, 'node_modules', 'typescript', 'bin', 'tsc'), ...args], {
+          cwd: WORKSPACE, stdio: ['ignore', 'pipe', 'pipe']
+        })
+        : spawn(join(WORKSPACE, 'node_modules', '.bin', 'tsc'), args, {
+          cwd: WORKSPACE, stdio: ['ignore', 'pipe', 'pipe']
+        })
       let text = ''
       child.stdout!.on('data', (c) => { text += c })
       child.stderr!.on('data', (c) => { text += c })
@@ -1098,7 +1106,9 @@ async function typecheckFragment(id: string): Promise<{ ok: boolean; errors: Fra
     })
     const mine = [`src/fragments/${id}/`, 'src/_kadr/', ...(key ? [`src/_projects/${key}/`] : [])]
     const errors: FragmentTypeError[] = []
-    for (const line of out.split('\n')) {
+    // tsc ends its lines with CRLF on Windows, and `.` never matches the \r
+    // before `$`: split on both or every error is dropped
+    for (const line of out.split(/\r?\n/)) {
       const m = line.match(/^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/)
       if (!m || !mine.some((p) => m[1].startsWith(p))) continue
       errors.push({ file: m[1], line: Number(m[2]), col: Number(m[3]), code: m[4], message: m[5] })

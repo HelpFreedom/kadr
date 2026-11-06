@@ -363,6 +363,9 @@ mixes audio and muxes/transcodes per preset.
   gigabytes. `fragmentHash` walks kadr-lib and `src/_kadr` only when the
   sources import them. The workspace's package.json/tsconfig are merged and
   missing deps installed on start. `kadr_typecheck` checks one fragment.
+  On Windows it runs `node typescript/bin/tsc` (`.bin/tsc` there is a shim
+  spawn() cannot start, and the error text used to read as "no errors") and
+  splits tsc's CRLF output on `\r?\n` — a trailing `\r` defeats the `$`.
   PARAMETERS: `defineParams`/`useParams`; the Inspector posts LIVE values to
   every page of the fragment and, after 400 ms of quiet, main MERGES only
   the moved values into `params.json` as it is on disk (an edit by hand in

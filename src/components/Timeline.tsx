@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { type WaveBins, waveColumns, trackOverlaps } from '@/engine/timelineMath'
+import { type WaveBins, waveColumns, trackOverlaps, pastSourceEnd } from '@/engine/timelineMath'
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync, createPortal } from 'react-dom'
 import type { AudioDefect, Clip, MediaAsset, TimelineMarker, Track } from '@shared/types'
@@ -1541,6 +1541,7 @@ const ClipView = memo(function ClipView({
     clip.assetId ? s.project.assets.find((a) => a.id === clip.assetId) : undefined
   )
   const reversing = useReverseUi((s) => s.busy[clip.id]) // 0..1 or undefined
+  const fps = useEditor((s) => s.project.fps)
   const drag = useRef<DragState | null>(null)
   const waveRef = useRef<HTMLCanvasElement>(null)
   const [levelDrag, setLevelDrag] = useState<number | null>(null)
@@ -1904,7 +1905,8 @@ const ClipView = memo(function ClipView({
   const isText = clip.kind === 'text'
   const fadeIn = clip.fadeIn ?? 0
   const fadeOut = clip.fadeOut ?? 0
-  const cls = `clip ${track.kind} ${selected ? 'selected' : ''} ${isText ? 'text-clip' : ''} ${clip.kind === 'remotion' ? 'remotion-clip' : ''}`
+  const pastEnd = pastSourceEnd(clip, asset, fps)
+  const cls = `clip ${track.kind} ${selected ? 'selected' : ''} ${isText ? 'text-clip' : ''} ${clip.kind === 'remotion' ? 'remotion-clip' : ''} ${pastEnd ? 'past-end-clip' : ''}`
   // A clip a few pixels wide shows nothing but its colour: its handles, level
   // line, label and waveform can be neither seen nor grabbed. Zoomed out on a
   // long project that is most of them (a 19-minute project: ~600 clips on
@@ -2004,7 +2006,11 @@ const ClipView = memo(function ClipView({
           {isText ? `T: ${clip.text}` : clip.label}
           {speed !== 1 ? ` ×${speed.toFixed(2)}` : ''}
         </span>
-        {loops && <Icon name="loop" size={11} />}
+        {pastEnd
+          ? <span className="past-end" role="img" title={t('clipPastSourceEnd')} aria-label={t('clipPastSourceEnd')}>
+              <Icon name="alert" size={11} />
+            </span>
+          : loops && <Icon name="loop" size={11} />}
         {reversing !== undefined
           ? <><Spinner size={11} /> {Math.round(reversing * 100)}%</>
           : asset?.reverseOf

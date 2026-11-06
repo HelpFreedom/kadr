@@ -18,3 +18,15 @@ export function filterFileFlag(versionOutput: string): FilterFileFlag {
   if (!m) return '-/filter_complex'
   return Number(m[1]) >= 7 ? '-/filter_complex' : '-filter_complex_script'
 }
+
+/**
+ * "Pass every decoded frame through as it is" (no duplicating or dropping to a
+ * constant rate). `-fps_mode` arrived in ffmpeg 5.1 and replaced `-vsync`,
+ * which ffmpeg 9 no longer has; ffmpeg 5.0 and older know only `-vsync`.
+ * Undated development builds take the new form, as above.
+ */
+export function passthroughFrameArgs(versionOutput: string): [string, string] {
+  const m = /ffmpeg version\s+n?(\d+)\.(\d+)/i.exec(versionOutput)
+  const modern = !m || Number(m[1]) > 5 || (Number(m[1]) === 5 && Number(m[2]) >= 1)
+  return modern ? ['-fps_mode', 'passthrough'] : ['-vsync', 'passthrough']
+}

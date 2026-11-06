@@ -30,8 +30,9 @@ mixes audio and muxes/transcodes per preset.
   overlap zones must EQUAL the slow code they replaced) and
   `check-critic.mjs` (the critic's round limits — it must not loop),
   `check-ttsmodels.mjs` (what each ElevenLabs model is sent),
-  `check-ffmpegflags.mjs` (the filter-file spelling per ffmpeg release, and a
-  live run on the installed ffmpeg),
+  `check-ffmpegflags.mjs` (the filter-file and frame-passthrough spellings per
+  ffmpeg release — `-fps_mode` from 5.1, `-vsync` before, which e2e52's decode
+  uses too — and a live run on the installed ffmpeg),
   `check-skills.mjs` (the agent skills' budget, triggers, links and the
   numbers they share with the code; the skill sync on temp dirs); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.

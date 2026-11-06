@@ -26,8 +26,14 @@ mixes audio and muxes/transcodes per preset.
   `check-sfx-labels.mjs` (sound labels vs /brag's 228) and `check-hdr.mjs`
   (the HDR → SDR maths and ffmpeg's own filter chain against the formula);
   `check-models.mjs` (3MF build items/components/units, STL, OBJ, GLB,
-  decimation) and `check-timeline.mjs` (the timeline's waveform columns and
-  overlap zones must EQUAL the slow code they replaced); plus
+  decimation), `check-timeline.mjs` (the timeline's waveform columns and
+  overlap zones must EQUAL the slow code they replaced) and
+  `check-critic.mjs` (the critic's round limits — it must not loop),
+  `check-ttsmodels.mjs` (what each ElevenLabs model is sent),
+  `check-ffmpegflags.mjs` (the filter-file spelling per ffmpeg release, and a
+  live run on the installed ffmpeg),
+  `check-skills.mjs` (the agent skills' budget, triggers, links and the
+  numbers they share with the code; the skill sync on temp dirs); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
   `node scripts/gen-sfx-catalog.mjs` regenerates
   `resources/sfx/kadr-sfx.json` after a bundled sound or
@@ -39,8 +45,16 @@ mixes audio and muxes/transcodes per preset.
   collisions), e2e50 (fragment parameters, onion skin), e2e51 (bounded
   preview pool, timeline culling, zoom gestures) and e2e52 (partial
   fragment renders, every output frame checked by pixels; the export
-  decoder's first frame and backward jumps) replace the open project,
+  decoder's first frame and backward jumps) and e2e53 (the critic: the
+  session's flags, the hook, review → verification → refusal over the real
+  MCP bridge, with a stand-in for claude — no API call) replace the open project,
   so they REFUSE to run over one with clips unless `KADR_E2E_FORCE=1`.
+- `node scripts/skill-plan-test.mjs [--baseline] [--only <id>]` — the agent
+  skills' application test: a real claude, given only the working-tree skills
+  (`--setting-sources project`) and Skill/Read, plans four Kadr tasks; graded
+  on the skills it loads, the references it reads and the order of its steps.
+  COSTS Claude usage (≈ $0.9 a run on API pricing) — run it after changing a
+  skill, not routinely.
 - `node scripts/preview-bench.mjs <from> <to>` — plays a span of the open
   project and reports editor frames, draws per fragment iframe, iframe
   processes and the worst frame at every fragment cut. Plays sound.
@@ -110,8 +124,11 @@ mixes audio and muxes/transcodes per preset.
   held whole in main: 48 kHz stereo f32 is ~23 MB per minute of timeline.
   The other limit is argv: Linux caps ONE argument at 128 KB (MAX_ARG_STRLEN),
   and that many clips build a `-filter_complex` past it — spawn failed with
-  E2BIG. The graph is written to a file and passed as `-filter_complex_script`,
-  on every export rather than only the big ones.
+  E2BIG. The graph is written to a file and handed over from it on every
+  export rather than only the big ones — spelled `-/filter_complex <file>` on
+  ffmpeg ≥ 7 and `-filter_complex_script <file>` before (ffmpeg 9 no longer has
+  the old option, ffmpeg 6 and older lack the new one); `shared/ffmpegFlags.ts`
+  picks it from `ffmpeg -version`, asked once.
   A FAILED MUX NO LONGER BINS THE VIDEO: the stream is rendered first and can
   take hours, and the mux ran with that temp file scheduled for deletion in
   `finally`. A non-cancelled failure that has video keeps it, and the error
@@ -143,13 +160,57 @@ mixes audio and muxes/transcodes per preset.
   send the request — and a flat refusal of any request carrying an `Origin`.
   The token reaches the MCP server as argv[3] of the generated config; the
   liveness ping on `GET /` stays open.
-  AGENT SKILLS are composable: `electron/skills/*.md` are synced at startup
-  to `~/.claude/skills/<name>/SKILL.md` — `kadr-editor` (the base: LOOK →
-  ACT → VERIFY, the interface, fragments, voice), `kadr-music`,
+  AGENT SKILLS are composable: each is a folder `electron/skills/<name>/`
+  (SKILL.md plus the reference files it links), synced at startup to
+  `~/.claude/skills/<name>/` by `electron/skillSync.ts` — `kadr-editor` (the
+  base: LOOK → ACT → VERIFY, the critic, fragments), `kadr-music`,
   `kadr-motion`, `kadr-3d`, loaded as a project needs them (the system hint
-  says so); their rules are defaults. Every file carries a
-  `<!-- managed by Kadr` mark: a `kadr-*` folder with it that is no longer
-  shipped is removed, one without it (the user's own) never is.
+  says so); their rules are defaults. A SKILL'S BODY HAS A BUDGET: after a
+  compaction Claude Code re-attaches only the first ~5000 tokens of each
+  invoked skill (from a ~25 000-token pool), and kadr-editor had grown to
+  2859 words / 19 KB, so its tail — the interface table, the voice-over rules,
+  the recipes — was what an agent lost in a long session. Bodies stay under
+  2500 words and 12 000 bytes (Cyrillic costs about twice the bytes per
+  token); detail that only some tasks need lives in `references/*.md`, linked
+  one level deep from SKILL.md with the moment to read it. Descriptions say
+  WHEN ("Use when …", ≤ 500 chars). A number a skill shares with the code
+  (hold times, the beat window) and the critic's copy of the AI-template
+  tells are compared by check-skills, so one cannot drift from the other.
+  Every file carries a `<!-- managed by Kadr` mark. The sync writes changed
+  files, removes a marked file under a skill's SUBFOLDER that is no longer
+  shipped, never a top-level one (the user keeps SKILL.md.bak-<date> copies
+  there, marked too), removes a marked `kadr-*` folder that is no longer
+  shipped, and never touches an unmarked one (the user's own kadr-* skills).
+- THE CRITIC (`electron/agents/kadr-critic.md`, `shared/critic.ts`,
+  `electron/critic.ts`, `src/engine/critic.ts`) — a subagent that judges a
+  finished stretch of timeline from rendered frames and measurements only,
+  never from the author's intentions, and names at most the three worst
+  defects (time, evidence, one local fix). The author calls it before showing
+  a visual block (kadr-editor «The critic»). It exists in the editor's
+  session only: `electron/agents/*.md` go to claude as `--agents` JSON, nothing
+  is written to ~/.claude/agents. Its tools can only look — Read, kadr_state,
+  kadr_check and its own kadr_review_begin/frames/submit (not kadr_snapshot:
+  that imports into the bin); the PAGE chooses the frames it sees (both sides
+  of every cut, transition middles, declared captions settled, big events,
+  the first seconds, the poster, an even fill), so the author cannot show it
+  only the good ones, and lines declared events up against the sound clips.
+  IT MUST NOT LOOP, and that is enforced in code, not asked for in a prompt:
+  per stretch ONE review and ONE verification of exactly its defects (no new
+  ones), then refusal until the user writes; 12 rounds per user turn; a round
+  whose critic died may restart once; 60 frames per round. The LEDGER LIVES IN
+  MAIN — the page reloads and runs any JS through kadr_eval, so a limit kept
+  there would not be one. A user turn is heard from a UserPromptSubmit hook
+  (`electron/claude-hook.cjs`, passed with `--settings`; it prints nothing —
+  a hook's stdout joins the conversation — and always exits 0). TRAP, found by
+  running the real CLI: that hook ALSO fires when a background agent finishes,
+  with a `<task-notification>…</task-notification>` prompt; counted as a turn,
+  every critic that finished would reset its own limit. `isUserPrompt` takes a
+  prompt that is ONE element from first character to last as machine-made.
+  `/critic` and `/turn` sit behind the same token and Origin locks as /eval. A
+  custom `args` in claude-env.json replaces Kadr's flags, so there is no critic
+  and no hook — the limits then only tighten (no turn ever opens). Findings
+  show in «Проверка» and, for a saved project, as a markdown report with its
+  contact sheets in `<projectDir>/kadr-reviews/`.
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
   via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
   kadr_snapshot / kadr_sheet / kadr_export / kadr_transcribe /
@@ -582,6 +643,20 @@ mixes audio and muxes/transcodes per preset.
   channel and cost exactly 3.01 dB through ffmpeg's downmix matrix.
   `KADR_TTS_MOCK=1` synthesises speech-shaped audio locally so tests never
   spend credits.
+  MODELS (`shared/ttsModels.ts`): Eleven v4 and v4 Turbo next to Flash v2.5 and
+  Multilingual v2. The docs say v4 needs the Text to Dialogue API and v4 Turbo
+  its WebSocket; the LIVE API (2026-10-20) serves both on the plain
+  /v1/text-to-speech (+ /with-timestamps), with 400-character context,
+  previous_request_ids and seed — the history item names the model that ran,
+  check there before believing a doc. v4 takes stability and similarity only
+  (style/speed/speaker boost are dropped silently, so they are not sent and
+  their sliders hide) and is cut at 2 000 characters per request (ElevenLabs'
+  own reliability guidance; the cap is 10 000). The older models are sent and
+  cut exactly as before. A SESSION STARTS WITH THE MODEL OF THE LAST VOICE-OVER
+  that landed (`lastModelId`, applied where settings load — never in the
+  sanitizer, which runs on every update). A regeneration uses the RUN's own
+  voice, model and settings, like its tempo: a patch from another model would
+  change the voice mid-file.
 - `shared/proxy.ts` — which proxy the API calls use, and how to spell it
   for Chromium (`https=host:port;http=host:port`, or a full `socks5://`).
   `net.fetch` always uses the DEFAULT session, whose proxy Chromium picks

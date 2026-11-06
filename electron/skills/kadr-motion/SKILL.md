@@ -1,6 +1,6 @@
 ---
 name: kadr-motion
-description: Motion graphics in Kadr — titles, captions, callouts, promos, multi-scene fragment pieces. Readability rules with numbers, style defaults that keep work from looking AI-templated, the one-film architecture for pieces made of several fragments, and the checks (kadr_check, kadr_sheet) to run before showing anything. Use together with kadr-editor whenever you write or change a fragment, a title or captions; add kadr-music when there is music and kadr-3d for 3D.
+description: Use when, in a Kadr project, you write or change a fragment, a title, captions, a callout, a promo or a piece made of several fragments — together with kadr-editor. Holds the readability rules with numbers, the style defaults that keep work from looking AI-templated, the one-film architecture and the checks to run before showing anything. Add kadr-music when there is music, kadr-3d for 3D.
 ---
 <!-- managed by Kadr: rewritten when Kadr updates (electron/skills/) -->
 
@@ -98,7 +98,9 @@ Then, before showing the user:
 3. `kadr_sheet` — every scene settled, every transition at its middle, both
    sides of every cut; Read it.
 
-Fix what they report before you show anything.
+Fix what they report, then hand the finished stretch to the **kadr-critic**
+subagent (kadr-editor, «The critic») before you show anything: one review, a
+repair of exactly what it found, one verification — then the user.
 
 ## Tuning by eye
 

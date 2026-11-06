@@ -20,22 +20,16 @@ import type {
   TtsParams, TtsRequest, TtsResult, TtsVoice, PhraseSynthRequest, PhraseSynthResult
 } from '@shared/types'
 import { normalizeScript, chunkText, sentenceEnds } from '@shared/ttsText'
+import { ttsModel } from '@shared/ttsModels'
 import { apiProxy, proxyRules } from '@shared/proxy'
 
 const execFileP = promisify(execFile)
 const API = 'https://api.elevenlabs.io'
 const MOCK = process.env.KADR_TTS_MOCK === '1'
 
-/** Per-request character caps. Beyond these the API rejects the call, so the
-    text is cut at sentence ends and the pieces are stitched with
-    previous_text/next_text. Unknown models get the conservative 10k. */
-const MODEL_CHAR_LIMIT: Record<string, number> = {
-  eleven_flash_v2_5: 40000,
-  eleven_turbo_v2_5: 40000,
-  eleven_multilingual_v2: 10000,
-  eleven_monolingual_v1: 10000,
-  eleven_v3: 3000
-}
+// Per-request caps and which voice settings a model takes: shared/ttsModels.ts.
+// Longer text is cut at sentence ends and the pieces are stitched with
+// previous_text/next_text.
 const CONTEXT_CHARS = 400
 
 const keyPath = () => join(app.getPath('userData'), 'elevenlabs-key.json')
@@ -164,9 +158,12 @@ async function synthChunk(key: string, params: TtsParams, text: string,
     stability: params.stability,
     similarity_boost: params.similarityBoost
   }
-  if (params.style !== undefined) settings.style = params.style
-  if (params.speakerBoost !== undefined) settings.use_speaker_boost = params.speakerBoost
-  if (params.speed !== undefined) settings.speed = params.speed
+  // only what the model honours (v4: stability and similarity alone) — the
+  // rest would be dropped silently by the API, and a request should say what it does
+  const caps = ttsModel(params.modelId)
+  if (caps.style && params.style !== undefined) settings.style = params.style
+  if (caps.speakerBoost && params.speakerBoost !== undefined) settings.use_speaker_boost = params.speakerBoost
+  if (caps.speed && params.speed !== undefined) settings.speed = params.speed
 
   const body: Record<string, unknown> = { text, model_id: params.modelId, voice_settings: settings }
   if (prevText) body.previous_text = prevText
@@ -470,8 +467,7 @@ async function speak(win: BrowserWindow, req: TtsRequest): Promise<TtsResult> {
     } else {
       const key = await readKey()
       if (!key) throw new Error('API-ключ не задан')
-      const limit = MODEL_CHAR_LIMIT[req.params.modelId] ?? 10000
-      const parts = chunkText(script, Math.floor(limit * 0.9))
+      const parts = chunkText(script, ttsModel(req.params.modelId).chunkChars)
       for (let i = 0; i < parts.length; i++) {
         if (j.cancelled) throw new Error('cancelled')
         send((i / parts.length) * 0.9, 'synth',

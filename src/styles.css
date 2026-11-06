@@ -1041,6 +1041,26 @@ body.kadr-popout .preview {
 .checks-list li.warn svg { color: var(--c-warn); flex: none; margin-top: 2px; }
 .checks-list li.info button { color: var(--c-text-2); }
 .checks-list li.info svg { flex: none; margin-top: 2px; }
+/* the critic subagent's reviews, under the checks */
+.critic {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--c-line);
+}
+.critic-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0;
+  font-size: var(--fz-md);
+}
+.critic-chain { display: flex; flex-direction: column; gap: var(--s1); }
+.critic-head { display: flex; gap: var(--s3); align-items: baseline; flex-wrap: wrap; }
+.critic-span { font-family: var(--font-mono); }
+.critic-fix { display: block; margin-top: var(--s1); color: var(--c-text-2); }
+.critic-report { font-family: var(--font-mono); overflow-wrap: anywhere; }
 .tr-live {
   max-height: 64px;
   overflow: hidden;

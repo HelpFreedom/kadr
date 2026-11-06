@@ -84,7 +84,10 @@ captions to this part”, watch it happen live in the preview.
   break at the seams; the optional speed-up is applied in the same ffmpeg
   pass as the decode, costing no extra generation. Output is FLAC and
   keeps the channel count the synthesis returned (mono stays mono —
-  upmixing to stereo quietly cost 3 dB). **The API key never reaches the
+  upmixing to stereo quietly cost 3 dB). Models: **Eleven v4 Turbo** (at
+  Flash v2.5's price), **Eleven v4**, Flash v2.5 and Multilingual v2; the
+  editor starts with the model of the last voice-over, and v4 shows only
+  the settings it understands. **The API key never reaches the
   renderer** and never enters the project file: it lives in `<userData>`
   with mode 0600, and the page can only ask whether one is set.
 - 🎯 **Voice-over defect detection and single-phrase regeneration** — a
@@ -95,7 +98,8 @@ captions to this part”, watch it happen live in the preview.
   new take is synthesised from the exact script substring with its
   surrounding context, matched in tempo and level, and spliced with an
   equal-power crossfade in the middle of the real silence between
-  sentences. The new length is measured, never computed, and everything
+  sentences — in the same voice, with the same model and settings as the
+  rest of the voice-over. The new length is measured, never computed, and everything
   to the right shifts on every track, so picture and sound stay in sync.
   Your verdicts accumulate and retrain the detector on request.
 - 🪟 **Preview in a window of its own** — the button next to the frame
@@ -150,7 +154,8 @@ captions to this part”, watch it happen live in the preview.
 - 🌈 **HDR and rotation** — HLG/PQ phone video is tone-mapped to SDR (a 3D
   LUT, not a grey picture), portrait footage with rotation metadata stands
   upright in the preview and the export alike, and «Подготовить для
-  фрагмента» (Prepare for a fragment) makes a copy fit for `<Video>`.
+  фрагмента» (Prepare for a fragment) makes a copy fit for
+  `<OffthreadVideo>`.
 - ⏱️ **Big projects stay fast** — on a 19-minute, thousand-clip project the
   sound no longer starts to stutter towards the end (the preview kept, and
   wired into the audio graph, an element for every clip it had passed: 169
@@ -167,7 +172,23 @@ captions to this part”, watch it happen live in the preview.
   resizable and remembers its place across launches. Its skills are
   **composable** — a base plus music, motion and 3D, loaded as the project
   needs; their rules are defaults (questions and a storyboard first, no
-  template tricks, a multi-scene piece is one film), your words win.
+  template tricks, a multi-scene piece is one film), your words win. Each
+  skill is a short core plus reference files the agent reads when a task
+  needs them, so a long session no longer loses the tail of its rules; the
+  skills are checked automatically, including by a real Claude on typical
+  tasks.
+- 🧐 **A critic with fresh eyes** — before it shows you a finished scene,
+  titles or a promo, the embedded Claude hands it to a critic subagent. The
+  critic judges the frames only, never the intention, and names at most
+  the three worst defects: when, what is visible, one fix. Kadr itself
+  picks the frames it sees (both sides of every cut, transition middles,
+  settled captions, big events, the start and the last frame), and
+  declared events are lined up against the sound under them. After the
+  repair it checks exactly those defects once — and that is it: one review
+  and one verification per stretch until you write again, enforced in
+  code rather than asked for in a prompt. Findings show in the «Проверка»
+  (Checks) dialog with a click to each place, and as a report in the
+  project folder.
 - 📍 **Timeline markers** — press **M** to drop a numbered marker at the
   playhead: drag it, right-click to remove it, it lives in the project
   file and the embedded Claude can see and place them too ("retime
@@ -203,7 +224,7 @@ captions to this part”, watch it happen live in the preview.
 | Component | Needed for | Notes |
 |---|---|---|
 | Node.js ≥ 20 | everything | |
-| ffmpeg + ffprobe | import, audio mix, export | any recent build in PATH |
+| ffmpeg + ffprobe | import, audio mix, export | in PATH; the filter-graph-from-file syntax is picked per version (before 7.0 and from 7.0, 9.x included) |
 | python3 + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | speech-to-text, auto-captions | `pip install faster-whisper`; models download on first use |
 | [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | the “Claude” panel | optional; uses your existing login |
 | network (one-time) | Remotion fragments workspace | `~/kadr-fragments`, ~150 MB |
@@ -244,7 +265,7 @@ server with its own set of tools:
 | `kadr_check` | check fragments: rhythm, reading, contrast, seams, camera, collisions |
 | `kadr_typecheck` | type-check one fragment |
 | `kadr_model_import` · `kadr_models` | import 3D models into the project · list them |
-| `kadr_fragment_media` | prepare a video for `<Video>` in a fragment |
+| `kadr_fragment_media` | prepare a video for `<OffthreadVideo>` in a fragment |
 | `kadr_beats` | the music map: beats, meter, the "one", bars, sections, pauses |
 | `kadr_audio_react` | bake the sound under a fragment so it moves with the music |
 | `kadr_sounds` · `kadr_sound_add` | find an effect or music bed in the library · place it with its hit on a beat |
@@ -254,6 +275,7 @@ server with its own set of tools:
 | `kadr_voice_mark` · `kadr_voice_verdict` | place your own mark · rule on a finding |
 | `kadr_voice_regenerate` | regenerate the confirmed phrases (only those) |
 | `kadr_voice_learn` | report the labelled corpus, and retrain only on explicit confirmation |
+| `kadr_review_begin` · `kadr_review_frames` · `kadr_review_submit` | for the critic subagent only: open a round, render its frames, hand in the verdict |
 
 The killer loop: Claude creates a fragment, edits its TSX with normal file
 tools, and vite hot-reloads it into your preview in ~2 seconds — you give
@@ -280,10 +302,13 @@ into fragments, the sound library (e2e44), fragment layering in the preview
 and hot reload of project-owned fragments (e2e45), preview speed at cuts
 and 3D snapshots (e2e46), the project library and fonts (e2e47), the
 checks (e2e48), 3D import and collisions (e2e49), fragment parameters and
-the onion skin (e2e50), and big projects — the preview pool, timeline
-culling, zoom gestures (e2e51).
+the onion skin (e2e50), big projects — the preview pool, timeline
+culling, zoom gestures (e2e51), rendering only the fragment frames the edit
+uses, every frame checked by pixels (e2e52), and the critic end to end —
+the session's flags, the hook, review → verification → refusal over the
+real MCP bridge, without a single API request (e2e53).
 
-Ten more checks run without the app and without the network:
+Fourteen more checks run without the app and without the network:
 
 ```bash
 node scripts/check-envelope.mjs   # loudness envelope (Blender's Bake Sound)
@@ -296,7 +321,16 @@ node scripts/check-sfx-labels.mjs # sound labels against /brag's reference (ffmp
 node scripts/check-hdr.mjs        # HDR → SDR: the formula and ffmpeg's filter chain (ffmpeg)
 node scripts/check-models.mjs     # 3D import: 3MF, STL, OBJ, GLB, decimation
 node scripts/check-timeline.mjs   # timeline waveform and overlaps — exactly as the slow code
+node scripts/check-critic.mjs     # the critic's limits: it cannot loop
+node scripts/check-ttsmodels.mjs  # what each ElevenLabs model is sent
+node scripts/check-skills.mjs     # Claude skills: budget, links, numbers that match the code
+node scripts/check-ffmpegflags.mjs # filter-graph syntax per ffmpeg version (and a live run)
 ```
+
+And one with a real Claude, which spends its usage (≈ $0.9 a run):
+`node scripts/skill-plan-test.mjs` gives it four typical tasks and checks
+which skills it loads, which reference files it reads and in what order
+it acts.
 
 ## Documentation
 

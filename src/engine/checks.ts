@@ -84,7 +84,7 @@ const fmt = (t: number) => {
 }
 
 /** composition second → timeline second for a clip (null outside it) */
-function toTimeline(clip: Clip, tau: number): number | null {
+export function toTimeline(clip: Clip, tau: number): number | null {
   const speed = clip.speed || 1
   const t = clip.start + (tau - (clip.inPoint || 0)) / speed
   return t >= clip.start - 1e-6 && t <= clip.start + clip.duration + 1e-6 ? t : null

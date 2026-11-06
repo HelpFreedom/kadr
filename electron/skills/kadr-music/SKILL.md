@@ -1,6 +1,6 @@
 ---
 name: kadr-music
-description: Music in a Kadr project — the music map (kadr_beats: meter, the "one" of every bar, sections, pauses, kick offset), cutting and animating to a bar hierarchy (accentAt/useAccent/breathAt in a fragment's audio.ts), and sound design (kadr_sounds, kadr_sound_add; mechanical sounds under songs). Use together with kadr-editor whenever the open Kadr project has music or the user wants anything timed to a beat; combine with kadr-motion and kadr-3d as the project needs.
+description: Use when the open Kadr project has music or the user wants anything timed to a beat: cutting to music, animating to bars, sound design, a music bed — together with kadr-editor. Holds the music map (kadr_beats), the bar hierarchy for cuts and accents, and how to place sounds (kadr_sounds, kadr_sound_add). Combine with kadr-motion and kadr-3d as the project needs.
 ---
 <!-- managed by Kadr: rewritten when Kadr updates (electron/skills/) -->
 
@@ -121,9 +121,9 @@ No music yet and the user wants something lively? Offer a bed from
 Let the music make EXISTING things breathe: a glow, 2–4 % of scale, the warmth
 of a background, the depth of a vignette. Never an equaliser, waveform bars or
 musical-note graphics (the neon wave is the one deliberate exception, when the
-user asks for a visualiser), never strobing, never text pulsing so hard it
-cannot be read. `a.bass` for weight, `a.treble` for sparkle, `accent.hit` for
-the one response that matters.
+user asks for a visualiser), never strobing; text does not pulse to the music
+(a kadr-motion style default). `a.bass` for weight, `a.treble` for sparkle,
+`accent.hit` for the one response that matters.
 
 ## Recipes
 

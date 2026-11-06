@@ -7,11 +7,20 @@ import { join, basename } from 'path'
 import { tmpdir } from 'os'
 import type { ProbeResult, ExportJob, ExportProgress, WaveformData, AudioSegment } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
+import { filterFileFlag, type FilterFileFlag } from '@shared/ffmpegFlags'
 
 const execFileP = promisify(execFile)
 
 export const FFMPEG = process.env.KADR_FFMPEG || 'ffmpeg'
 export const FFPROBE = process.env.KADR_FFPROBE || 'ffprobe'
+
+/** the installed ffmpeg's spelling for "filter graph from this file" (shared/ffmpegFlags.ts), asked once */
+let filterFlag: Promise<FilterFileFlag> | null = null
+function filterFileFlagOfFfmpeg(): Promise<FilterFileFlag> {
+  filterFlag ??= execFileP(FFMPEG, ['-hide_banner', '-version'])
+    .then(({ stdout }) => filterFileFlag(stdout), () => filterFileFlag(''))
+  return filterFlag
+}
 
 const IMAGE_EXT = /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i
 
@@ -832,7 +841,7 @@ export class ExportMuxer {
       }
       filterScript = join(tmpdir(), `kadr-filter-${process.pid}-${Date.now()}.txt`)
       await fsp.writeFile(filterScript, filters.join(';\n'))
-      args.push('-filter_complex_script', filterScript)
+      args.push(await filterFileFlagOfFfmpeg(), filterScript)
     }
 
     if (hasVideo) {

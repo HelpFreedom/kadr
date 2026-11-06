@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { create } from 'zustand'
 import { useEditor } from '@/state/store'
 import { speakText, loadVoices, useTtsSettings, ttsTempo, sanitizeTtsSettings, TTS_MODELS } from '@/engine/tts'
+import { ttsModel } from '@shared/ttsModels'
 import type { TtsVoice } from '@shared/types'
 import { useT } from '@/i18n'
 import { Icon } from './icons'
@@ -70,6 +71,8 @@ export function TtsSettingsDialog() {
   useEffect(() => { if (open) refreshTtsKey() }, [open])
 
   if (!open) return null
+  // which sliders mean anything for this model (v4: stability and similarity only)
+  const caps = ttsModel(settings.modelId)
 
   async function saveKey(value: string) {
     setBusy(true); setError(''); setNote('')
@@ -140,25 +143,39 @@ export function TtsSettingsDialog() {
       <label className="insp-field">
         <span>{t('ttsModel')}</span>
         <select value={settings.modelId} onChange={(e) => update({ modelId: e.target.value })} style={{ flex: 1 }}>
-          {TTS_MODELS.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+          {TTS_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}{m.usdPer1k ? ` · $${m.usdPer1k.toFixed(2)} / 1K` : ''}
+            </option>
+          ))}
           {!TTS_MODELS.some((m) => m.id === settings.modelId) &&
             <option value={settings.modelId}>{settings.modelId}</option>}
         </select>
       </label>
+      <div className="dim hint-inline">
+        {t('ttsModelHint')}
+        {!(caps.style || caps.speed || caps.speakerBoost) && ` ${t('ttsModelV4Hint')}`}
+      </div>
 
       <Slider label={t('ttsStability')} value={settings.stability} min={0} max={1} step={0.05}
               onChange={(stability) => update({ stability })} />
       <Slider label={t('ttsSimilarity')} value={settings.similarityBoost} min={0} max={1} step={0.05}
               onChange={(similarityBoost) => update({ similarityBoost })} />
-      <Slider label={t('ttsStyle')} value={settings.style ?? 0} min={0} max={1} step={0.05}
-              onChange={(style) => update({ style })} />
-      <Slider label={t('ttsSpeed')} value={settings.speed ?? 1} min={0.7} max={1.2} step={0.01}
-              onChange={(speed) => update({ speed })} />
-      <label className="insp-field">
-        <span>{t('ttsSpeakerBoost')}</span>
-        <input type="checkbox" checked={!!settings.speakerBoost}
-               onChange={(e) => update({ speakerBoost: e.target.checked })} />
-      </label>
+      {caps.style && (
+        <Slider label={t('ttsStyle')} value={settings.style ?? 0} min={0} max={1} step={0.05}
+                onChange={(style) => update({ style })} />
+      )}
+      {caps.speed && (
+        <Slider label={t('ttsSpeed')} value={settings.speed ?? 1} min={0.7} max={1.2} step={0.01}
+                onChange={(speed) => update({ speed })} />
+      )}
+      {caps.speakerBoost && (
+        <label className="insp-field">
+          <span>{t('ttsSpeakerBoost')}</span>
+          <input type="checkbox" checked={!!settings.speakerBoost}
+                 onChange={(e) => update({ speakerBoost: e.target.checked })} />
+        </label>
+      )}
 
       <label className="insp-field">
         <span>{t('ttsTempo')}</span>
@@ -323,7 +340,7 @@ export function SpeakDialog() {
       )}
 
       <div className="dim hint-inline">
-        {settings.voiceId || '—'} · {settings.modelId}
+        {settings.voiceId || '—'} · {ttsModel(settings.modelId).name}
         {tempo !== 1 && ` · ×${tempo}`}
       </div>
       <div className="dim hint-inline">{t('ttsHint')}</div>

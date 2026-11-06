@@ -10,6 +10,9 @@ import { useEditor, uid } from '../state/store'
 import { dirOf, baseOf } from '@shared/paths'
 import { parseSrt } from './subtitles'
 import type { MediaAsset, TextDoc, TtsParams, TtsSettings, TtsVoice, VoiceRun } from '@shared/types'
+import { TTS_MODELS } from '@shared/ttsModels'
+
+export { TTS_MODELS }
 
 export const TTS_DEFAULTS: TtsSettings = {
   voiceId: '',
@@ -27,15 +30,9 @@ export const TTS_DEFAULTS: TtsSettings = {
   defectCheck: false,
   regenerateOnConfirm: true,
   ttsqcPython: '',
-  proxy: ''
+  proxy: '',
+  lastModelId: ''
 }
-
-/** Models offered in the dialog. Others still work — the id is a free field. */
-export const TTS_MODELS = [
-  { id: 'eleven_multilingual_v2', name: 'Multilingual v2' },
-  { id: 'eleven_flash_v2_5', name: 'Flash v2.5' },
-  { id: 'eleven_turbo_v2_5', name: 'Turbo v2.5' }
-]
 
 // ---------------------------------------------------------------------------
 // settings: userData file is the source of truth, localStorage a warm cache
@@ -73,14 +70,26 @@ export function sanitizeTtsSettings(v: unknown): TtsSettings {
     regenerateOnConfirm:
       typeof src.regenerateOnConfirm === 'boolean' ? src.regenerateOnConfirm : TTS_DEFAULTS.regenerateOnConfirm,
     ttsqcPython: str(src.ttsqcPython, ''),
-    proxy: str(src.proxy, '')
+    proxy: str(src.proxy, ''),
+    lastModelId: str(src.lastModelId, '')
   }
+}
+
+/**
+ * The model a session STARTS with is the one the last voice-over was made
+ * with: picking another in the settings and closing the editor without
+ * generating anything must not leave that pick as the default. Within a session
+ * the dialog's choice stands. Applied where settings are loaded, never in the
+ * sanitizer — that runs on every update and would undo each pick at once.
+ */
+function atStartup(s: TtsSettings): TtsSettings {
+  return s.lastModelId ? { ...s, modelId: s.lastModelId } : s
 }
 
 function loadTtsCache(): TtsSettings {
   try {
     const raw = localStorage.getItem(TTS_LS_KEY)
-    return sanitizeTtsSettings(raw ? JSON.parse(raw) : null)
+    return atStartup(sanitizeTtsSettings(raw ? JSON.parse(raw) : null))
   } catch {
     return { ...TTS_DEFAULTS }
   }
@@ -112,7 +121,7 @@ export const useTtsSettings = create<TtsSettingsState>((set) => ({
   try {
     const fromFile = await window.kadr.readUserStore(TTS_FILE)
     if (fromFile && typeof fromFile === 'object') {
-      const settings = sanitizeTtsSettings(fromFile)
+      const settings = atStartup(sanitizeTtsSettings(fromFile))
       useTtsSettings.setState({ settings })
       try {
         localStorage.setItem(TTS_LS_KEY, JSON.stringify(settings))
@@ -283,6 +292,9 @@ export async function speakText(opts: SpeakOpts = {}): Promise<SpeakResult> {
     asset, run, texts: [scriptDoc], trackId: opts.trackId ?? null, at
   })
   if (!placed) throw new Error('не удалось положить клип на таймлайн')
+  // the model the next session opens with (see atStartup): only a voice-over
+  // that really landed counts
+  useTtsSettings.getState().update({ lastModelId: params.modelId })
 
   return {
     runId: run.id,

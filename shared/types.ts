@@ -1,5 +1,6 @@
 // Core project model shared between main and renderer processes.
 // All times are in seconds, all dimensions in pixels.
+import type { CriticChain } from './critic'
 
 export type AssetKind = 'video' | 'audio' | 'image'
 
@@ -525,6 +526,8 @@ export interface TtsSettings extends TtsParams {
   ttsqcPython: string
   /** outbound proxy override; '' = take HTTPS_PROXY from the environment */
   proxy: string
+  /** the model of the last voice-over that landed; a session starts with it ('' = none yet) */
+  lastModelId: string
 }
 
 /**
@@ -1314,4 +1317,15 @@ export interface KadrApi {
   claudeClose(): Promise<void>
   onClaudeData(cb: (data: string) => void): () => void
   onClaudeExit(cb: (code: number) => void): () => void
+
+  /** the critic's ledger (electron/critic.ts) — the page only reads it */
+  criticList(): Promise<CriticView>
+  onCriticChanged(cb: (v: CriticView) => void): () => void
+}
+
+/** what main reports of the critic's ledger (rules: shared/critic.ts) */
+export interface CriticView {
+  turn: number
+  roundsThisTurn: number
+  chains: CriticChain[]
 }

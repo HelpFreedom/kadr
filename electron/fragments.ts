@@ -1167,7 +1167,15 @@ async function captureStart(
       id, w: size.width, h: size.height, data: image.getBitmap()
     })
   })
-  await win.loadURL(url)
+  try {
+    await win.loadURL(url)
+  } catch (err) {
+    // a failed load must not leave a live, continuously-painting window behind:
+    // captures.has(id) short-circuits every future start for this id, so an
+    // orphan here is unrecoverable without restarting the app
+    captureStop(id)
+    throw err
+  }
 }
 
 /** Snapshots ask for the project's full width; live preview stays ≤1280

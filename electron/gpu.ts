@@ -39,6 +39,7 @@
 import { app, ipcMain } from 'electron'
 import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { join } from 'path'
+import { waylandWindow } from '@shared/ozone'
 
 export type GpuPref = 'auto' | 'discrete' | 'integrated'
 interface GpuFile {
@@ -57,8 +58,11 @@ function writeFile(f: GpuFile) {
   try { writeFileSync(file(), JSON.stringify(f, null, 2)) } catch { /* read-only profile: keep defaults */ }
 }
 
+// not under Wayland: there NVIDIA's EGL vendor blacks the whole window out
+// (kadr#44, shared/ozone.ts), so the card is not offered at all
+const onWayland = () => process.platform === 'linux' && waylandWindow(process.env, process.argv)
 const discreteAvailable = () =>
-  process.platform === 'linux' && existsSync(NV_EGL) && existsSync('/proc/driver/nvidia/version')
+  process.platform === 'linux' && existsSync(NV_EGL) && existsSync('/proc/driver/nvidia/version') && !onWayland()
 
 let applied: 'discrete' | 'default' = 'default'
 let why = ''
@@ -70,7 +74,12 @@ export function applyGpuChoice() {
   const env = process.env.KADR_GPU as GpuPref | undefined
   const pref: GpuPref = env === 'auto' || env === 'discrete' || env === 'integrated' ? env : f.pref ?? 'auto'
   if (pref === 'integrated') { why = 'выбрана встроенная'; return }
-  if (!discreteAvailable()) { why = 'дискретной видеокарты NVIDIA нет'; return }
+  if (!discreteAvailable()) {
+    why = onWayland()
+      ? 'Wayland: дискретная NVIDIA через EGL здесь даёт чёрное окно — только под X11 (--ozone-platform=x11)'
+      : 'дискретной видеокарты NVIDIA нет'
+    return
+  }
   if (pref === 'auto') { why = 'по умолчанию: на этой машине дискретная замерена медленнее (PRIME)'; return }
   if (f.fallback) { why = `откат: ${f.fallback.reason}`; return }
   // The GPU process is forked from a zygote that exists before this code

@@ -35,11 +35,16 @@ setInterval(() => {
 }, 10000).unref()
 
 /** POST the code (async function body) to the editor, return parsed result. */
-function editorEval(code) {
+const editorEval = (code) => post('/eval', { code })
+/** the critic's ledger in main (electron/critic.ts) */
+const critic = (body) => post('/critic', body)
+
+/** POST a JSON body to the editor bridge; it answers {ok} or {error}. */
+function post(path, payload) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ code })
+    const body = JSON.stringify(payload)
     const req = http.request(
-      { host: '127.0.0.1', port: PORT, path: '/eval', method: 'POST',
+      { host: '127.0.0.1', port: PORT, path, method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(body),
@@ -266,7 +271,7 @@ server.registerTool('kadr_fragment_media', {
     'recording tone-mapped — played as it is it looks flat and grey), H.264 with a keyframe every ' +
     '30 frames (a fragment seeks constantly; a phone\'s long GOP makes each seek decode seconds), ' +
     'no bigger than the project. Returns the import to use: `import clip from \'@lib/media/<name>.mp4\'` ' +
-    '→ <Video src={clip} /> (Video, not OffthreadVideo). Rebuilt only when the source changes.',
+    '→ <OffthreadVideo src={clip} /> (frame-exact in the render, unlike <Video>). Rebuilt only when the source changes.',
   inputSchema: { assetId: z.string().describe('a video asset id from kadr_state') }
 }, async ({ assetId }) => {
   try {
@@ -330,6 +335,154 @@ server.registerTool('kadr_typecheck', {
 }, async ({ fragmentId }) => {
   try {
     return asText(await editorEval(`return await window.kadr.fragmentTypecheck(${JSON.stringify(fragmentId)})`))
+  } catch (e) { return asError(e) }
+})
+
+// ---------------------------------------------------------------- the critic
+// Tools of the kadr-critic subagent (electron/agents/kadr-critic.md) — the
+// author never calls them. The ledger in main decides whether a round may run
+// (one review + one verification per stretch until the user writes); the page
+// chooses the frames. See shared/critic.ts.
+
+const fmtT = (t) => {
+  const m = Math.floor(t / 60)
+  return `${m}:${(t - m * 60).toFixed(2).padStart(5, '0')}`
+}
+
+server.registerTool('kadr_review_begin', {
+  description:
+    'CRITIC ONLY (the kadr-critic subagent; the main agent never calls this). Opens a review round ' +
+    'of [from, to) timeline seconds. Kadr allows ONE review and ONE verification of its defects per ' +
+    'stretch until the user writes again, and refuses beyond that — a refusal ends your work: return ' +
+    'its message, do not try another range. Returns the round (mode review|verify), the frames Kadr ' +
+    'chose for it (render them with kadr_review_frames), the fragment clips in the range (for ' +
+    'kadr_check), the declared events against the sound clips under them, and in verify mode the ' +
+    'prior defects to verify.',
+  inputSchema: {
+    from: z.number().describe('range start, timeline seconds'),
+    to: z.number().describe('range end, timeline seconds')
+  }
+}, async ({ from, to }) => {
+  try {
+    const ctx = await editorEval('return window.kadrEditor.criticContext()')
+    const end = ctx.duration > 0 ? Math.min(to, ctx.duration) : to
+    const b = await critic({ op: 'begin', from, to: end, projectPath: ctx.projectPath, projectName: ctx.projectName })
+    if (!b.ok) return asText({ refused: true, code: b.code, message: b.message })
+    let plan = null
+    let planError
+    try {
+      plan = await editorEval(`return await window.kadrEditor.criticPlan(${JSON.stringify({
+        from: b.from, to: b.to, mode: b.mode, prior: b.prior ?? [] })})`)
+      await critic({ op: 'plan', id: b.id, plan: plan.frames.map((f) => [f.t, f.why]) })
+    } catch (e) { planError = String(e.message || e) }
+    return asText({
+      reviewId: b.id,
+      round: b.round,
+      mode: b.mode,
+      restarted: b.restarted || undefined,
+      range: { from: b.from, to: b.to, label: `${fmtT(b.from)}–${fmtT(b.to)}` },
+      prior: b.prior,
+      plan: plan ? plan.frames : undefined,
+      planError,
+      clipIds: plan ? plan.clipIds : undefined,
+      sound: plan ? plan.sound : undefined,
+      next: b.mode === 'review'
+        ? (plan && plan.clipIds.length ? 'kadr_check({clipIds, pixels:true}), then ' : '') +
+          'kadr_review_frames() and Read every sheet; then kadr_review_submit with at most 3 defects'
+        : 'kadr_review_frames() renders the prior defects\' times; verify each, then kadr_review_submit with `verified`'
+    })
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_review_frames', {
+  description:
+    'CRITIC ONLY. Renders frames of the open review round into contact sheets (WYSIWYG, fragments ' +
+    'included) and returns their paths — Read every one. Without `times` it renders the plan Kadr ' +
+    'chose at kadr_review_begin; with `times` (timeline seconds inside the range) those frames, e.g. ' +
+    'a few at width 1280 to read small text. A round may render at most 60 frames; the sheets of a ' +
+    'saved project go to <projectDir>/kadr-reviews/. ~1–5 s per frame.',
+  inputSchema: {
+    reviewId: z.string(),
+    times: z.array(z.number()).optional().describe('timeline seconds (default: the plan)'),
+    width: z.number().int().min(320).max(3840).optional().describe('width of one frame (default 560)')
+  }
+}, async ({ reviewId, times, width }) => {
+  try {
+    const g = await critic({ op: 'get', id: reviewId })
+    if (!g.ok) throw new Error(g.message)
+    if (g.state !== 'reviewing' && g.state !== 'verifying') throw new Error(`review ${reviewId} is ${g.state} — no round is open`)
+    const why = new Map(g.plan.map(([t, w]) => [t, w]))
+    const lo = Math.max(0, g.from - 1)
+    const hi = g.to + 1
+    const asked = times ?? g.plan.map(([t]) => t)
+    const ts = [...new Set(asked)].filter((t) => Number.isFinite(t) && t >= lo && t <= hi)
+    const outside = asked.length - ts.length
+    if (!ts.length) throw new Error(`no frames to render inside ${fmtT(g.from)}–${fmtT(g.to)}`)
+    const res = await critic({ op: 'reserve', id: reviewId, n: ts.length })
+    if (!res.ok) throw new Error(res.message)
+    if (!res.allowed) throw new Error('this round has rendered all the frames it may (60) — judge from the sheets you have')
+    const take = ts.slice(0, res.allowed)
+    const w = width ?? 560
+    const cols = w >= 1600 ? 1 : w >= 900 ? 2 : 3
+    const per = cols * cols
+    const sheets = []
+    for (let i = 0; i < take.length; i += per) {
+      const chunk = take.slice(i, i + per)
+      const r = await editorEval(`
+        const r = await window.kadrEditor.contactSheet(${JSON.stringify({ times: chunk, cols: Math.min(cols, chunk.length), width: w, dir: g.dir || undefined })})
+        return { path: r.path, frames: r.frames.map((f) => ({ t: f.t, label: f.label })) }`)
+      sheets.push({ path: r.path, frames: r.frames.map((f) => ({ ...f, why: why.get(f.t) })) })
+      await critic({ op: 'sheets', id: reviewId, paths: [r.path] })
+    }
+    return asText({
+      sheets,
+      notRendered: ts.length - take.length || undefined,
+      outsideRange: outside || undefined
+    })
+  } catch (e) { return asError(e) }
+})
+
+server.registerTool('kadr_review_submit', {
+  description:
+    'CRITIC ONLY. Closes the round. Review round: `defects` — at most 3, the worst, each {t, end?, ' +
+    'severity: high|medium, what, evidence, fix} (none is a valid answer). Verify round: `verified` — ' +
+    'every prior defect {id, status: fixed|not-fixed|unclear, note?}; no new defects (anything serious ' +
+    'goes in `note`). Writes the report (a saved project: <projectDir>/kadr-reviews/) and returns ' +
+    '`answer` — give it to the main agent as your final answer, as it is.',
+  inputSchema: {
+    reviewId: z.string(),
+    defects: z.array(z.object({
+      t: z.number().describe('timeline seconds, as labelled on the sheet'),
+      end: z.number().optional(),
+      severity: z.enum(['high', 'medium']),
+      what: z.string().describe('one sentence: what the viewer experiences'),
+      evidence: z.string().describe('what is visible in which frame, or which measurement'),
+      fix: z.string().describe('one local change: what, where, roughly how much')
+    })).optional(),
+    verified: z.array(z.object({
+      id: z.string(),
+      status: z.enum(['fixed', 'not-fixed', 'unclear']),
+      note: z.string().optional()
+    })).optional(),
+    note: z.string().optional().describe('one or two sentences, only if something serious is outside the defects')
+  }
+}, async ({ reviewId, defects, verified, note }) => {
+  try {
+    const r = await critic({ op: 'submit', id: reviewId, input: { defects, verified, note } })
+    if (!r.ok) throw new Error(r.message)
+    const lines = []
+    if (r.verdict === 'ok') lines.push('Critic: nothing worth repairing.')
+    for (const d of r.defects) {
+      const when = d.end != null ? `${fmtT(d.t)}–${fmtT(d.end)}` : fmtT(d.t)
+      lines.push(d.status === 'open'
+        ? `${d.id} · ${when} · ${d.severity}: ${d.what}\n   seen: ${d.evidence}\n   fix: ${d.fix}`
+        : `${d.id} · ${when}: ${d.status}${d.verifyNote ? ` — ${d.verifyNote}` : ''}`)
+    }
+    if (note) lines.push(`Critic's note: ${note}`)
+    lines.push(r.report ? `Report: ${r.report}` : r.reportError ? `Report not written: ${r.reportError}`
+      : 'Report: none (the project is not saved) — the findings are in the «Проверка» dialog.')
+    lines.push('', r.next)
+    return asText({ answer: lines.join('\n') })
   } catch (e) { return asError(e) }
 })
 
@@ -427,8 +580,10 @@ server.registerTool('kadr_fragment_create', {
     '\'@kadr/three\': Kadr\'s 3D kit (useModel, Scene3D, Studio, Camera + cameraPath, Part, Layer, ' +
     'Callout, Balloons, PortraitReveal…)\n' +
     '- after editing, kadr_typecheck <fragmentId> (not tsc over the workspace)\n' +
-    '- embed video with <Video>, NOT <OffthreadVideo>: the latter needs Remotion\'s native ' +
-    'compositor (glibc >= 2.32) and dies on older systems with "GLIBC_2.3x not found"\n' +
+    '- embed video with <OffthreadVideo>, NOT <Video>: the render draws with several tabs and ' +
+    '<Video> repeats and drops frames there; <OffthreadVideo> takes the exact frame (Remotion\'s ' +
+    'native compositor; needs glibc >= 2.35, on older systems it fails with "GLIBC_2.3x not found" and ' +
+    '<Video> is the fallback) and plays as a plain <Video> in the preview\n' +
     '- the module must keep exporting `fragment = { component, meta }`\n' +
     '- subtitle data: read SRT files from kadr_state project.texts and bake the cues into the ' +
     'composition (e.g. as a const array) for word-precise animated captions\n' +
@@ -692,7 +847,10 @@ server.registerTool('kadr_voice_speak', {
     'txt/srt on disk. Lands on a free audio track at `at` (default: the playhead), CREATING an ' +
     'audio track if the project has none. Writes <name>.script.txt next to the audio — the exact ' +
     'text that was synthesised — and registers it in project.texts; kadr_voice_check aligns ' +
-    'against THAT file, so never retype it. COSTS ElevenLabs credits: say so before calling.',
+    'against THAT file, so never retype it. COSTS ElevenLabs credits: say so before calling. ' +
+    'The model is the one in the voice-over settings (a session starts with the model of the last ' +
+    'voice-over): Eleven v4 Turbo costs per character what Flash v2.5 does, Eleven v4 and Multilingual ' +
+    'v2 twice that.',
   inputSchema: {
     text: z.string().optional().describe('the text itself'),
     textDocId: z.string().optional().describe('id of a document from project.texts'),

@@ -34,9 +34,11 @@ export function mediaCacheKey(
 const SDR = `:sdr${HDR_VERSION > 1 ? HDR_VERSION : ''}`
 export const proxySuffix = (alpha?: boolean, sdr?: boolean) => (alpha ? ':a' : sdr ? SDR : '')
 
-/** decoded: packed colour+matte, plain alpha, an HDR source tone-mapped, or none of these */
+/** decoded: packed colour+matte, plain alpha, an HDR source tone-mapped, or none of these.
+    ':p2' — the packs written before it carry a double-compressed matte on
+    ffmpeg ≥ 8 (see makeDecoded) and must not be taken for current ones */
 export const decodedSuffix = (opts?: { alpha?: boolean; packed?: boolean; sdr?: boolean }) =>
-  opts?.packed ? ':p' : opts?.alpha ? ':a' : opts?.sdr ? SDR : ''
+  opts?.packed ? ':p2' : opts?.alpha ? ':a' : opts?.sdr ? SDR : ''
 
 /** reversed: the same source cut differently is a different render */
 export const reverseSuffix = (start: number, duration: number) =>

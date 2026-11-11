@@ -6,7 +6,7 @@ import type {
 import { useEditor, uid } from '@/state/store'
 import { dirOf, baseOf } from '@shared/paths'
 import { overlapFades } from './player'
-import { evalAnim } from './anim'
+import { evalAnim, gainCurveField } from './anim'
 
 // ------------------------------------------------------------------ SRT
 
@@ -218,7 +218,9 @@ export function collectRangeAudio(
           gain,
           speed,
           fadeIn: fiLocal,
-          fadeOut: foLocal
+          fadeOut: foLocal,
+          // keyframed gain, as the preview plays it (kadr#41)
+          ...gainCurveField(clip.gain, track.gain, local, segDur)
         })
         local += segDur
       }

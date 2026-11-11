@@ -145,7 +145,11 @@ export async function regenerateDefects(opts: RegenOpts = {}): Promise<RegenResu
 
   const units = mergeUnits(picked)
   const warnings: string[] = []
-  const params = ttsParams()
+  // the run's OWN voice, model and settings, like its tempo below: a patch made
+  // with whatever the settings say today (another model since — v4 next to
+  // Flash) would change the voice in the middle of the file. A run from before
+  // the parameters were stored falls back to the current ones.
+  const params = run.tts?.voiceId && run.tts.modelId ? { ...run.tts } : ttsParams()
   useVoiceUi.setState({ phase: 'regen', progress: 0, stage: 'synth', error: '' })
   activity.voiceCheck = true
   const busy: Record<string, number> = {}

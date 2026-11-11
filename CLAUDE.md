@@ -26,8 +26,22 @@ mixes audio and muxes/transcodes per preset.
   `check-sfx-labels.mjs` (sound labels vs /brag's 228) and `check-hdr.mjs`
   (the HDR → SDR maths and ffmpeg's own filter chain against the formula);
   `check-models.mjs` (3MF build items/components/units, STL, OBJ, GLB,
-  decimation) and `check-timeline.mjs` (the timeline's waveform columns and
-  overlap zones must EQUAL the slow code they replaced); plus
+  decimation), `check-timeline.mjs` (the timeline's waveform columns and
+  overlap zones must EQUAL the slow code they replaced; edge tips never run
+  past their clip) and
+  `check-critic.mjs` (the critic's round limits — it must not loop),
+  `check-ttsmodels.mjs` (what each ElevenLabs model is sent),
+  `check-ffmpegflags.mjs` (the filter-file and frame-passthrough spellings per
+  ffmpeg release — `-fps_mode` from 5.1, `-vsync` before, which e2e52's decode
+  uses too — and a live run on the installed ffmpeg; the packed alpha's colour
+  step per release),
+  `check-packed-alpha.mjs` (the alpha matte round-trips exactly, the colour
+  within a level, on the installed ffmpeg), `check-audio-placement.mjs` (every
+  clip of the export mix on its sample, many runs over), `check-gain-keys.mjs`
+  (gain keyframes and speeds outside 0.25–8× in both mix paths),
+  `check-ozone.mjs` (whether the window will be a Wayland one),
+  `check-skills.mjs` (the agent skills' budget, triggers, links and the
+  numbers they share with the code; the skill sync on temp dirs); plus
   `<python3.11> scripts/check-phrases.py` for the phrase-boundary maths.
   `node scripts/gen-sfx-catalog.mjs` regenerates
   `resources/sfx/kadr-sfx.json` after a bundled sound or
@@ -39,8 +53,20 @@ mixes audio and muxes/transcodes per preset.
   collisions), e2e50 (fragment parameters, onion skin), e2e51 (bounded
   preview pool, timeline culling, zoom gestures) and e2e52 (partial
   fragment renders, every output frame checked by pixels; the export
-  decoder's first frame and backward jumps) replace the open project,
-  so they REFUSE to run over one with clips unless `KADR_E2E_FORCE=1`.
+  decoder's first frame and backward jumps) and e2e53 (the critic: the
+  session's flags, the hook, review → verification → refusal over the real
+  MCP bridge, with a stand-in for claude — no API call), e2e54 (a failed mux
+  fails `done`; a cancel stops quietly and leaves nothing behind) and e2e56
+  (context-menu delete, a group dragged past 0, a cancelled drag) replace the
+  open project, so they REFUSE to run over one with clips unless
+  `KADR_E2E_FORCE=1`. e2e55 (a failed capture load, hidden windows on close)
+  CLOSES THE APP — start an instance for it alone.
+- `node scripts/skill-plan-test.mjs [--baseline] [--only <id>]` — the agent
+  skills' application test: a real claude, given only the working-tree skills
+  (`--setting-sources project`) and Skill/Read, plans four Kadr tasks; graded
+  on the skills it loads, the references it reads and the order of its steps.
+  COSTS Claude usage (≈ $0.9 a run on API pricing) — run it after changing a
+  skill, not routinely.
 - `node scripts/preview-bench.mjs <from> <to>` — plays a span of the open
   project and reports editor frames, draws per fragment iframe, iframe
   processes and the worst frame at every fragment cut. Plays sound.
@@ -53,7 +79,8 @@ mixes audio and muxes/transcodes per preset.
 
 ## Requirements
 - Node.js ≥ 20, system `ffmpeg`/`ffprobe` in PATH
-- Optional: `python3` + `faster-whisper` (speech-to-text), the `claude`
+- Optional: `python3` + `faster-whisper` with `"av<19"` (speech-to-text;
+  faster-whisper 1.2.1 calls a PyAV argument that 19 removed), the `claude`
   CLI (embedded AI assistant), network access for the one-time Remotion
   workspace install
 - Optional for voice-over: an ElevenLabs API key (entered in the app,
@@ -90,13 +117,31 @@ mixes audio and muxes/transcodes per preset.
   considered and rejected: media lives wherever the user picked it, and a
   project loaded through `kadr_eval` never passes main at all, so the
   allowlist would have had holes exactly where a miss means a black preview. Startup sweeps leftover helper processes; shutdown force-exits
-  (window-all-closed → app.exit failsafe, render-process-gone → exit).
+  (window-all-closed → app.exit failsafe, render-process-gone → exit). The
+  editor window's `closed` destroys every hidden helper window (fragment
+  captures, inspect and collide pages): while one was open window-all-closed
+  never fired and a windowless process stayed alive. A capture whose page
+  fails to load is destroyed and unregistered, so the renderer's retry really
+  loads it (captureStart returns early for an id it holds).
 - `electron/ffmpeg.ts` — ffprobe probing (+ thumbnails + peak/RMS waveform
   bins), `makeProxy` (540p preview proxies), `makeReversed` (backwards
   render of a clip's source range, RAM-bounded chunks), `ExportMuxer`
-  (per-segment `volume,atempo*,afade,adelay,apad,atrim` → `amix` with
-  exact level compensation), `RawVideoEncoder` (fallback raw-frame
+  (per-segment `volume,atempo*,afade`, placed by a silence prefix, `apad,atrim`
+  → `amix` with exact level compensation), `RawVideoEncoder` (fallback raw-frame
   encoder; the primary one is spawned by the preload).
+  A CLIP IS PLACED BY SILENCE, NOT BY `adelay`: exactly round(start × 48000)
+  samples of `anullsrc` in front of it, joined with `concat`. On recent ffmpeg
+  (9.0.2 measured, 8.1 reported) adelay lost its delay — always for a clip run
+  through atempo, now and then for a plain one, with the same command — and
+  the clip played at 0:00. A KEYFRAMED GAIN is mixed as the preview plays it:
+  `gainCurve` (src/engine/anim.ts) turns it into points evaluated by evalAnim,
+  applied after atempo in 10 ms frames by one flat `volume` expression; a plain
+  gain keeps its scalar `volume` (the export used to take the value at the
+  clip's first instant). SPEED is exact: atempo was clamped to 0.25–8× while a
+  clip goes 0.02–100×, so a 20× clip's sound ran 2.5 times past the clip; a
+  stretched segment also reads 0.25 s more source for atempo to flush its last
+  window and is cut to its exact sample count. Onsets inside a stretched clip
+  still lead by up to ~half an atempo window (−13 ms at 2×) — atempo's own.
   TWO LIMITS A BIG TIMELINE WALKS INTO, both met on a real 19-minute edit
   carrying ~1000 SFX clips. One graph with N padded inputs costs the ffmpeg
   scheduler roughly QUADRATICALLY in N: that mix ran at a quarter of realtime —
@@ -110,12 +155,23 @@ mixes audio and muxes/transcodes per preset.
   held whole in main: 48 kHz stereo f32 is ~23 MB per minute of timeline.
   The other limit is argv: Linux caps ONE argument at 128 KB (MAX_ARG_STRLEN),
   and that many clips build a `-filter_complex` past it — spawn failed with
-  E2BIG. The graph is written to a file and passed as `-filter_complex_script`,
-  on every export rather than only the big ones.
+  E2BIG. The graph is written to a file and handed over from it on every
+  export rather than only the big ones — spelled `-/filter_complex <file>` on
+  ffmpeg ≥ 7 and `-filter_complex_script <file>` before (ffmpeg 9 no longer has
+  the old option, ffmpeg 6 and older lack the new one); `shared/ffmpegFlags.ts`
+  picks it from `ffmpeg -version`, asked once.
   A FAILED MUX NO LONGER BINS THE VIDEO: the stream is rendered first and can
   take hours, and the mux ran with that temp file scheduled for deletion in
   `finally`. A non-cancelled failure that has video keeps it, and the error
-  message says where it is.
+  message says where it is — and the caller HEARS the failure: `export:video-done`
+  returns it, so `startExport().done` rejects and kadr_export reports an error
+  (it used to resolve as if the file had been written).
+  THE INTERMEDIATES LIVE NEXT TO THE OUTPUT (`shared/exportTemp.ts`), not in
+  the temp folder: a tmpfs /tmp is RAM, and an intermediate is the size of the
+  export (300 MB a minute at the 4K preset). A folder that cannot be written
+  falls back to the temp folder. A cancel or a failure before main took the
+  direct encoder's stream over deletes it (`rawEncodeDiscard`); after that, a
+  failed mux keeps it on purpose.
 - `electron/claude.ts` — embedded Claude Code: node-pty PTY running the
   user's `claude` CLI inside a watchdog wrapper (kills its process group
   if Electron dies hard), per-session HTTP bridge (POST /eval →
@@ -143,13 +199,57 @@ mixes audio and muxes/transcodes per preset.
   send the request — and a flat refusal of any request carrying an `Origin`.
   The token reaches the MCP server as argv[3] of the generated config; the
   liveness ping on `GET /` stays open.
-  AGENT SKILLS are composable: `electron/skills/*.md` are synced at startup
-  to `~/.claude/skills/<name>/SKILL.md` — `kadr-editor` (the base: LOOK →
-  ACT → VERIFY, the interface, fragments, voice), `kadr-music`,
+  AGENT SKILLS are composable: each is a folder `electron/skills/<name>/`
+  (SKILL.md plus the reference files it links), synced at startup to
+  `~/.claude/skills/<name>/` by `electron/skillSync.ts` — `kadr-editor` (the
+  base: LOOK → ACT → VERIFY, the critic, fragments), `kadr-music`,
   `kadr-motion`, `kadr-3d`, loaded as a project needs them (the system hint
-  says so); their rules are defaults. Every file carries a
-  `<!-- managed by Kadr` mark: a `kadr-*` folder with it that is no longer
-  shipped is removed, one without it (the user's own) never is.
+  says so); their rules are defaults. A SKILL'S BODY HAS A BUDGET: after a
+  compaction Claude Code re-attaches only the first ~5000 tokens of each
+  invoked skill (from a ~25 000-token pool), and kadr-editor had grown to
+  2859 words / 19 KB, so its tail — the interface table, the voice-over rules,
+  the recipes — was what an agent lost in a long session. Bodies stay under
+  2500 words and 12 000 bytes (Cyrillic costs about twice the bytes per
+  token); detail that only some tasks need lives in `references/*.md`, linked
+  one level deep from SKILL.md with the moment to read it. Descriptions say
+  WHEN ("Use when …", ≤ 500 chars). A number a skill shares with the code
+  (hold times, the beat window) and the critic's copy of the AI-template
+  tells are compared by check-skills, so one cannot drift from the other.
+  Every file carries a `<!-- managed by Kadr` mark. The sync writes changed
+  files, removes a marked file under a skill's SUBFOLDER that is no longer
+  shipped, never a top-level one (the user keeps SKILL.md.bak-<date> copies
+  there, marked too), removes a marked `kadr-*` folder that is no longer
+  shipped, and never touches an unmarked one (the user's own kadr-* skills).
+- THE CRITIC (`electron/agents/kadr-critic.md`, `shared/critic.ts`,
+  `electron/critic.ts`, `src/engine/critic.ts`) — a subagent that judges a
+  finished stretch of timeline from rendered frames and measurements only,
+  never from the author's intentions, and names at most the three worst
+  defects (time, evidence, one local fix). The author calls it before showing
+  a visual block (kadr-editor «The critic»). It exists in the editor's
+  session only: `electron/agents/*.md` go to claude as `--agents` JSON, nothing
+  is written to ~/.claude/agents. Its tools can only look — Read, kadr_state,
+  kadr_check and its own kadr_review_begin/frames/submit (not kadr_snapshot:
+  that imports into the bin); the PAGE chooses the frames it sees (both sides
+  of every cut, transition middles, declared captions settled, big events,
+  the first seconds, the poster, an even fill), so the author cannot show it
+  only the good ones, and lines declared events up against the sound clips.
+  IT MUST NOT LOOP, and that is enforced in code, not asked for in a prompt:
+  per stretch ONE review and ONE verification of exactly its defects (no new
+  ones), then refusal until the user writes; 12 rounds per user turn; a round
+  whose critic died may restart once; 60 frames per round. The LEDGER LIVES IN
+  MAIN — the page reloads and runs any JS through kadr_eval, so a limit kept
+  there would not be one. A user turn is heard from a UserPromptSubmit hook
+  (`electron/claude-hook.cjs`, passed with `--settings`; it prints nothing —
+  a hook's stdout joins the conversation — and always exits 0). TRAP, found by
+  running the real CLI: that hook ALSO fires when a background agent finishes,
+  with a `<task-notification>…</task-notification>` prompt; counted as a turn,
+  every critic that finished would reset its own limit. `isUserPrompt` takes a
+  prompt that is ONE element from first character to last as machine-made.
+  `/critic` and `/turn` sit behind the same token and Origin locks as /eval. A
+  custom `args` in claude-env.json replaces Kadr's flags, so there is no critic
+  and no hook — the limits then only tighten (no turn ever opens). Findings
+  show in «Проверка» and, for a saved project, as a markdown report with its
+  contact sheets in `<projectDir>/kadr-reviews/`.
 - `electron/mcp-bridge.cjs` — MCP stdio server (SDK) that claude receives
   via a generated `--mcp-config`; tools: kadr_state / kadr_eval /
   kadr_snapshot / kadr_sheet / kadr_export / kadr_transcribe /
@@ -310,8 +410,13 @@ mixes audio and muxes/transcodes per preset.
 - `src/state/store.ts` — zustand store. Undo convention: callers invoke
   `pushHistory(labelKey)` once before a discrete edit; high-level actions
   push their own. `sanitizeProject` heals foreign/script-written projects
-  on load (scalar Anims → {value}, broken keyframes dropped, missing
-  fields defaulted). File-backed preset stores (pose/fx) via user-store IPC.
+  on load (scalar Anims → {value}, broken keyframes dropped, an unknown
+  easing made linear — evalAnim eases anything it does not know linearly, it
+  used to throw and black the whole frame — effects without an id or a type
+  dropped and `params` defaulted (`sanitizeEffects`, also on every
+  `updateClip` that carries effects: a missing `params` blanked the whole
+  window), missing fields defaulted). File-backed preset stores (pose/fx)
+  via user-store IPC.
   `insertClipsFromAssets` lays several assets back-to-back in one undo
   (audio → audio track, AV twins as usual); `removeAssets` drops bin
   entries AND every clip using them (one undo); `setClipSpeed` rescales
@@ -386,6 +491,17 @@ mixes audio and muxes/transcodes per preset.
   smeared lone clicks and was rejected); overlap zones are one sweep.
   Measured and rejected: CPU rasterisation (faster timeline, worse preview
   and export), software waveform canvases, dropping clip decorations.
+  EDGE TIPS run as long as `tipSpans` says: their stored lengths when they
+  fit, shared in proportion when a clip is shorter than both together (a
+  beat edit's 0.3 s clips) — the in tip used to win, so the out tip started
+  mid-move or never played. edgeAt, the strips and the critic's frame plan
+  all read it. A GROUP stops when its earliest clip reaches 0 (clamped one by
+  one, it piled up there); the clip menu's Delete acts on the selection it
+  was opened on; every drag in the editor also ends on `pointercancel`.
+  The controls hint in the toolbar is one line that ends in an ellipsis
+  (wrapping, it made the toolbar 152–222 px tall in a narrow window and moved
+  the layout on a language switch); the motion editors size their stage from
+  the measured content width and keep the scrollbar's gutter.
 - `src/gl/compositor.ts` — WebGL2 quad compositor: perspective-correct 3D,
   masks (crop + up to 8 shapes), transition FBOs, motion-blur accumulator,
   glow + gaussian-blur effect passes (`drawLayerFx`), raw-BGRA capture
@@ -432,7 +548,13 @@ mixes audio and muxes/transcodes per preset.
     `Mp4FrameSource` re-wraps the frames as BT.709 on the CPU: a tagged
     frame goes through Chromium's colour-managed upload, which rewrites
     mid-tones and would lift the matte (128 → 143). `KADR_DISABLE_ALPHA_PACK`
-    forces the old path.
+    forces the old path. Two traps on ffmpeg ≥ 8, both measured: gray →
+    yuv420p already lands in limited range, so the matte's range is mapped
+    BEFORE the pixel format (after it, opaque 255 packed as 217 and every
+    transparent fragment let ~8 % of the layer under it through); and
+    swscale's matrix change is off by up to 2.5 levels (grey went green-ish),
+    so from 8 on `colormatrix` does it (`packedColourChain`). The cache key
+    carries `:p2` so old packs are rebuilt.
   * MOOV AT THE END (any file not written with faststart) is picked up by
     fetching the file's tail (`pumpTail`) instead of dropping to element
     seeks.
@@ -552,7 +674,13 @@ mixes audio and muxes/transcodes per preset.
   the environment before Electron starts (the GPU process forks from the
   zygote). On a hybrid laptop the discrete card measured SLOWER for the
   preview (every frame is copied to the integrated card to be shown), so
-  'auto' keeps the default.
+  'auto' keeps the default. NOT UNDER WAYLAND: there Chromium itself talks to
+  the compositor through EGL, NVIDIA's EGL cannot import the Intel card's
+  buffers (`eglCreateImage failed with 0x3004`), the GPU process dies over and
+  over and the window stays black — so the variable is set, and the card
+  offered, for an X11 window only (`shared/ozone.ts`; `--ozone-platform=x11`
+  brings it back). Measured here on a Wayland session: black before, Intel
+  after; X11 + discrete still renders on the NVIDIA card.
 - The onion skin (`src/engine/onion.ts`, `OnionSkin.tsx`): a footage clip as
   a `<video>` over the preview, translucent or in difference mode, never in
   snapshots or exports; selecting a fragment (to drag its sliders) does not
@@ -582,6 +710,20 @@ mixes audio and muxes/transcodes per preset.
   channel and cost exactly 3.01 dB through ffmpeg's downmix matrix.
   `KADR_TTS_MOCK=1` synthesises speech-shaped audio locally so tests never
   spend credits.
+  MODELS (`shared/ttsModels.ts`): Eleven v4 and v4 Turbo next to Flash v2.5 and
+  Multilingual v2. The docs say v4 needs the Text to Dialogue API and v4 Turbo
+  its WebSocket; the LIVE API (2026-10-20) serves both on the plain
+  /v1/text-to-speech (+ /with-timestamps), with 400-character context,
+  previous_request_ids and seed — the history item names the model that ran,
+  check there before believing a doc. v4 takes stability and similarity only
+  (style/speed/speaker boost are dropped silently, so they are not sent and
+  their sliders hide) and is cut at 2 000 characters per request (ElevenLabs'
+  own reliability guidance; the cap is 10 000). The older models are sent and
+  cut exactly as before. A SESSION STARTS WITH THE MODEL OF THE LAST VOICE-OVER
+  that landed (`lastModelId`, applied where settings load — never in the
+  sanitizer, which runs on every update). A regeneration uses the RUN's own
+  voice, model and settings, like its tempo: a patch from another model would
+  change the voice mid-file.
 - `shared/proxy.ts` — which proxy the API calls use, and how to spell it
   for Chromium (`https=host:port;http=host:port`, or a full `socks5://`).
   `net.fetch` always uses the DEFAULT session, whose proxy Chromium picks

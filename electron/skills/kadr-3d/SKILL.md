@@ -1,6 +1,6 @@
 ---
 name: kadr-3d
-description: 3D in Kadr fragments — importing real models (STL, 3MF, STEP, OBJ, GLB via kadr_model_import), Kadr's 3D kit ('@kadr/three' - useModel, Scene3D, Studio, cameraPath/Camera, Part with print layers/outline/x-ray, Callout, Balloons, PortraitReveal), one continuous camera, physical honesty (no parts passing through each other - kadr_check collisions), showing what changed, and matching a 3D camera to real footage (onion skin + defineParams sliders). Use together with kadr-editor and kadr-motion whenever a Kadr project shows a model, a product or a mechanism in 3D; add kadr-music if it is cut to music.
+description: Use when a Kadr project shows a model, a product or a mechanism in 3D: importing STL/3MF/STEP/OBJ/GLB, the '@kadr/three' kit, the camera, assembly and disassembly, showing what changed, matching a 3D camera to real footage — together with kadr-editor and kadr-motion. Add kadr-music if it is cut to music.
 ---
 <!-- managed by Kadr: rewritten when Kadr updates (electron/skills/) -->
 

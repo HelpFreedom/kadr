@@ -16,7 +16,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import * as THREE from 'three'
 import { useThree } from '@react-three/fiber'
 import { ThreeCanvas } from '@remotion/three'
-import { AbsoluteFill, Sequence, Video, continueRender, delayRender, useVideoConfig } from 'remotion'
+import { AbsoluteFill, OffthreadVideo, Sequence, continueRender, delayRender, useVideoConfig } from 'remotion'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
@@ -566,7 +566,7 @@ export const Balloons: React.FC<{
  * into a card. Align the 3D camera with the video's first frame for the match
  * cut (defineParams sliders in @kadr/runtime are made for that). `src`: the video's URL
  * (`import clip from '@lib/media/clip.mp4'` — «Подготовить для фрагмента»
- * makes an SDR, keyframe-dense copy there). Uses <Video>, not OffthreadVideo.
+ * makes an SDR, keyframe-dense copy there). Uses <OffthreadVideo>: the exact frame in the render.
  */
 export const PortraitReveal: React.FC<{
   t: number
@@ -592,14 +592,14 @@ export const PortraitReveal: React.FC<{
   return (
     <Sequence from={Math.round(from * fps)} layout="none">
       <AbsoluteFill style={{ opacity: bg }}>
-        <Video src={src} muted style={{ width: '100%', height: '100%', objectFit: 'cover', filter: 'blur(38px) brightness(0.45) saturate(1.2)', transform: 'scale(1.15)' }} />
+        <OffthreadVideo src={src} muted style={{ width: '100%', height: '100%', objectFit: 'cover', filter: 'blur(38px) brightness(0.45) saturate(1.2)', transform: 'scale(1.15)' }} />
       </AbsoluteFill>
       <div style={{
         position: 'absolute', left: x, top: y, width: w, height: h, borderRadius: radius, overflow: 'hidden',
         clipPath: `inset(0 ${inset}px 0 ${inset}px round ${radius}px)`,
         boxShadow: `0 0 ${40 + 60 * bg}px ${glow}`
       }}>
-        <Video src={src} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+        <OffthreadVideo src={src} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       </div>
     </Sequence>
   )

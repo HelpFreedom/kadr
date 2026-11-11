@@ -207,7 +207,7 @@ try {
     JSON.stringify(names) === JSON.stringify(
       ['kadr_audio_react', 'kadr_beats', 'kadr_check', 'kadr_eval', 'kadr_export',
        'kadr_fragment_create', 'kadr_fragment_media', 'kadr_model_import', 'kadr_models',
-       'kadr_neon_wave', 'kadr_sheet', 'kadr_snapshot', 'kadr_sound_add', 'kadr_sound_label',
+       'kadr_neon_wave', 'kadr_review_begin', 'kadr_review_frames', 'kadr_review_submit', 'kadr_sheet', 'kadr_snapshot', 'kadr_sound_add', 'kadr_sound_label',
        'kadr_sounds', 'kadr_state', 'kadr_transcribe', 'kadr_typecheck',
        'kadr_voice_check', 'kadr_voice_learn', 'kadr_voice_mark', 'kadr_voice_regenerate',
        'kadr_voice_speak', 'kadr_voice_verdict']),

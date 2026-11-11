@@ -3,6 +3,8 @@
 import { useState } from 'react'
 import { useEditor } from '@/state/store'
 import { runChecks, useChecksUi, CHECK_LIMITS, type CheckIssue } from '@/engine/checks'
+import { useCriticUi } from '@/engine/critic'
+import { fmtTime, type CriticChain } from '@shared/critic'
 import { useT } from '@/i18n'
 import { Icon, Spinner } from './icons'
 import { Modal } from './Modal'
@@ -99,6 +101,73 @@ export function ChecksDialog() {
       {error && (
         <div className="tr-error"><Icon name="alert" size={15} /><span>{error}</span></div>
       )}
+      <CriticSection />
     </Modal>
+  )
+}
+
+/** shown at most: the latest reviews of the open project */
+const CRITIC_SHOWN = 10
+
+/**
+ * What the critic subagent found (electron/agents/kadr-critic.md), read from
+ * main's ledger — the latest reviews of the open project, newest first; a click
+ * on a defect puts the playhead there. Nothing here starts or changes a review.
+ */
+function CriticSection() {
+  const t = useT()
+  const all = useCriticUi((s) => s.chains)
+  const projectPath = useEditor((s) => s.projectPath)
+  const chains = all.filter((c) => c.projectPath === projectPath).slice(-CRITIC_SHOWN).reverse()
+  if (!chains.length) return null
+
+  const status = (c: CriticChain) => {
+    const n = String(c.defects.length)
+    if (c.state === 'reviewing') return t('criticReviewing')
+    if (c.state === 'verifying') return t('criticVerifying')
+    if (c.state === 'awaiting-verify') return t('criticAwaiting').replace('{n}', n)
+    if (c.closedBy === 'verified') {
+      return t('criticVerified').replace('{fixed}', String(c.defects.filter((d) => d.status === 'fixed').length)).replace('{n}', n)
+    }
+    if (c.closedBy === 'user') return t('criticUser')
+    if (c.closedBy === 'abandoned') return t('criticAbandoned')
+    return t('criticOk')
+  }
+  const dstatus = { open: t('criticOpen'), fixed: t('criticFixed'), 'not-fixed': t('criticNotFixed'), unclear: t('criticUnclear') }
+  const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+  return (
+    <section className="critic">
+      <h3 className="critic-title"><Icon name="eye" size={15} /> {t('criticTitle')}</h3>
+      <div className="dim">{t('criticHint')}</div>
+      {chains.map((c) => {
+        const notes = c.rounds.filter((r) => r.note).map((r) => r.note!)
+        return (
+          <div key={c.id} className="critic-chain" data-critic={c.id}>
+            <div className="critic-head">
+              <span className="critic-span">{fmtTime(c.from)}–{fmtTime(c.to)}</span>
+              <span className="dim">{status(c)} · {clock(c.createdAt)}</span>
+            </div>
+            {c.defects.length > 0 && (
+              <ul className="checks-list">
+                {c.defects.map((d) => (
+                  <li key={d.id} className={d.status === 'fixed' ? 'info' : 'warn'}>
+                    <button onClick={() => useEditor.getState().setPlayhead(Math.max(0, d.t))} title={t('checksGo')}>
+                      <Icon name={d.status === 'fixed' ? 'check' : 'alert'} size={13} />
+                      <span>
+                        {fmtTime(d.t)} · {d.severity === 'high' ? t('criticHigh') : t('criticMedium')} · {dstatus[d.status]} — {d.what}
+                        <span className="critic-fix">{t('criticFix')}: {d.fix}{d.verifyNote ? ` · ${d.verifyNote}` : ''}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {notes.map((n, i) => <div key={i} className="dim">{t('criticNote')}: {n}</div>)}
+            {c.report && <div className="dim critic-report">{t('criticReport')}: {c.report}</div>}
+          </div>
+        )
+      })}
+    </section>
   )
 }

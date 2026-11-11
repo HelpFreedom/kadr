@@ -20,6 +20,7 @@ import { reverseClip } from './engine/reverse'
 import { importFiles, wireDropDiagnostics } from './engine/mediaImport'
 import { snapshotFrame, contactSheet } from './engine/snapshot'
 import { runChecks, readingTime, cameraJerks, CHECK_LIMITS, useChecksUi } from './engine/checks'
+import { criticContext, criticPlan, useCriticUi, initCriticUi } from './engine/critic'
 import { importModels, refreshModels, insertModelFragment, modelFragmentTsx, useModelsUi, wireModels, prepareForFragment } from './engine/models'
 import { useFragmentParams, setParam, resetParams, flushParamSaves } from './engine/fragmentParams'
 import { useOnion, setOnion, toggleOnion, wireOnion } from './engine/onion'
@@ -50,6 +51,7 @@ wireAutosave()
 wireDropDiagnostics()
 wireModels()
 wireOnion()
+initCriticUi()
 
 // Tell main which GPU WebGL really runs on (electron/gpu.ts falls back to the
 // default one when the discrete GPU was asked for and this says otherwise).
@@ -75,6 +77,8 @@ wireOnion()
   createFragment, ensureFragmentServer, deleteFragment, fragmentNeedsCapture, autoCaptions, captionsTsx, autosaveNow, activity,
   reverseClip, importFiles, snapshotFrame, contactSheet, normalizeClip, syncProjectFragments,
   runChecks, readingTime, cameraJerks, CHECK_LIMITS, useChecksUi,
+  // the critic subagent's frames and context (kadr_review_*; the ledger lives in main)
+  criticContext, criticPlan, useCriticUi,
   importModels, refreshModels, insertModelFragment, modelFragmentTsx, useModelsUi, prepareForFragment,
   useFragmentParams, setParam, resetParams, flushParamSaves, useOnion, setOnion, toggleOnion,
   audioStats, silencePreview, previewPoolStats,

@@ -64,10 +64,12 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
     const up = () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
       localStorage.setItem(RECT_KEY, JSON.stringify(last))
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up) // ends like pointerup: no pointerup follows a cancel
   }
 
   const startMove = (e: React.PointerEvent) => {

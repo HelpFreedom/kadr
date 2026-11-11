@@ -1,7 +1,8 @@
 // Pure timeline maths, kept apart from the component so it can be checked in
 // plain node (scripts/check-timeline.mjs): the waveform's per-pixel peaks and
-// the overlap zones of a track. Both were rewritten for speed on a 1124-clip,
-// 19-minute project, and both must give EXACTLY what the old, slow code gave.
+// the overlap zones of a track — both rewritten for speed on a 1124-clip,
+// 19-minute project, and both must give EXACTLY what the old, slow code gave —
+// and how long a clip's edge tips really run.
 import type { Clip } from '@shared/types'
 
 /** A waveform as the timeline draws it: peak and RMS bins (0..255) at `rate` per second. */
@@ -119,4 +120,28 @@ export function trackOverlaps(clips: Clip[]) {
     groupEnd = Math.max(groupEnd, b.start + b.duration)
   }
   return { zones, joints }
+}
+
+/**
+ * How long a clip's edge ("tip") effects really run. A tip keeps the length
+ * it was given (0.3, 0.5 or 1 s from the menu) even on a clip shorter than
+ * that, and a beat edit is full of 0.3 s clips: with tips on both ends the in
+ * tip had priority, so the out tip started partway through its move — a jump
+ * — and a lone tip longer than its clip never finished; the strips on the
+ * timeline ran past the clip (HelpFreedom/kadr#28). When both together are
+ * longer than the clip they share it in proportion, meeting exactly; a tip
+ * that fits keeps its length to the bit, so a project whose tips fit draws
+ * what it always drew. The stored lengths are untouched: lengthen the clip
+ * and the tips play whole again. Same threshold as edgeAt (> 1 ms is a tip;
+ * a transitionIn of length 0 is an overlap blend, not a tip).
+ */
+export function tipSpans(clip: Pick<Clip, 'duration' | 'transitionIn' | 'transitionOut'>): { tin: number; tout: number } {
+  const tin = clip.transitionIn && clip.transitionIn.duration > 0.001 ? clip.transitionIn.duration : 0
+  const tout = clip.transitionOut && clip.transitionOut.duration > 0.001 ? clip.transitionOut.duration : 0
+  const room = Math.max(0, clip.duration)
+  if (tin + tout <= room) return { tin, tout }
+  const k = room / (tin + tout)
+  const a = tin * k
+  // the out tip takes exactly the rest, so the two meet with no gap or overlap
+  return { tin: a, tout: tout > 0 ? room - a : 0 }
 }

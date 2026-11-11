@@ -12,9 +12,19 @@
 //   * then a FULL render is put on disk and the export repeated: the full
 //     render is taken first (old caches stay valid) and the pixels are the same.
 // Same refuse-over-an-open-project rule as e2e44 (KADR_E2E_FORCE=1).
-import { rmSync, mkdirSync, writeFileSync } from 'fs'
+import { rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { execFileSync } from 'child_process'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
+import { transformSync } from 'esbuild'
 import WebSocket from 'ws'
+
+// "every decoded frame as it is": -fps_mode on ffmpeg ≥ 5.1, -vsync before —
+// ffmpeg 9 has no -vsync (shared/ffmpegFlags.ts, tested by check-ffmpegflags)
+const flagsJs = transformSync(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'shared', 'ffmpegFlags.ts'), 'utf8'),
+  { loader: 'ts', format: 'esm' }).code
+const { passthroughFrameArgs } = await import('data:text/javascript;base64,' + Buffer.from(flagsJs).toString('base64'))
+const PASSTHROUGH = passthroughFrameArgs(execFileSync('ffmpeg', ['-hide_banner', '-version'], { encoding: 'utf8' }))
 
 const PORT = process.env.KADR_CDP_PORT || 9777
 const DIR = '/tmp/kadr-e2e52'
@@ -116,7 +126,7 @@ function decode(file) {
   // files, and read 84/220 as 78/238 on a correct export. Only the OUTER
   // quarters are read: averaged over a whole half, the codec's blur of a
   // bright neighbour across the seam lifted a dark half by half a step.
-  const raw = execFileSync('ffmpeg', ['-v', 'error', '-i', file, '-vsync', 'passthrough', '-vf', 'scale=4:1:flags=area', '-pix_fmt', 'yuv420p', '-f', 'rawvideo', '-'], { maxBuffer: 1 << 26 })
+  const raw = execFileSync('ffmpeg', ['-v', 'error', '-i', file, ...PASSTHROUGH, '-vf', 'scale=4:1:flags=area', '-pix_fmt', 'yuv420p', '-f', 'rawvideo', '-'], { maxBuffer: 1 << 26 })
   const level = (y) => Math.round(((y - 16) * 255 / 219 - 4) / 8)
   const out = []
   for (let i = 0; i + 7 < raw.length; i += 8) out.push(level(raw[i + 3]) * 30 + level(raw[i]))

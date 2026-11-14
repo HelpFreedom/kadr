@@ -1326,6 +1326,8 @@ export interface KadrApi {
   claudeInput(data: string): void
   claudeResize(cols: number, rows: number): void
   claudeClose(): Promise<void>
+  /** True while the app-owned MCP bridge listens — not a client count. */
+  mcpStatus(): Promise<boolean>
   onClaudeData(cb: (data: string) => void): () => void
   onClaudeExit(cb: (code: number) => void): () => void
 

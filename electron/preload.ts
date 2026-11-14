@@ -254,6 +254,7 @@ const api: KadrApi = {
   claudeInput: (data) => ipcRenderer.send('claude:input', data),
   claudeResize: (cols, rows) => ipcRenderer.send('claude:resize', cols, rows),
   claudeClose: () => ipcRenderer.invoke('claude:close'),
+  mcpStatus: () => ipcRenderer.invoke('claude:mcp-status'),
   onClaudeData: (cb) => {
     const handler = (_e: unknown, data: string) => cb(data)
     ipcRenderer.on('claude:data', handler)

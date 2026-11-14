@@ -121,6 +121,17 @@ export default function App() {
     Math.min(Number(localStorage.getItem('kadr.tlh')) || 330, window.innerHeight - 220)
   )
   const [claudeOpen, setClaudeOpen] = useState(false)
+  // listener-ready state of the app-owned MCP bridge (null until the first
+  // answer — not "connected", there is no client count in the status)
+  const [mcpUp, setMcpUp] = useState<boolean | null>(null)
+  useEffect(() => {
+    let stop = false
+    const poll = () =>
+      window.kadr.mcpStatus().then((v) => { if (!stop) setMcpUp(v) }).catch(() => { if (!stop) setMcpUp(false) })
+    poll()
+    const id = setInterval(poll, 3000)
+    return () => { stop = true; clearInterval(id) }
+  }, [])
   const [debugOpen, setDebugOpen] = useState(false)
   const [storageOpen, setStorageOpen] = useState(false)
   const popWin = usePopout((s) => s.win)
@@ -353,6 +364,15 @@ export default function App() {
         >
           <Icon name="bot" /> Claude
         </button>
+        <span
+          className={`mcp-dot${mcpUp === false ? '' : mcpUp ? ' up' : ' wait'}`}
+          data-act="mcp-status"
+          role="status"
+          aria-label={mcpUp ? t('mcpReady') : t('mcpDown')}
+          title={mcpUp ? t('mcpReady') : t('mcpDown')}
+        >
+          ● MCP
+        </span>
         <LangSwitch />
       </div>
       <div className="main-row">

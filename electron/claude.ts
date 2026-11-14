@@ -1,15 +1,16 @@
 // Embedded Claude Code session: a PTY running the user's `claude` CLI inside
 // the editor's terminal panel, wired to the live project through a local
-// HTTP bridge (main ⇄ renderer eval) that the MCP stdio server
-// (mcp-bridge.cjs, spawned by claude itself) talks to.
+// HTTP bridge (main ⇄ renderer eval, electron/bridge.ts) that the MCP stdio
+// server (mcp-bridge.cjs, spawned by claude itself) talks to. The bridge is
+// owned by the EDITOR — it starts with the app, not with this panel — so it
+// stays up when the terminal closes and dies only with the app.
 import { app, BrowserWindow, ipcMain } from 'electron'
-import { createServer, type Server } from 'http'
-import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import type { IPty } from 'node-pty'
 import { criticOp, criticTurn, criticNewSession, registerCriticIpc } from './critic'
+import { startBridge, bridgeListening, evalInPage, type Bridge } from './bridge'
 import { syncSkills } from './skillSync'
 
 // The session inherits this process's environment MINUS the markers of any
@@ -46,8 +47,92 @@ const SYSTEM_HINT =
 
 interface Session {
   pty: IPty
-  server: Server
   port: number
+}
+
+/**
+ * The bridge is owned by the EDITOR, not by the Claude terminal: it starts
+ * with the app (registerClaudeIpc), the generated kadr-mcp.json points every
+ * claude session at it, and closing the panel must not close it. App shutdown
+ * closes it (before-quit in registerClaudeIpc).
+ */
+let appBridge: Bridge | null = null
+/**
+ * Shared in-flight startup: concurrent callers (app launch + first
+ * claude:open) must reuse one start attempt, not race two servers onto the
+ * published slot. Cleared once the attempt settles.
+ */
+let bridgeStarting: Promise<Bridge> | null = null
+
+/**
+ * Per-bridge MCP config, written at startup: claude merges it with the user's
+ * own servers. Extra MCP servers for the embedded session only (media search,
+ * etc.) come from userData/claude-mcp.json: { "mcpServers": { name: { command,
+ * args, env } } } — sessions outside the editor are unaffected ("kadr" itself
+ * wins on a name clash).
+ */
+async function writeMcpConfig(bridge: Bridge): Promise<void> {
+  let extraServers: Record<string, unknown> = {}
+  try {
+    const raw = await fs.readFile(join(app.getPath('userData'), 'claude-mcp.json'), 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed.mcpServers === 'object') extraServers = parsed.mcpServers
+  } catch { /* optional file */ }
+  await fs.writeFile(
+    join(app.getPath('userData'), 'kadr-mcp.json'),
+    JSON.stringify({
+      mcpServers: {
+        ...extraServers,
+        kadr: {
+          command: 'node',
+          args: [
+            join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'),
+            String(bridge.port),
+            bridge.token
+          ]
+        }
+      }
+    }, null, 1)
+  )
+}
+
+/**
+ * Start the bridge once for the whole app (idempotent). The port and token
+ * never reach the log — the token is a capability for arbitrary page JS.
+ */
+export async function ensureBridge(
+  getWin: () => BrowserWindow | null
+): Promise<Bridge> {
+  if (bridgeListening(appBridge)) return appBridge as Bridge
+  if (bridgeStarting) return bridgeStarting
+  bridgeStarting = (async () => {
+    const bridge = await startBridge({
+      '/eval': (b) => {
+        const win = getWin()
+        if (!win) throw new Error('no window')
+        return evalInPage(win, String(b.code))
+      },
+      '/critic': async (b) => JSON.stringify({ ok: await criticOp(b) }),
+      '/turn': async (b) => JSON.stringify({ ok: criticTurn(b) })
+    })
+    console.log(`[claude] MCP bridge listening on 127.0.0.1:${bridge.port}`)
+    // publish only once the MCP config is on disk: until kadr-mcp.json is
+    // written, sessions would spawn without the kadr server, so a failed
+    // write must not leave a "listening" indicator behind
+    try {
+      await writeMcpConfig(bridge)
+    } catch (err) {
+      bridge.server.close()
+      throw err
+    }
+    appBridge = bridge
+    return bridge
+  })()
+  try {
+    return await bridgeStarting
+  } finally {
+    bridgeStarting = null
+  }
 }
 
 let session: Session | null = null
@@ -127,82 +212,20 @@ export async function sweepStaleSessions(): Promise<number> {
   return killed
 }
 
-/** JS evaluated in the page (async function body) → JSON result. */
-async function evalInPage(win: BrowserWindow, code: string): Promise<string> {
-  const wrapped = `(async () => {
-    try {
-      const r = await (async () => { ${code}\n })()
-      return JSON.stringify({ ok: r === undefined ? null : r })
-    } catch (e) {
-      return JSON.stringify({ error: String((e && (e.stack || e.message)) || e) })
-    }
-  })()`
-  return win.webContents.executeJavaScript(wrapped, true)
-}
 
-/**
- * Local bridge: POST /eval {code} from mcp-bridge.cjs into the renderer.
- *
- * /eval is arbitrary JS in the page, and the page holds window.kadr (file
- * writes, pty spawn) — so the socket needs a door, not just an address.
- * Anything running on this machine can reach 127.0.0.1, and a WEB PAGE can
- * too: a fetch() with a simple content type is sent cross-origin without the
- * browser asking permission first, and the reply being unreadable does not
- * stop the code from running. A fragment previewed from the workspace vite
- * server is such a page. Two cheap locks close that:
- *   • a per-session secret in a custom header — a custom header forces the
- *     browser to ask permission first (preflight), which this server answers
- *     with 404, so a page cannot even send the request;
- *   • rejecting anything that carries an Origin at all — only browsers set
- *     it, and the only legitimate client here is a node process.
- * The health check (GET /) stays open: mcp-bridge only needs *a* reply.
- * Behind the same two locks: POST /critic (the critic's ledger, from the
- * kadr_review_* tools) and POST /turn (the UserPromptSubmit hook).
- */
-function startBridge(
-  win: BrowserWindow
-): Promise<{ server: Server; port: number; token: string }> {
-  const token = randomBytes(24).toString('hex')
-  const routes: Record<string, (body: Record<string, unknown>) => Promise<string>> = {
-    '/eval': (b) => evalInPage(win, String(b.code)),
-    '/critic': async (b) => JSON.stringify({ ok: await criticOp(b) }),
-    '/turn': async (b) => JSON.stringify({ ok: criticTurn(b) })
-  }
-  return new Promise((resolve, reject) => {
-    const server = createServer((req, res) => {
-      const route = req.method === 'POST' ? routes[req.url ?? ''] : undefined
-      if (!route) {
-        res.writeHead(404).end()
-        return
-      }
-      if (req.headers.origin !== undefined || req.headers['x-kadr-token'] !== token) {
-        res.writeHead(403).end()
-        return
-      }
-      let body = ''
-      req.on('data', (c) => { body += c })
-      req.on('end', async () => {
-        try {
-          const out = await route(JSON.parse(body))
-          res.writeHead(200, { 'Content-Type': 'application/json' }).end(out)
-        } catch (err) {
-          res
-            .writeHead(200, { 'Content-Type': 'application/json' })
-            .end(JSON.stringify({ error: String(err) }))
-        }
-      })
-    })
-    server.on('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address()
-      if (addr && typeof addr === 'object') resolve({ server, port: addr.port, token })
-      else reject(new Error('bridge listen failed'))
-    })
-  })
-}
+const WIN = process.platform === 'win32'
 
 function which(cmd: string): Promise<string | null> {
   return new Promise((resolve) => {
+    if (WIN) {
+      // `where` lists every match; an npm install puts an extensionless sh
+      // script next to claude.cmd — only .exe/.cmd/.bat are startable here
+      execFile('where.exe', [cmd], (err, stdout) => {
+        const hits = err ? [] : stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+        resolve(hits.find((h) => /\.exe$/i.test(h)) ?? hits.find((h) => /\.(cmd|bat)$/i.test(h)) ?? null)
+      })
+      return
+    }
     // the name goes in as $1, never into the script: a command from
     // claude-env.json with a space or a quote in it must not become shell
     execFile('/bin/sh', ['-c', 'command -v "$1"', 'sh', cmd], (err, stdout) => {
@@ -293,7 +316,8 @@ async function loadAgents(): Promise<Record<string, AgentDef>> {
   try { files = (await fs.readdir(dir)).filter((f) => f.endsWith('.md')).sort() } catch { return out }
   for (const file of files) {
     try {
-      const src = await fs.readFile(join(dir, file), 'utf8')
+      // CRLF on a Windows checkout (core.autocrlf): the match below needs LF
+      const src = (await fs.readFile(join(dir, file), 'utf8')).replace(/\r\n/g, '\n')
       const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(src)
       if (!m) throw new Error('no front matter')
       const fm: Record<string, string> = {}
@@ -325,7 +349,9 @@ function sessionSettings(port: number, token: string): string {
   return JSON.stringify({
     hooks: {
       UserPromptSubmit: [{
-        hooks: [{ type: 'command', command: `node ${shQuote(hook)} ${port} ${token}`, timeout: 5 }]
+        // Windows: the hook may run in Git Bash, cmd or PowerShell — a
+        // double-quoted forward-slash path reads the same in all three
+        hooks: [{ type: 'command', command: `node ${WIN ? `"${hook.replace(/\\/g, '/')}"` : shQuote(hook)} ${port} ${token}`, timeout: 5 }]
       }]
     }
   })
@@ -342,37 +368,14 @@ async function spawnSession(
   const cmdName = process.env.KADR_CLAUDE_CMD || cfg.command || 'claude'
   const bin = (await which(cmdName)) ?? cmdName
 
-  let bridge: { server: Server; port: number; token: string }
+  let bridge: Bridge
   try {
-    bridge = await startBridge(win)
+    bridge = await ensureBridge(() => win)
   } catch (err) {
     return { ok: false, error: `bridge: ${String(err)}` }
   }
 
-  // per-session MCP config: claude merges it with the user's own servers
-  let extraServers: Record<string, unknown> = {}
-  try {
-    const raw = await fs.readFile(join(app.getPath('userData'), 'claude-mcp.json'), 'utf8')
-    const parsed = JSON.parse(raw)
-    if (parsed && typeof parsed.mcpServers === 'object') extraServers = parsed.mcpServers
-  } catch { /* optional file */ }
   const mcpCfgPath = join(app.getPath('userData'), 'kadr-mcp.json')
-  await fs.writeFile(
-    mcpCfgPath,
-    JSON.stringify({
-      mcpServers: {
-        ...extraServers,
-        kadr: {
-          command: 'node',
-          args: [
-            join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'),
-            String(bridge.port),
-            bridge.token
-          ]
-        }
-      }
-    }, null, 1)
-  )
 
   // the critic's limits count per session: whatever the last one left open is over
   criticNewSession()
@@ -399,7 +402,16 @@ async function spawnSession(
     const wrapper =
       `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
       `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
-    const p = pty.spawn('/bin/sh', ['-c', wrapper, bin, ...args], {
+    // Windows has no bash for the watchdog — and needs none: the session runs
+    // in a ConPTY, and closing it (our handles die with us) ends every process
+    // attached to that console; pty.kill() does the same on a close. A .cmd
+    // shim (npm install of claude) only starts through cmd.exe.
+    const [file, argv] = !WIN
+      ? ['/bin/sh', ['-c', wrapper, bin, ...args]]
+      : /\.(cmd|bat)$/i.test(bin)
+        ? ['cmd.exe', ['/d', '/c', bin, ...args]]
+        : [bin, args]
+    const p = pty.spawn(file, argv, {
       name: 'xterm-256color',
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
@@ -408,7 +420,7 @@ async function spawnSession(
     })
     // publish BEFORE wiring the handlers: data emitted between spawn and the
     // assignment would otherwise be dropped by the identity guard below
-    const mine: Session = { pty: p, server: bridge.server, port: bridge.port }
+    const mine: Session = { pty: p, port: bridge.port }
     session = mine
     // both handlers are keyed to THIS session: a pty that outlived its panel
     // (a kill that lost a race, say) must never paint into the live terminal
@@ -420,13 +432,13 @@ async function spawnSession(
       // (panel toggle, StrictMode remount) drop `session` before killing
       if (session === mine) {
         win.webContents.send('claude:exit', exitCode)
-        mine.server.close()
         session = null
+        // the bridge is NOT closed here: it belongs to the editor, and the
+        // next session (or an outside claude using kadr-mcp.json) reuses it
       }
     })
     return { ok: true, port: bridge.port }
   } catch (err) {
-    bridge.server.close()
     return { ok: false, error: String(err) }
   }
 }
@@ -438,11 +450,15 @@ function killSession() {
   // HUP the whole process group (claude + its MCP server children), then
   // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
   const pid = s.pty.pid
+  if (WIN) {
+    // no process groups: node-pty kills every process on the ConPTY console
+    try { s.pty.kill() } catch { /* dead */ }
+    return
+  }
   try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
   setTimeout(() => {
     try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
   }, 1500)
-  s.server.close()
 }
 
 /**
@@ -514,6 +530,11 @@ export function registerClaudeIpc(getWin: () => BrowserWindow | null) {
   void sweepStaleSessions() // leftovers from a hard-killed previous run
   void syncSkill()
   registerCriticIpc(getWin)
+  // the bridge starts with the editor, before any terminal exists, so the
+  // "● MCP" indicator and kadr-mcp.json are meaningful from launch on
+  void ensureBridge(getWin).catch((err) =>
+    console.warn('[claude] MCP bridge failed to start:', err))
+  ipcMain.handle('claude:mcp-status', () => bridgeListening(appBridge))
   ipcMain.handle('claude:open', (_e, cols: number, rows: number, cwd: string | null) => {
     const win = getWin()
     if (!win) return { ok: false, error: 'no window' }
@@ -524,5 +545,13 @@ export function registerClaudeIpc(getWin: () => BrowserWindow | null) {
     try { session?.pty.resize(Math.max(20, cols), Math.max(5, rows)) } catch { /* dying */ }
   })
   ipcMain.handle('claude:close', () => closeSession())
-  app.on('before-quit', closeSession)
+  app.on('before-quit', () => {
+    closeSession()
+    // last one out closes the bridge: shutdown-owned, terminal-independent
+    if (appBridge) {
+      const s = appBridge.server
+      appBridge = null
+      s.close()
+    }
+  })
 }

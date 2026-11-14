@@ -83,6 +83,47 @@ async function netEnv(): Promise<Record<string, string>> {
   }
 }
 
+// ------------------------------------------------------------ Windows spawns
+
+const WIN = process.platform === 'win32'
+
+/**
+ * A workspace package's CLI as [command, args] for spawn(). Windows has no
+ * executable `.bin` shims — only `.cmd` files, which spawn() refuses to start
+ * without a shell (EINVAL/ENOENT), and a shell would split paths with spaces.
+ * The package's own bin script runs under node instead.
+ */
+function wsBin(pkg: string, bin: string): [string, string[]] {
+  if (!WIN) return [join(WORKSPACE, 'node_modules', '.bin', bin), []]
+  const dir = join(WORKSPACE, 'node_modules', pkg)
+  const meta = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  const rel = typeof meta.bin === 'string' ? meta.bin : meta.bin[bin]
+  return ['node', [join(dir, rel)]]
+}
+
+/** taskkill the whole tree — child.kill() on Windows ends only the top process */
+function killTree(child: ChildProcess | null | undefined) {
+  if (!child?.pid) return
+  if (WIN) {
+    try { execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }) } catch { /* already gone */ }
+  } else child.kill()
+}
+
+// The Windows counterpart of the sh watchdog in startServer: runs the command
+// under node and kills its tree once the given parent pid is gone.
+const WIN_WATCHDOG = [
+  "const { spawn, execFileSync } = require('child_process')",
+  'const [ppid, cmd, ...args] = process.argv.slice(1)',
+  "const v = spawn(cmd, args, { stdio: 'inherit' })",
+  "v.on('exit', (c) => process.exit(c ?? 1))",
+  'setInterval(() => {',
+  '  try { process.kill(Number(ppid), 0) } catch {',
+  "    try { execFileSync('taskkill', ['/pid', String(v.pid), '/T', '/F'], { stdio: 'ignore' }) } catch {}",
+  '    process.exit(0)',
+  '  }',
+  '}, 3000)'
+].join('\n')
+
 // ------------------------------------------------------------- scaffolding
 
 // What the workspace needs. Old workspaces are brought up to this list in
@@ -355,7 +396,9 @@ async function ensureWorkspace(
       const child = spawn('npm', ['install', '--no-audit', '--no-fund'], {
         cwd: WORKSPACE,
         env: { ...process.env, ...extraEnv },
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // npm is npm.cmd on Windows; the arguments are fixed, nothing to quote
+        shell: WIN
       })
       let err = ''
       child.stderr.on('data', (c) => { err += c })
@@ -438,11 +481,19 @@ async function startServer(): Promise<{ url: string }> {
   // inherit Electron's listening sockets and would block the next launch.
   // The bin runs directly (NOT via npx — npx makes vite a grandchild the
   // watchdog's kill couldn't reach).
-  const child = spawn('sh', ['-c',
-    `"./node_modules/.bin/vite" --port ${VITE_PORT} --strictPort & V=$!; ` +
-    `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; kill $V 2>/dev/null) & ` +
-    'wait $V'
-  ], {
+  const [viteCmd, viteArgs] = wsBin('vite', 'vite')
+  const child = WIN
+    ? spawn('node', ['-e', WIN_WATCHDOG, String(process.pid), viteCmd,
+      ...viteArgs, '--port', String(VITE_PORT), '--strictPort'], {
+      cwd: WORKSPACE,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    : spawn('sh', ['-c',
+      `"./node_modules/.bin/vite" --port ${VITE_PORT} --strictPort & V=$!; ` +
+      `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; kill $V 2>/dev/null) & ` +
+      'wait $V'
+    ], {
     cwd: WORKSPACE,
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -479,7 +530,7 @@ async function startServer(): Promise<{ url: string }> {
 }
 
 function stopServer() {
-  server?.child?.kill()
+  killTree(server?.child)
   server = null
 }
 
@@ -935,7 +986,8 @@ async function renderFragment(
         // remotion runs chrome AND its own ffmpeg under this; a cancel kills
         // the whole tree (cancelFragmentRenders) — killing only npx once left
         // that ffmpeg encoding for minutes as an orphan nobody could reach
-        const child = spawn('npx', args, {
+        const [cmd, pre] = WIN ? wsBin('@remotion/cli', 'remotion') : ['npx', []]
+        const child = spawn(cmd, [...pre, ...(WIN ? args.slice(1) : args)], {
           cwd: WORKSPACE,
           env: { ...process.env, ...extraEnv },
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -1087,7 +1139,8 @@ async function typecheckFragment(id: string): Promise<{ ok: boolean; errors: Fra
   await fs.writeFile(join(WORKSPACE, cfgName), JSON.stringify(cfg, null, 2))
   try {
     const out = await new Promise<string>((resolve) => {
-      const child = spawn(join(WORKSPACE, 'node_modules', '.bin', 'tsc'), ['-p', cfgName, '--pretty', 'false'], {
+      const [tsc, pre] = wsBin('typescript', 'tsc')
+      const child = spawn(tsc, [...pre, '-p', cfgName, '--pretty', 'false'], {
         cwd: WORKSPACE, stdio: ['ignore', 'pipe', 'pipe']
       })
       let text = ''
@@ -1098,7 +1151,8 @@ async function typecheckFragment(id: string): Promise<{ ok: boolean; errors: Fra
     })
     const mine = [`src/fragments/${id}/`, 'src/_kadr/', ...(key ? [`src/_projects/${key}/`] : [])]
     const errors: FragmentTypeError[] = []
-    for (const line of out.split('\n')) {
+    // CRLF on Windows: '.' stops at \r and the whole line would never match
+    for (const line of out.split(/\r?\n/)) {
       const m = line.match(/^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/)
       if (!m || !mine.some((p) => m[1].startsWith(p))) continue
       errors.push({ file: m[1], line: Number(m[2]), col: Number(m[3]), code: m[4], message: m[5] })

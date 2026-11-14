@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import type { KadrApi, ExportProgress, CriticView } from '@shared/types'
 import { rawEncodeArgs } from '@shared/rawEncode'
 import { exportTempPath } from '@shared/exportTemp'
+import { hasNvenc } from './nvenc'
 
 // Direct export encoder: ffmpeg is spawned HERE, in the renderer process
 // (sandbox is off), so raw frames go straight from JS memory into its stdin
@@ -35,7 +36,8 @@ const api: KadrApi = {
       try { accessSync(dir, fsConstants.W_OK); return true } catch { return false }
     })
     rawEncOut = out
-    const child = spawn(process.env.KADR_FFMPEG || 'ffmpeg', rawEncodeArgs({ ...o, out }), {
+    const bin = process.env.KADR_FFMPEG || 'ffmpeg'
+    const child = spawn(bin, rawEncodeArgs({ ...o, out, nvenc: hasNvenc(bin) }), {
       stdio: ['pipe', 'ignore', 'pipe']
     })
     rawEnc = child

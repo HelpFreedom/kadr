@@ -38,7 +38,8 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ' — ' + detail : ''}`)
   if (!ok) fails++
 }
-const read = (p) => readFileSync(p, 'utf8')
+// CRLF on a Windows checkout (core.autocrlf): the checks below match on \n
+const read = (p) => readFileSync(p, 'utf8').replace(/\r\n/g, '\n')
 const walk = (d) => readdirSync(d).flatMap((n) => {
   const p = join(d, n)
   return statSync(p).isDirectory() ? walk(p) : [p]

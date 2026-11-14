@@ -14,7 +14,15 @@ export interface RawEncodeOpts {
   codec: string
   bitrate: number
   out: string
+  /** encode H.264 on the GPU (h264_nvenc) instead of libx264 — the caller
+      decides, after a test encode (electron/nvenc.ts) */
+  nvenc?: boolean
 }
+
+// h264_nvenc at the quality of x264 'faster' / 'fast': measured SSIM equal
+// to x264 at the same bitrate on 1080p25 talk footage
+export const NVENC_H264 = ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq',
+  '-rc', 'vbr', '-spatial-aq', '1', '-bf', '3']
 
 export function rawEncodeArgs(o: RawEncodeOpts): string[] {
   const b = Math.max(1_000_000, o.bitrate || 10_000_000)
@@ -33,7 +41,7 @@ export function rawEncodeArgs(o: RawEncodeOpts): string[] {
     '-i', 'pipe:0',
     '-vf', vf,
     ...(o.codec === 'libx264'
-      ? ['-c:v', 'libx264', '-preset', 'faster',
+      ? [...(o.nvenc ? NVENC_H264 : ['-c:v', 'libx264', '-preset', 'faster']),
          '-b:v', String(b), '-maxrate', String(Math.round(b * 1.6)), '-bufsize', String(b * 3)]
       : ['-c:v', o.codec, '-b:v', String(b),
          ...(o.codec === 'libvpx-vp9' ? ['-row-mt', '1', '-cpu-used', '4'] : [])]),

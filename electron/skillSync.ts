@@ -42,9 +42,10 @@ async function filesUnder(dir: string): Promise<string[]> {
   return out.sort()
 }
 
-/** the `name:` of a SKILL.md's front matter */
+/** the `name:` of a SKILL.md's front matter (a Windows checkout with
+    core.autocrlf has CRLF — `^---\n` never matched and no skill installed) */
 export function skillName(src: string): string | null {
-  return /^---\n[\s\S]*?^name:\s*([a-z0-9-]+)\s*$/m.exec(src)?.[1] ?? null
+  return /^---\r?\n[\s\S]*?^name:\s*([a-z0-9-]+)\s*$/m.exec(src)?.[1] ?? null
 }
 
 export async function syncSkills(srcDir: string, root: string): Promise<SkillSyncReport> {

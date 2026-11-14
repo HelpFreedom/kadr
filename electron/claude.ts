@@ -201,8 +201,19 @@ function startBridge(
   })
 }
 
+const WIN = process.platform === 'win32'
+
 function which(cmd: string): Promise<string | null> {
   return new Promise((resolve) => {
+    if (WIN) {
+      // `where` lists every match; an npm install puts an extensionless sh
+      // script next to claude.cmd — only .exe/.cmd/.bat are startable here
+      execFile('where.exe', [cmd], (err, stdout) => {
+        const hits = err ? [] : stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+        resolve(hits.find((h) => /\.exe$/i.test(h)) ?? hits.find((h) => /\.(cmd|bat)$/i.test(h)) ?? null)
+      })
+      return
+    }
     // the name goes in as $1, never into the script: a command from
     // claude-env.json with a space or a quote in it must not become shell
     execFile('/bin/sh', ['-c', 'command -v "$1"', 'sh', cmd], (err, stdout) => {
@@ -293,7 +304,8 @@ async function loadAgents(): Promise<Record<string, AgentDef>> {
   try { files = (await fs.readdir(dir)).filter((f) => f.endsWith('.md')).sort() } catch { return out }
   for (const file of files) {
     try {
-      const src = await fs.readFile(join(dir, file), 'utf8')
+      // CRLF on a Windows checkout (core.autocrlf): the match below needs LF
+      const src = (await fs.readFile(join(dir, file), 'utf8')).replace(/\r\n/g, '\n')
       const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(src)
       if (!m) throw new Error('no front matter')
       const fm: Record<string, string> = {}
@@ -325,7 +337,9 @@ function sessionSettings(port: number, token: string): string {
   return JSON.stringify({
     hooks: {
       UserPromptSubmit: [{
-        hooks: [{ type: 'command', command: `node ${shQuote(hook)} ${port} ${token}`, timeout: 5 }]
+        // Windows: the hook may run in Git Bash, cmd or PowerShell — a
+        // double-quoted forward-slash path reads the same in all three
+        hooks: [{ type: 'command', command: `node ${WIN ? `"${hook.replace(/\\/g, '/')}"` : shQuote(hook)} ${port} ${token}`, timeout: 5 }]
       }]
     }
   })
@@ -399,7 +413,16 @@ async function spawnSession(
     const wrapper =
       `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
       `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
-    const p = pty.spawn('/bin/sh', ['-c', wrapper, bin, ...args], {
+    // Windows has no bash for the watchdog — and needs none: the session runs
+    // in a ConPTY, and closing it (our handles die with us) ends every process
+    // attached to that console; pty.kill() does the same on a close. A .cmd
+    // shim (npm install of claude) only starts through cmd.exe.
+    const [file, argv] = !WIN
+      ? ['/bin/sh', ['-c', wrapper, bin, ...args]]
+      : /\.(cmd|bat)$/i.test(bin)
+        ? ['cmd.exe', ['/d', '/c', bin, ...args]]
+        : [bin, args]
+    const p = pty.spawn(file, argv, {
       name: 'xterm-256color',
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
@@ -438,6 +461,12 @@ function killSession() {
   // HUP the whole process group (claude + its MCP server children), then
   // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
   const pid = s.pty.pid
+  if (WIN) {
+    // no process groups: node-pty kills every process on the ConPTY console
+    try { s.pty.kill() } catch { /* dead */ }
+    s.server.close()
+    return
+  }
   try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
   setTimeout(() => {
     try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }

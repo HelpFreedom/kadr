@@ -6,8 +6,9 @@ import { promises as fsp } from 'fs'
 import { join, basename } from 'path'
 import { tmpdir } from 'os'
 import type { ProbeResult, ExportJob, ExportProgress, WaveformData, AudioSegment } from '@shared/types'
-import { rawEncodeArgs } from '@shared/rawEncode'
+import { rawEncodeArgs, NVENC_H264 } from '@shared/rawEncode'
 import { filterFileFlag, packedColourChain, type FilterFileFlag } from '@shared/ffmpegFlags'
+import { hasNvenc } from './nvenc'
 
 const execFileP = promisify(execFile)
 
@@ -424,7 +425,11 @@ export async function makeDecoded(
     '-map', '0:v:0', '-an',
     // an HDR source is tone-mapped to SDR BT.709 on the way (electron/hdr.ts)
     ...(opts?.vfPre ? ['-vf', opts.vfPre] : []),
-    '-c:v', 'libx264', '-preset', 'fast', '-crf', '14', '-pix_fmt', 'yuv420p',
+    // NVENC cq 16 ≈ x264 crf 14 here (same SSIM), ~1.7× faster on DNxHR
+    ...(hasNvenc(FFMPEG)
+      ? [...NVENC_H264, '-cq', '16', '-b:v', '0']
+      : ['-c:v', 'libx264', '-preset', 'fast', '-crf', '14']),
+    '-pix_fmt', 'yuv420p',
     '-movflags', '+faststart',
     out
   ]
@@ -647,7 +652,7 @@ export class RawVideoEncoder {
     bitrate: number
     out: string
   }) {
-    const child = spawn(FFMPEG, rawEncodeArgs(opts), { stdio: ['pipe', 'ignore', 'pipe'] })
+    const child = spawn(FFMPEG, rawEncodeArgs({ ...opts, nvenc: hasNvenc(FFMPEG) }), { stdio: ['pipe', 'ignore', 'pipe'] })
     this.child = child
     child.stderr!.on('data', (c) => { this.err += c })
     this.closed = new Promise((resolve, reject) => {

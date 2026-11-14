@@ -57,6 +57,12 @@ interface Session {
  * closes it (before-quit in registerClaudeIpc).
  */
 let appBridge: Bridge | null = null
+/**
+ * Shared in-flight startup: concurrent callers (app launch + first
+ * claude:open) must reuse one start attempt, not race two servers onto the
+ * published slot. Cleared once the attempt settles.
+ */
+let bridgeStarting: Promise<Bridge> | null = null
 
 /**
  * Per-bridge MCP config, written at startup: claude merges it with the user's
@@ -98,19 +104,35 @@ export async function ensureBridge(
   getWin: () => BrowserWindow | null
 ): Promise<Bridge> {
   if (bridgeListening(appBridge)) return appBridge as Bridge
-  const bridge = await startBridge(getWin, {
-    '/eval': (b) => {
-      const win = getWin()
-      if (!win) throw new Error('no window')
-      return evalInPage(win, String(b.code))
-    },
-    '/critic': async (b) => JSON.stringify({ ok: await criticOp(b) }),
-    '/turn': async (b) => JSON.stringify({ ok: criticTurn(b) })
-  })
-  appBridge = bridge
-  console.log(`[claude] MCP bridge listening on 127.0.0.1:${bridge.port}`)
-  await writeMcpConfig(bridge)
-  return bridge
+  if (bridgeStarting) return bridgeStarting
+  bridgeStarting = (async () => {
+    const bridge = await startBridge({
+      '/eval': (b) => {
+        const win = getWin()
+        if (!win) throw new Error('no window')
+        return evalInPage(win, String(b.code))
+      },
+      '/critic': async (b) => JSON.stringify({ ok: await criticOp(b) }),
+      '/turn': async (b) => JSON.stringify({ ok: criticTurn(b) })
+    })
+    console.log(`[claude] MCP bridge listening on 127.0.0.1:${bridge.port}`)
+    // publish only once the MCP config is on disk: until kadr-mcp.json is
+    // written, sessions would spawn without the kadr server, so a failed
+    // write must not leave a "listening" indicator behind
+    try {
+      await writeMcpConfig(bridge)
+    } catch (err) {
+      bridge.server.close()
+      throw err
+    }
+    appBridge = bridge
+    return bridge
+  })()
+  try {
+    return await bridgeStarting
+  } finally {
+    bridgeStarting = null
+  }
 }
 
 let session: Session | null = null

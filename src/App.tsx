@@ -127,7 +127,7 @@ export default function App() {
   useEffect(() => {
     let stop = false
     const poll = () =>
-      window.kadr.mcpStatus().then((v) => { if (!stop) setMcpUp(v) }).catch(() => {})
+      window.kadr.mcpStatus().then((v) => { if (!stop) setMcpUp(v) }).catch(() => { if (!stop) setMcpUp(false) })
     poll()
     const id = setInterval(poll, 3000)
     return () => { stop = true; clearInterval(id) }

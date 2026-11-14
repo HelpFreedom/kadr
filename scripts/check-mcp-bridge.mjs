@@ -46,7 +46,7 @@ const routes = {
   '/eval': async (b) => { calls.push(b.code); return JSON.stringify({ ok: b.code }) },
   '/critic': async () => JSON.stringify({ ok: true })
 }
-const bridge = await B.startBridge(() => null, routes)
+const bridge = await B.startBridge(routes)
 check('bridge listens on loopback', bridgeListeningOk(bridge))
 const health = await getCode(bridge.port)
 check('GET / health check stays open (no token)', health === 200 || health === 404, `status ${health}`)

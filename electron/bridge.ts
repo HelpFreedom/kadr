@@ -61,7 +61,6 @@ export async function evalInPage(win: PageLike, code: string): Promise<string> {
  * Routes are supplied by the caller so this module stays electron-free.
  */
 export function startBridge(
-  getWin: () => PageLike | null,
   routes: Record<string, (body: Record<string, unknown>) => Promise<string>>
 ): Promise<Bridge> {
   const token = randomBytes(24).toString('hex')

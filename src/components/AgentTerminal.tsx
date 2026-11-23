@@ -5,13 +5,14 @@ import '@xterm/xterm/css/xterm.css'
 import { useEditor } from '@/state/store'
 import { dirOf } from '@shared/paths'
 import { activity } from '@/engine/autosave'
-import { useT } from '@/i18n'
+import { tr, useT } from '@/i18n'
 import { token } from '@/theme'
 import { Icon } from './icons'
 
-// panel position/size, persisted across launches; null = the default CSS
-// placement (docked to the right edge)
+// Both terminals use the same placement. Keep the existing key so users'
+// saved Claude panel position carries over.
 const RECT_KEY = 'kadr.claudeRect'
+export type TerminalAgent = 'claude' | 'codex'
 type PanelRect = { x: number; y: number; w: number; h: number }
 const MIN_W = 340
 const MIN_H = 220
@@ -35,13 +36,10 @@ function loadRect(): PanelRect | null {
   return null
 }
 
-/**
- * Embedded Claude Code session: an xterm terminal driven by a PTY in the
- * main process running the user's `claude` CLI, with the kadr MCP server
- * wired to this very editor instance. Closing the panel kills the session.
- */
-export function ClaudePanel({ onClose }: { onClose: () => void }) {
+/** Interactive agent terminal backed by the main process PTY. */
+export function AgentTerminal({ agent, onClose }: { agent: TerminalAgent; onClose: () => void }) {
   const t = useT()
+  const agentName = agent === 'codex' ? 'Codex CLI' : 'Claude Code'
   const holder = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const [rect, setRect] = useState<PanelRect | null>(loadRect)
@@ -98,7 +96,7 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
   // leave the panel attached to a session the cleanup already killed
   useEffect(() => {
     if (!holder.current) return
-    activity.claude = true
+    activity[agent] = true
     const term = new Terminal({
       fontSize: 13,
       fontFamily: 'monospace',
@@ -115,59 +113,65 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
     term.open(holder.current)
     fit.fit()
 
-    const offData = window.kadr.onClaudeData((data) => term.write(data))
-    const offExit = window.kadr.onClaudeExit(() => {
-      term.write(`\r\n\x1b[90m${t('claudeExited')}\x1b[0m\r\n`)
+    const eventPrefix = agent === 'codex' ? 'onCodex' : 'onClaude'
+    const offData = window.kadr[`${eventPrefix}Data`]((data) => term.write(data))
+    const offExit = window.kadr[`${eventPrefix}Exit`](() => {
+      term.write(`\r\n\x1b[90m${tr('agentExited')}\x1b[0m\r\n`)
     })
-    const onData = term.onData((data) => window.kadr.claudeInput(data))
+    const onData = term.onData((data) => window.kadr[`${agent}Input`](data))
 
     const ro = new ResizeObserver(() => {
       fit.fit()
-      window.kadr.claudeResize(term.cols, term.rows)
+      window.kadr[`${agent}Resize`](term.cols, term.rows)
     })
     ro.observe(holder.current)
 
     const projectPath = useEditor.getState().projectPath
     const cwd = projectPath ? dirOf(projectPath) : null
     let dead = false
-    window.kadr.claudeOpen(term.cols, term.rows, cwd).then((r) => {
+    const showError = (error: string) => {
+      if (dead) return
+      const title = tr('agentFailed').replace('{agent}', agentName)
+      term.write(`\x1b[31m${title}${error ? ` — ${error}` : ''}\x1b[0m\r\n`)
+    }
+    window.kadr[`${agent}Open`](term.cols, term.rows, cwd).then((r) => {
       if (dead) return
       if (!r.ok) {
-        term.write(`\x1b[31m${t('claudeFailed')}: ${r.error ?? ''}\x1b[0m\r\n`)
+        showError(r.error ?? '')
       } else {
         term.focus()
       }
-    })
+    }).catch((error) => showError(error instanceof Error ? error.message : String(error)))
     term.focus()
 
     return () => {
       dead = true
-      activity.claude = false
+      activity[agent] = false
       ro.disconnect()
       onData.dispose()
       offData()
       offExit()
-      window.kadr.claudeClose()
+      void window.kadr[`${agent}Close`]()
       term.dispose()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [agent, agentName])
 
   return (
     <div
-      className="claude-panel"
+      className={`${agent}-panel`}
+      data-agent={agent}
       ref={panelRef}
       style={rect
         ? { left: rect.x, top: rect.y, width: rect.w, height: rect.h, right: 'auto', bottom: 'auto' }
         : undefined}
     >
       <div className="claude-head" onPointerDown={startMove}>
-        <span><Icon name="bot" size={15} /> Claude Code</span>
-        <span className="dim claude-hint">{t('claudeHint')}</span>
+        <span><Icon name="bot" size={15} /> {agentName}</span>
+        <span className="dim claude-hint">{t(agent === 'codex' ? 'codexHint' : 'claudeHint')}</span>
         <button
           className="claude-close"
-          title={t('claudeClose')}
-          aria-label={t('claudeClose')}
+          title={t('agentClose')}
+          aria-label={t('agentClose')}
           onClick={onClose}
         >
           <Icon name="close" size={15} />

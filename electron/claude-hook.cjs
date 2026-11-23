@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// UserPromptSubmit hook of the embedded Claude session (wired by claude.ts
-// through --settings). It tells the editor that a prompt was submitted, so the
+// UserPromptSubmit hook of the embedded agent session.
+// It tells the editor that a prompt was submitted, so the
 // critic's limits (shared/critic.ts) open a new turn — the editor decides
 // whether the prompt was the user's: the CLI submits prompts of its own too
 // (a background agent finishing arrives as a <task-notification>).
@@ -11,8 +11,8 @@
 // machine-made one, and a prompt can be megabytes of paste.
 const http = require('http')
 
-const PORT = Number(process.argv[2])
-const TOKEN = process.argv[3] || ''
+const PORT = Number(process.argv[2] || process.env.KADR_MCP_PORT)
+const TOKEN = process.argv[3] || process.env.KADR_MCP_TOKEN || ''
 const END = 256
 
 let raw = ''

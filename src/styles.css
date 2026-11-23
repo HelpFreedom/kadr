@@ -1172,9 +1172,9 @@ div.tr-error {
 .sub-cue textarea { width: 100%; resize: vertical; font-size: var(--fz-md); }
 
 /* ===========================================================================
-   Embedded Claude Code terminal
+   Embedded agent terminals
    =========================================================================== */
-.claude-panel {
+.claude-panel, .codex-panel {
   position: fixed;
   right: var(--s5);
   top: 48px;
@@ -1229,7 +1229,7 @@ div.tr-error {
 .claude-close:hover:not(:disabled) { background: var(--c-danger-soft); color: var(--c-danger); }
 .claude-term { flex: 1; min-height: 0; padding: var(--s2) 0 var(--s2) var(--s3); }
 .claude-term .xterm { height: 100%; }
-.claude-btn.active {
+.claude-btn.active, .codex-btn.active {
   background: var(--c-accent-soft);
   border-color: var(--c-accent-line);
   color: var(--c-accent-hi);

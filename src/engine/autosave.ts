@@ -1,6 +1,6 @@
 // Autosave: every 5 minutes a changed project is written to
 // <name>.autosave.kadr next to the saved file (Downloads when never saved).
-// Paused while an export runs or an embedded Claude session is open — those
+// Paused while an export runs or an embedded agent session is open — those
 // must never compete for the disk or snapshot a mid-mutation project.
 import type { Project } from '@shared/types'
 import { useEditor } from '@/state/store'
@@ -11,7 +11,8 @@ export const activity = {
   exporting: false,
   /** the defect detector holds the GPU for minutes */
   voiceCheck: false,
-  claude: false
+  claude: false,
+  codex: false
 }
 
 const INTERVAL_MS = 5 * 60 * 1000
@@ -19,7 +20,7 @@ const INTERVAL_MS = 5 * 60 * 1000
 let lastSnapshot: Project | null = null
 
 async function tick() {
-  if (activity.exporting || activity.claude || activity.voiceCheck) return
+  if (activity.exporting || activity.claude || activity.codex || activity.voiceCheck) return
   const s = useEditor.getState()
   if (s.project === lastSnapshot) return // nothing changed since the last write
   const clips = s.project.tracks.reduce((n, t) => n + t.clips.length, 0)

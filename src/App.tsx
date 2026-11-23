@@ -6,7 +6,7 @@ import { Inspector } from './components/Inspector'
 import { Timeline } from './components/Timeline'
 import { TransportBar, LangSwitch } from './components/TransportBar'
 import { ExportDialog } from './components/ExportDialog'
-import { ClaudePanel } from './components/ClaudePanel'
+import { AgentTerminal, type TerminalAgent } from './components/AgentTerminal'
 import { TranscribeDialog, SubtitlePanel } from './components/TextTools'
 import { CaptionsDialog } from './components/CaptionsDialog'
 import { NeonWaveDialog } from './components/NeonWaveDialog'
@@ -120,7 +120,7 @@ export default function App() {
   const [tlHeight, setTlHeight] = useState(() =>
     Math.min(Number(localStorage.getItem('kadr.tlh')) || 330, window.innerHeight - 220)
   )
-  const [claudeOpen, setClaudeOpen] = useState(false)
+  const [terminalAgent, setTerminalAgent] = useState<TerminalAgent | null>(null)
   const [debugOpen, setDebugOpen] = useState(false)
   const [storageOpen, setStorageOpen] = useState(false)
   const popWin = usePopout((s) => s.win)
@@ -346,12 +346,22 @@ export default function App() {
           {logUnseen > 0 && <span className="log-badge">{logUnseen > 99 ? '99+' : logUnseen}</span>}
         </button>
         <button
-          className={claudeOpen ? 'claude-btn active' : 'claude-btn'}
+          className={terminalAgent === 'claude' ? 'claude-btn active' : 'claude-btn'}
           data-act="claude"
           title={t('claudeTitle')}
-          onClick={() => setClaudeOpen((v) => !v)}
+          aria-pressed={terminalAgent === 'claude'}
+          onClick={() => setTerminalAgent((current) => current === 'claude' ? null : 'claude')}
         >
           <Icon name="bot" /> Claude
+        </button>
+        <button
+          className={terminalAgent === 'codex' ? 'codex-btn active' : 'codex-btn'}
+          data-act="codex"
+          title={t('codexTitle')}
+          aria-pressed={terminalAgent === 'codex'}
+          onClick={() => setTerminalAgent((current) => current === 'codex' ? null : 'codex')}
+        >
+          <Icon name="bot" /> Codex
         </button>
         <LangSwitch />
       </div>
@@ -386,7 +396,9 @@ export default function App() {
       <TtsSettingsDialog />
       <SpeakDialog />
       <DefectsDialog />
-      {claudeOpen && <ClaudePanel onClose={() => setClaudeOpen(false)} />}
+      {terminalAgent && (
+        <AgentTerminal key={terminalAgent} agent={terminalAgent} onClose={() => setTerminalAgent(null)} />
+      )}
       {debugOpen && <DebugPanel onClose={() => setDebugOpen(false)} />}
       {storageOpen && <StoragePanel onClose={() => setStorageOpen(false)} />}
       {/* The preview renders into one host div for the whole session; popping

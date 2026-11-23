@@ -1,24 +1,23 @@
 #!/usr/bin/env node
-// MCP stdio server bridging Claude Code to the running Kadr editor.
-// Spawned by claude itself (see kadr-mcp.json); forwards tool calls to the
-// editor's local HTTP bridge (port = argv[2]), which evaluates JS in the
-// renderer where window.kadrEditor lives.
+// MCP stdio server bridging an agent to the running Kadr editor.
+// The agent spawns this process, which forwards tool calls to the editor's
+// local HTTP bridge and runs them against window.kadrEditor in the renderer.
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js')
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js')
 const { z } = require('zod')
 const http = require('http')
 
-const PORT = Number(process.argv[2])
-// Per-session secret for /eval. The editor generates it and passes it here
-// through the generated --mcp-config, so it never touches disk in a
-// world-readable place beyond that file; without it the bridge answers 403.
-const TOKEN = process.argv[3] || ''
+const PORT = Number(process.argv[2] || process.env.KADR_MCP_PORT)
+// Claude receives credentials from its MCP config, Codex from its environment.
+const TOKEN = process.argv[3] || process.env.KADR_MCP_TOKEN || ''
+const independentCritic = process.env.KADR_MCP_ROLE === 'critic'
+const codexAuthor = !independentCritic && !!process.env.KADR_MCP_CRITIC_TOKEN
 if (!PORT) {
   console.error('usage: mcp-bridge.cjs <editor-bridge-port> <token>')
   process.exit(1)
 }
 
-// Never outlive our claude (stdin closes when it dies) or the editor
+// Never outlive the agent (stdin closes when it dies) or the editor
 // (bridge port stops answering) — an orphaned bridge inherits Chromium's
 // listening sockets and would block the next editor launch.
 process.stdin.on('end', () => process.exit(0))
@@ -36,6 +35,9 @@ setInterval(() => {
 
 /** POST the code (async function body) to the editor, return parsed result. */
 const editorEval = (code) => post('/eval', { code })
+const reviewQuery = (op, code, params) => independentCritic
+  ? post('/review-query', { op, ...params })
+  : editorEval(code)
 /** the critic's ledger in main (electron/critic.ts) */
 const critic = (body) => post('/critic', body)
 
@@ -114,7 +116,7 @@ server.registerTool('kadr_state', {
   inputSchema: {}
 }, async () => {
   try {
-    return asText(await editorEval(`
+    return asText(await reviewQuery('state', `
       const s = window.kadrEditor.useEditor.getState()
       // strip multi-MB base64 blobs: a >16 MB tool result makes claude drop
       // the whole MCP connection ("stdout overflow")
@@ -315,12 +317,12 @@ server.registerTool('kadr_check', {
   }
 }, async ({ clipIds, pixels, collisions }) => {
   try {
-    return asText(await editorEval(`
+    return asText(await reviewQuery('check', `
       const r = await window.kadrEditor.runChecks(${JSON.stringify({ clipIds, pixels, collisions })})
       return { checked: r.checked,
         warnings: r.issues.filter((i) => i.level === 'warn').map((i) => ({ kind: i.kind, t: +i.t.toFixed(3), end: i.end != null ? +i.end.toFixed(3) : undefined, clipId: i.clipId, message: i.message })),
         notes: r.issues.filter((i) => i.level === 'info').slice(0, 80).map((i) => ({ kind: i.kind, t: +i.t.toFixed(3), message: i.message })),
-        events: r.events.length }`))
+        events: r.events.length }`, { options: { clipIds, pixels, collisions } }))
   } catch (e) { return asError(e) }
 })
 
@@ -364,15 +366,15 @@ server.registerTool('kadr_review_begin', {
   }
 }, async ({ from, to }) => {
   try {
-    const ctx = await editorEval('return window.kadrEditor.criticContext()')
+    const ctx = await reviewQuery('context', 'return window.kadrEditor.criticContext()')
     const end = ctx.duration > 0 ? Math.min(to, ctx.duration) : to
     const b = await critic({ op: 'begin', from, to: end, projectPath: ctx.projectPath, projectName: ctx.projectName })
     if (!b.ok) return asText({ refused: true, code: b.code, message: b.message })
     let plan = null
     let planError
     try {
-      plan = await editorEval(`return await window.kadrEditor.criticPlan(${JSON.stringify({
-        from: b.from, to: b.to, mode: b.mode, prior: b.prior ?? [] })})`)
+      const options = { from: b.from, to: b.to, mode: b.mode, prior: b.prior ?? [] }
+      plan = await reviewQuery('plan', `return await window.kadrEditor.criticPlan(${JSON.stringify(options)})`, { options })
       await critic({ op: 'plan', id: b.id, plan: plan.frames.map((f) => [f.t, f.why]) })
     } catch (e) { planError = String(e.message || e) }
     return asText({
@@ -422,23 +424,30 @@ server.registerTool('kadr_review_frames', {
     if (!res.ok) throw new Error(res.message)
     if (!res.allowed) throw new Error('this round has rendered all the frames it may (60) — judge from the sheets you have')
     const take = ts.slice(0, res.allowed)
-    const w = width ?? 560
+    const w = independentCritic ? Math.min(width ?? 560, 1280) : width ?? 560
     const cols = w >= 1600 ? 1 : w >= 900 ? 2 : 3
     const per = cols * cols
     const sheets = []
+    const images = []
     for (let i = 0; i < take.length; i += per) {
       const chunk = take.slice(i, i + per)
-      const r = await editorEval(`
-        const r = await window.kadrEditor.contactSheet(${JSON.stringify({ times: chunk, cols: Math.min(cols, chunk.length), width: w, dir: g.dir || undefined })})
-        return { path: r.path, frames: r.frames.map((f) => ({ t: f.t, label: f.label })) }`)
+      const options = { times: chunk, cols: Math.min(cols, chunk.length), width: w }
+      const r = await reviewQuery('sheet', `
+        const r = await window.kadrEditor.contactSheet(${JSON.stringify({ ...options, dir: g.dir || undefined })})
+        return { path: r.path, frames: r.frames.map((f) => ({ t: f.t, label: f.label })) }`, { ...options, id: reviewId })
       sheets.push({ path: r.path, frames: r.frames.map((f) => ({ ...f, why: why.get(f.t) })) })
       await critic({ op: 'sheets', id: reviewId, paths: [r.path] })
+      if (independentCritic) {
+        images.push({ type: 'image', mimeType: 'image/jpeg', data: r.image })
+      }
     }
-    return asText({
+    const result = asText({
       sheets,
       notRendered: ts.length - take.length || undefined,
       outsideRange: outside || undefined
     })
+    result.content.push(...images)
+    return result
   } catch (e) { return asError(e) }
 })
 
@@ -485,6 +494,21 @@ server.registerTool('kadr_review_submit', {
     return asText({ answer: lines.join('\n') })
   } catch (e) { return asError(e) }
 })
+
+if (codexAuthor) {
+  const { runCodexCritic } = require('./codexCritic.cjs')
+  server.registerTool('kadr_review', {
+    description: 'Ask an independent Kadr critic to review a finished stretch of the live timeline, or verify its earlier findings after repairs. Send only the exact range and the user’s relevant requirements in their own words. Follow the returned next step. A refusal ends review of this range for this turn.',
+    inputSchema: {
+      from: z.number().describe('range start in timeline seconds'),
+      to: z.number().describe('range end in timeline seconds'),
+      requirements: z.string().describe('relevant requirements quoted from the user, or an empty string')
+    }
+  }, async (params, { signal }) => {
+    try { return asText(await runCodexCritic({ ...params, signal })) }
+    catch (e) { return asError(e) }
+  })
+}
 
 server.registerTool('kadr_export', {
   description:

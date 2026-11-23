@@ -1,6 +1,6 @@
 # Kadr
 
-**AI-native, GPU-accelerated video editor — with Claude Code built into the timeline.**
+**AI-native, GPU-accelerated video editor with built-in Claude Code and Codex CLI.**
 
 [Русская версия →](README.md) · [Full feature guide (RU) →](FEATURES.md) · [Video →](https://www.youtube.com/watch?v=1RKRtRgzE24)
 
@@ -10,8 +10,8 @@
 
 Kadr is a multi-track video editor (Electron + React + TypeScript) built
 around one idea: *an AI agent should be able to edit video next to you, on
-the same timeline, with the same tools.* Press “Claude”, type “add animated
-captions to this part”, watch it happen live in the preview.
+the same timeline, with the same tools.* Press “Claude” or “Codex”, type
+“add animated captions to this part”, and watch it happen live in the preview.
 
 ## Highlights
 
@@ -177,9 +177,14 @@ captions to this part”, watch it happen live in the preview.
   needs them, so a long session no longer loses the tail of its rules; the
   skills are checked automatically, including by a real Claude on typical
   tasks.
+- 🤖 **Embedded Codex CLI** — a separate terminal panel. Codex reads the
+  open timeline and edits clips over MCP. The session can read Kadr's
+  bundled editing, music, motion graphics, and 3D skills.
 - 🧐 **A critic with fresh eyes** — before it shows you a finished scene,
-  titles or a promo, the embedded Claude hands it to a critic subagent. The
-  critic judges the frames only, never the intention, and names at most
+  titles or a promo, the embedded assistant hands it to an independent
+  critic. For Codex, Kadr starts a separate CLI session with access to
+  the editor's frames and measurements. The critic judges the frames only,
+  never the intention, and names at most
   the three worst defects: when, what is visible, one fix. Kadr itself
   picks the frames it sees (both sides of every cut, transition middles,
   settled captions, big events, the start and the last frame), and
@@ -227,6 +232,7 @@ captions to this part”, watch it happen live in the preview.
 | ffmpeg + ffprobe | import, audio mix, export | in PATH; the filter-graph-from-file syntax is picked per version (before 7.0 and from 7.0, 9.x included) |
 | python3 + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | speech-to-text, auto-captions | `pip install faster-whisper "av<19"` (faster-whisper 1.2.1 does not work with PyAV 19); models download on first use |
 | [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | the “Claude” panel | optional; uses your existing login |
+| [Codex CLI](https://developers.openai.com/codex/cli) | the “Codex” panel | optional, requires a current `codex` on PATH (launch options checked with 0.171.0) |
 | network (one-time) | Remotion fragments workspace | `~/kadr-fragments`, ~150 MB |
 | an [ElevenLabs](https://elevenlabs.io) key | voice-over | optional; entered in the voice-over settings and kept outside the project |
 | python ≥ 3.11 with torch | voice-over defect detection | optional; the interpreter is a setting, and without it the module degrades to plain voice-over instead of breaking |
@@ -247,10 +253,21 @@ proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
 { "env": { "HTTPS_PROXY": "http://127.0.0.1:1080", "NO_PROXY": "127.0.0.1,localhost" } }
 ```
 
+To use Codex, open a project and click **Codex** in the toolbar. The session
+uses your existing Codex CLI sign-in. If you haven't signed in yet, run
+`codex login` in a terminal. Kadr connects MCP for the session. Your Codex
+CLI permissions apply, and no extra MCP registration is required.
+Closing the panel ends the session.
+
+To reset the critic’s limits on new prompts, open `/hooks` in the Codex panel and trust Kadr's
+`UserPromptSubmit` hook. Its command refers to `electron/claude-hook.cjs`.
+Codex saves your trust decision for the current hook definition. The hook
+resets the review and verification limits when you send a new message.
+
 ## How the AI integration works
 
-Kadr starts a local HTTP bridge into the renderer and hands Claude an MCP
-server with its own set of tools:
+Kadr connects the embedded session to the open project through a local MCP
+bridge.
 
 | Tool | What it does |
 |---|---|
@@ -275,6 +292,7 @@ server with its own set of tools:
 | `kadr_voice_mark` · `kadr_voice_verdict` | place your own mark · rule on a finding |
 | `kadr_voice_regenerate` | regenerate the confirmed phrases (only those) |
 | `kadr_voice_learn` | report the labelled corpus, and retrain only on explicit confirmation |
+| `kadr_review` | send a finished timeline range to the independent Codex critic or verify the repairs |
 | `kadr_review_begin` · `kadr_review_frames` · `kadr_review_submit` | for the critic subagent only: open a round, render its frames, hand in the verdict |
 
 The killer loop: Claude creates a fragment, edits its TSX with normal file

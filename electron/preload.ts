@@ -262,6 +262,20 @@ const api: KadrApi = {
     ipcRenderer.on('claude:exit', handler)
     return () => ipcRenderer.removeListener('claude:exit', handler)
   },
+  codexOpen: (cols, rows, cwd) => ipcRenderer.invoke('codex:open', cols, rows, cwd),
+  codexInput: (data) => ipcRenderer.send('codex:input', data),
+  codexResize: (cols, rows) => ipcRenderer.send('codex:resize', cols, rows),
+  codexClose: () => ipcRenderer.invoke('codex:close'),
+  onCodexData: (cb) => {
+    const handler = (_e: unknown, data: string) => cb(data)
+    ipcRenderer.on('codex:data', handler)
+    return () => ipcRenderer.removeListener('codex:data', handler)
+  },
+  onCodexExit: (cb) => {
+    const handler = (_e: unknown, code: number) => cb(code)
+    ipcRenderer.on('codex:exit', handler)
+    return () => ipcRenderer.removeListener('codex:exit', handler)
+  },
 
   criticList: () => ipcRenderer.invoke('critic:list'),
   onCriticChanged: (cb) => {

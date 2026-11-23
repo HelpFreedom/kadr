@@ -11,6 +11,7 @@ import {
 import { mediaCacheKey, proxySuffix, decodedSuffix, reverseSuffix } from './cacheKeys'
 import { registerStorageIpc } from './storage'
 import { registerClaudeIpc } from './claude'
+import { registerCodexIpc } from './codex'
 import { registerTranscribeIpc } from './transcribe'
 import { registerTtsIpc } from './tts'
 import { registerVoiceIpc } from './voice'
@@ -279,6 +280,7 @@ app.whenReady().then(() => {
   void pruneDecodedCache()
   void sweepPartFiles()
   registerClaudeIpc(() => win)
+  registerCodexIpc(() => win)
   registerTranscribeIpc(() => win)
   registerTtsIpc(() => win)
   registerVoiceIpc(() => win)

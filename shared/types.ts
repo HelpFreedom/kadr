@@ -1329,6 +1329,15 @@ export interface KadrApi {
   onClaudeData(cb: (data: string) => void): () => void
   onClaudeExit(cb: (code: number) => void): () => void
 
+  /** Embedded Codex CLI terminal session (PTY in main + MCP bridge). */
+  codexOpen(cols: number, rows: number, cwd: string | null):
+    Promise<{ ok: boolean; error?: string }>
+  codexInput(data: string): void
+  codexResize(cols: number, rows: number): void
+  codexClose(): Promise<void>
+  onCodexData(cb: (data: string) => void): () => void
+  onCodexExit(cb: (code: number) => void): () => void
+
   /** the critic's ledger (electron/critic.ts) — the page only reads it */
   criticList(): Promise<CriticView>
   onCriticChanged(cb: (v: CriticView) => void): () => void

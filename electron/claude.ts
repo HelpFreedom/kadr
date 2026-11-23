@@ -3,13 +3,12 @@
 // HTTP bridge (main ⇄ renderer eval) that the MCP stdio server
 // (mcp-bridge.cjs, spawned by claude itself) talks to.
 import { app, BrowserWindow, ipcMain } from 'electron'
-import { createServer, type Server } from 'http'
-import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import type { IPty } from 'node-pty'
-import { criticOp, criticTurn, criticNewSession, registerCriticIpc } from './critic'
+import { startBridge, type EditorBridge } from './agentBridge'
+import { criticNewSession, registerCriticIpc } from './critic'
 import { syncSkills } from './skillSync'
 
 // The session inherits this process's environment MINUS the markers of any
@@ -46,8 +45,7 @@ const SYSTEM_HINT =
 
 interface Session {
   pty: IPty
-  server: Server
-  port: number
+  bridge: EditorBridge
 }
 
 let session: Session | null = null
@@ -125,80 +123,6 @@ export async function sweepStaleSessions(): Promise<number> {
   }
   if (killed) console.log(`[claude] swept ${killed} stale session group(s)`)
   return killed
-}
-
-/** JS evaluated in the page (async function body) → JSON result. */
-async function evalInPage(win: BrowserWindow, code: string): Promise<string> {
-  const wrapped = `(async () => {
-    try {
-      const r = await (async () => { ${code}\n })()
-      return JSON.stringify({ ok: r === undefined ? null : r })
-    } catch (e) {
-      return JSON.stringify({ error: String((e && (e.stack || e.message)) || e) })
-    }
-  })()`
-  return win.webContents.executeJavaScript(wrapped, true)
-}
-
-/**
- * Local bridge: POST /eval {code} from mcp-bridge.cjs into the renderer.
- *
- * /eval is arbitrary JS in the page, and the page holds window.kadr (file
- * writes, pty spawn) — so the socket needs a door, not just an address.
- * Anything running on this machine can reach 127.0.0.1, and a WEB PAGE can
- * too: a fetch() with a simple content type is sent cross-origin without the
- * browser asking permission first, and the reply being unreadable does not
- * stop the code from running. A fragment previewed from the workspace vite
- * server is such a page. Two cheap locks close that:
- *   • a per-session secret in a custom header — a custom header forces the
- *     browser to ask permission first (preflight), which this server answers
- *     with 404, so a page cannot even send the request;
- *   • rejecting anything that carries an Origin at all — only browsers set
- *     it, and the only legitimate client here is a node process.
- * The health check (GET /) stays open: mcp-bridge only needs *a* reply.
- * Behind the same two locks: POST /critic (the critic's ledger, from the
- * kadr_review_* tools) and POST /turn (the UserPromptSubmit hook).
- */
-function startBridge(
-  win: BrowserWindow
-): Promise<{ server: Server; port: number; token: string }> {
-  const token = randomBytes(24).toString('hex')
-  const routes: Record<string, (body: Record<string, unknown>) => Promise<string>> = {
-    '/eval': (b) => evalInPage(win, String(b.code)),
-    '/critic': async (b) => JSON.stringify({ ok: await criticOp(b) }),
-    '/turn': async (b) => JSON.stringify({ ok: criticTurn(b) })
-  }
-  return new Promise((resolve, reject) => {
-    const server = createServer((req, res) => {
-      const route = req.method === 'POST' ? routes[req.url ?? ''] : undefined
-      if (!route) {
-        res.writeHead(404).end()
-        return
-      }
-      if (req.headers.origin !== undefined || req.headers['x-kadr-token'] !== token) {
-        res.writeHead(403).end()
-        return
-      }
-      let body = ''
-      req.on('data', (c) => { body += c })
-      req.on('end', async () => {
-        try {
-          const out = await route(JSON.parse(body))
-          res.writeHead(200, { 'Content-Type': 'application/json' }).end(out)
-        } catch (err) {
-          res
-            .writeHead(200, { 'Content-Type': 'application/json' })
-            .end(JSON.stringify({ error: String(err) }))
-        }
-      })
-    })
-    server.on('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address()
-      if (addr && typeof addr === 'object') resolve({ server, port: addr.port, token })
-      else reject(new Error('bridge listen failed'))
-    })
-  })
 }
 
 function which(cmd: string): Promise<string | null> {
@@ -342,7 +266,7 @@ async function spawnSession(
   const cmdName = process.env.KADR_CLAUDE_CMD || cfg.command || 'claude'
   const bin = (await which(cmdName)) ?? cmdName
 
-  let bridge: { server: Server; port: number; token: string }
+  let bridge: EditorBridge
   try {
     bridge = await startBridge(win)
   } catch (err) {
@@ -408,7 +332,7 @@ async function spawnSession(
     })
     // publish BEFORE wiring the handlers: data emitted between spawn and the
     // assignment would otherwise be dropped by the identity guard below
-    const mine: Session = { pty: p, server: bridge.server, port: bridge.port }
+    const mine: Session = { pty: p, bridge }
     session = mine
     // both handlers are keyed to THIS session: a pty that outlived its panel
     // (a kill that lost a race, say) must never paint into the live terminal
@@ -420,13 +344,13 @@ async function spawnSession(
       // (panel toggle, StrictMode remount) drop `session` before killing
       if (session === mine) {
         win.webContents.send('claude:exit', exitCode)
-        mine.server.close()
+        mine.bridge.close()
         session = null
       }
     })
     return { ok: true, port: bridge.port }
   } catch (err) {
-    bridge.server.close()
+    bridge.close()
     return { ok: false, error: String(err) }
   }
 }
@@ -442,7 +366,7 @@ function killSession() {
   setTimeout(() => {
     try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
   }, 1500)
-  s.server.close()
+  s.bridge.close()
 }
 
 /**

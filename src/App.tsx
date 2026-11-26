@@ -18,7 +18,7 @@ import { DefectsDialog } from './components/DefectsDialog'
 import { DebugPanel } from './components/DebugPanel'
 import { StoragePanel } from './components/StoragePanel'
 import { Icon } from './components/icons'
-import { modalsOpen } from './components/Modal'
+import { Modal, modalsOpen } from './components/Modal'
 import { rememberProject } from './engine/storage'
 import { usePopout, previewHost, setPreviewSlot, dockPreviewWindow } from './engine/popout'
 import { useEditor, newProject } from './state/store'
@@ -27,7 +27,7 @@ import { syncProjectFragments } from './engine/fragments'
 import { useT, type TKey } from './i18n'
 import { create } from 'zustand'
 import { baseOf } from '@shared/paths'
-import type { Project } from '@shared/types'
+import type { AiProvider, Project } from '@shared/types'
 import { logError, useLog } from '@/engine/log'
 
 // Save feedback: which project snapshot is on disk (the dirty dot) and a
@@ -120,7 +120,30 @@ export default function App() {
   const [tlHeight, setTlHeight] = useState(() =>
     Math.min(Number(localStorage.getItem('kadr.tlh')) || 330, window.innerHeight - 220)
   )
-  const [claudeOpen, setClaudeOpen] = useState(false)
+  const [assistant, setAssistant] = useState<AiProvider | null>(null)
+  const [aiDialog, setAiDialog] = useState<'choose' | 'settings' | null>(null)
+  const [aiDefault, setAiDefault] = useState<AiProvider | 'ask'>(() => {
+    const saved = localStorage.getItem('kadr.aiDefault')
+    return saved === 'claude' || saved === 'codex' ? saved : 'ask'
+  })
+  const [rememberAi, setRememberAi] = useState(false)
+  function saveAiDefault(value: typeof aiDefault) {
+    localStorage.setItem('kadr.aiDefault', value)
+    setAiDefault(value)
+  }
+  function chooseAssistant(value: AiProvider) {
+    if (aiDialog === 'choose' && rememberAi) saveAiDefault(value)
+    setAiDialog(null)
+    setAssistant(value)
+  }
+  function toggleAssistant() {
+    if (assistant) setAssistant(null)
+    else if (aiDefault !== 'ask') setAssistant(aiDefault)
+    else {
+      setRememberAi(false)
+      setAiDialog('choose')
+    }
+  }
   const [debugOpen, setDebugOpen] = useState(false)
   const [storageOpen, setStorageOpen] = useState(false)
   const popWin = usePopout((s) => s.win)
@@ -345,14 +368,16 @@ export default function App() {
           <Icon name="terminal" />
           {logUnseen > 0 && <span className="log-badge">{logUnseen > 99 ? '99+' : logUnseen}</span>}
         </button>
-        <button
-          className={claudeOpen ? 'claude-btn active' : 'claude-btn'}
-          data-act="claude"
-          title={t('claudeTitle')}
-          onClick={() => setClaudeOpen((v) => !v)}
-        >
-          <Icon name="bot" /> Claude
-        </button>
+        <span className="bar-group">
+          <button className={assistant ? 'claude-btn active' : 'claude-btn'} data-act="claude"
+                  title={t('claudeTitle')} onClick={toggleAssistant}>
+            <Icon name="bot" /> AI
+          </button>
+          <button className="icon-only" data-act="ai-settings" title={t('aiSettings')}
+                  aria-label={t('aiSettings')} onClick={() => setAiDialog('settings')}>
+            <Icon name="settings" />
+          </button>
+        </span>
         <LangSwitch />
       </div>
       <div className="main-row">
@@ -386,7 +411,30 @@ export default function App() {
       <TtsSettingsDialog />
       <SpeakDialog />
       <DefectsDialog />
-      {claudeOpen && <ClaudePanel onClose={() => setClaudeOpen(false)} />}
+      {assistant && <ClaudePanel provider={assistant} onClose={() => setAssistant(null)} />}
+      {aiDialog && (
+        <div className="ai-dialog">
+          <Modal title={t(aiDialog === 'choose' ? 'aiChoose' : 'aiSettings')} onClose={() => setAiDialog(null)}>
+            {!assistant && (
+              <div className="modal-actions">
+                <button data-provider="claude" onClick={() => chooseAssistant('claude')}>Claude Code</button>
+                <button data-provider="codex" onClick={() => chooseAssistant('codex')}>Codex</button>
+              </div>
+            )}
+            {aiDialog === 'choose' ? (
+              <label><input type="checkbox" checked={rememberAi}
+                            onChange={(e) => setRememberAi(e.target.checked)} /> {t('aiRemember')}</label>
+            ) : (
+              <label>{t('aiDefault')} <select value={aiDefault}
+                onChange={(e) => saveAiDefault(e.target.value as typeof aiDefault)}>
+                <option value="ask">{t('aiAsk')}</option>
+                <option value="claude">Claude Code</option>
+                <option value="codex">Codex</option>
+              </select></label>
+            )}
+          </Modal>
+        </div>
+      )}
       {debugOpen && <DebugPanel onClose={() => setDebugOpen(false)} />}
       {storageOpen && <StoragePanel onClose={() => setStorageOpen(false)} />}
       {/* The preview renders into one host div for the whole session; popping

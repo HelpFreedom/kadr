@@ -355,8 +355,9 @@ try {
 
   const panel = await evalJs(`(async () => {
     localStorage.setItem('kadr.claudeRect', JSON.stringify({ x: 80, y: 90, w: 520, h: 400 }))
-    const btn = document.querySelector('.claude-btn')
-    btn.click()
+    document.querySelector('[data-act="ai-settings"]').click()
+    await new Promise(r => setTimeout(r, 0))
+    document.querySelector('[data-provider="claude"]').click()
     for (let i = 0; i < 20; i++) {
       if (document.querySelector('.claude-panel')) break
       await new Promise(r => setTimeout(r, 250))

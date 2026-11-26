@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { useEditor } from '@/state/store'
+import type { AiProvider } from '@shared/types'
 import { dirOf } from '@shared/paths'
 import { activity } from '@/engine/autosave'
 import { useT } from '@/i18n'
@@ -36,12 +37,13 @@ function loadRect(): PanelRect | null {
 }
 
 /**
- * Embedded Claude Code session: an xterm terminal driven by a PTY in the
- * main process running the user's `claude` CLI, with the kadr MCP server
+ * Embedded AI session: an xterm terminal driven by a PTY in the
+ * main process running the selected CLI, with the kadr MCP server
  * wired to this very editor instance. Closing the panel kills the session.
  */
-export function ClaudePanel({ onClose }: { onClose: () => void }) {
+export function ClaudePanel({ provider, onClose }: { provider: AiProvider; onClose: () => void }) {
   const t = useT()
+  const name = provider === 'codex' ? 'Codex' : 'Claude Code'
   const holder = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const [rect, setRect] = useState<PanelRect | null>(loadRect)
@@ -130,10 +132,10 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
     const projectPath = useEditor.getState().projectPath
     const cwd = projectPath ? dirOf(projectPath) : null
     let dead = false
-    window.kadr.claudeOpen(term.cols, term.rows, cwd).then((r) => {
+    window.kadr.claudeOpen(term.cols, term.rows, cwd, provider).then((r) => {
       if (dead) return
       if (!r.ok) {
-        term.write(`\x1b[31m${t('claudeFailed')}: ${r.error ?? ''}\x1b[0m\r\n`)
+        term.write(`\x1b[31m${t('claudeFailed')} ${name}: ${r.error ?? ''}\x1b[0m\r\n`)
       } else {
         term.focus()
       }
@@ -151,7 +153,7 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
       term.dispose()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [provider])
 
   return (
     <div
@@ -162,7 +164,7 @@ export function ClaudePanel({ onClose }: { onClose: () => void }) {
         : undefined}
     >
       <div className="claude-head" onPointerDown={startMove}>
-        <span><Icon name="bot" size={15} /> Claude Code</span>
+        <span><Icon name="bot" size={15} /> {name}</span>
         <span className="dim claude-hint">{t('claudeHint')}</span>
         <button
           className="claude-close"

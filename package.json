@@ -1,6 +1,6 @@
 {
   "name": "kadr",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Kadr — GPU-accelerated multi-track video editor with AI integration",
   "main": "out/main/main.js",
   "author": "Black Triangle",
@@ -41,6 +41,7 @@
     "vite": "^7.3.1"
   },
   "contributors": [
-    "Claude (Anthropic)"
+    "Black Triangle",
+    "Codex (OpenAI)"
   ]
 }

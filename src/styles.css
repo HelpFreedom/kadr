@@ -1174,6 +1174,8 @@ div.tr-error {
 /* ===========================================================================
    Embedded Claude Code terminal
    =========================================================================== */
+.ai-dialog .modal-back { z-index: 61; }
+.ai-dialog .modal-actions { justify-content: flex-start; margin-bottom: var(--s4); }
 .claude-panel {
   position: fixed;
   right: var(--s5);

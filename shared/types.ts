@@ -1,3 +1,5 @@
+export type AiProvider = 'claude' | 'codex'
+
 // Core project model shared between main and renderer processes.
 // All times are in seconds, all dimensions in pixels.
 import type { CriticChain } from './critic'
@@ -1320,8 +1322,8 @@ export interface KadrApi {
   /** mtime in ms, or null when missing — used to pick up external edits */
   statFile(path: string): Promise<number | null>
 
-  /** Embedded Claude Code terminal session (PTY in main + MCP bridge). */
-  claudeOpen(cols: number, rows: number, cwd: string | null):
+  /** Embedded AI terminal. Older callers default to Claude Code. */
+  claudeOpen(cols: number, rows: number, cwd: string | null, provider?: AiProvider):
     Promise<{ ok: boolean; port?: number; error?: string }>
   claudeInput(data: string): void
   claudeResize(cols: number, rows: number): void

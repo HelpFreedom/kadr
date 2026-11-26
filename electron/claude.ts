@@ -1,13 +1,14 @@
-// Embedded Claude Code session: a PTY running the user's `claude` CLI inside
+// Embedded AI session: a PTY running Claude Code or Codex inside
 // the editor's terminal panel, wired to the live project through a local
 // HTTP bridge (main ⇄ renderer eval) that the MCP stdio server
-// (mcp-bridge.cjs, spawned by claude itself) talks to.
+// (mcp-bridge.cjs, spawned by the selected CLI) talks to.
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { createServer, type Server } from 'http'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
+import type { AiProvider } from '@shared/types'
 import type { IPty } from 'node-pty'
 import { criticOp, criticTurn, criticNewSession, registerCriticIpc } from './critic'
 import { syncSkills } from './skillSync'
@@ -254,6 +255,12 @@ const SESSION_MARKERS = [
 function sessionEnv(extra?: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = { ...process.env } as Record<string, string>
   for (const key of SESSION_MARKERS) delete env[key]
+  // Proxy clients differ in which casing wins. An explicit override in
+  // either casing takes precedence over the inherited spelling as well.
+  for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY']) {
+    const value = extra?.[key] ?? extra?.[key.toLowerCase()]
+    if (value !== undefined) env[key] = env[key.toLowerCase()] = value
+  }
   return { ...env, ...extra }
 }
 
@@ -331,24 +338,7 @@ function sessionSettings(port: number, token: string): string {
   })
 }
 
-async function spawnSession(
-  win: BrowserWindow,
-  cols: number,
-  rows: number,
-  cwd: string | null
-): Promise<{ ok: boolean; port?: number; error?: string }> {
-  killSession() // a reopen without a close in between
-  const cfg = await userConfig()
-  const cmdName = process.env.KADR_CLAUDE_CMD || cfg.command || 'claude'
-  const bin = (await which(cmdName)) ?? cmdName
-
-  let bridge: { server: Server; port: number; token: string }
-  try {
-    bridge = await startBridge(win)
-  } catch (err) {
-    return { ok: false, error: `bridge: ${String(err)}` }
-  }
-
+async function claudeArgs(cfg: ClaudeConfig, port: number, token: string): Promise<string[]> {
   // per-session MCP config: claude merges it with the user's own servers
   let extraServers: Record<string, unknown> = {}
   try {
@@ -366,27 +356,73 @@ async function spawnSession(
           command: 'node',
           args: [
             join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'),
-            String(bridge.port),
-            bridge.token
+            String(port),
+            token
           ]
         }
       }
     }, null, 1)
   )
 
-  // the critic's limits count per session: whatever the last one left open is over
-  criticNewSession()
   const agents = await loadAgents()
-  const args = cfg.args ?? [
+  return cfg.args ?? [
     '--mcp-config', mcpCfgPath,
     '--append-system-prompt', SYSTEM_HINT,
     ...(Object.keys(agents).length ? ['--agents', JSON.stringify(agents)] : []),
-    '--settings', sessionSettings(bridge.port, bridge.token)
+    '--settings', sessionSettings(port, token)
   ]
+}
+
+async function codexArgs(bin: string, port: number, env: Record<string, string>): Promise<string[]> {
+  // A shared Codex daemon may have been started with a different proxy.
+  // Older standalone CLIs have no daemon and do not accept this switch.
+  const standalone = await new Promise<boolean>((resolve) => {
+    execFile(bin, ['--help'], { env, timeout: 3000 }, (err, help) =>
+      resolve(!err && help.includes('--no-daemon')))
+  })
+  const args = [join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'), String(port)]
+  return [
+    ...(standalone ? ['--no-daemon'] : []),
+    '-c', 'mcp_servers.kadr.command="node"',
+    '-c', `mcp_servers.kadr.args=${JSON.stringify(args)}`,
+    '-c', 'mcp_servers.kadr.env_vars=["KADR_MCP_TOKEN"]'
+  ]
+}
+
+async function spawnSession(
+  win: BrowserWindow,
+  cols: number,
+  rows: number,
+  cwd: string | null,
+  provider: AiProvider
+): Promise<{ ok: boolean; port?: number; error?: string }> {
+  killSession() // a reopen without a close in between
+  const cfg = await userConfig()
+  const cmdName = provider === 'codex' ? 'codex' : process.env.KADR_CLAUDE_CMD || cfg.command || 'claude'
+  // Only the proxy overrides are shared. Claude credentials, command and flags
+  // belong to Claude Code. Both terminals also inherit the editor environment.
+  const overrides = provider === 'codex'
+    ? Object.fromEntries(Object.entries(cfg.env ?? {}).filter(([k]) => /^(http|https|all|no)_proxy$/i.test(k)))
+    : cfg.env
+  const bin = (await which(cmdName)) ?? cmdName
+
+  let bridge: { server: Server; port: number; token: string }
+  try {
+    bridge = await startBridge(win)
+  } catch (err) {
+    return { ok: false, error: `bridge: ${String(err)}` }
+  }
+
   let dir = cwd || app.getPath('home')
   try { await fs.access(dir) } catch { dir = app.getPath('home') }
 
   try {
+    criticNewSession()
+    const env = sessionEnv(overrides)
+    const args = provider === 'codex'
+      ? await codexArgs(bin, bridge.port, env)
+      : await claudeArgs(cfg, bridge.port, bridge.token)
+    if (provider === 'codex') env.KADR_MCP_TOKEN = bridge.token
     // lazy import: node-pty is native — a load failure must not break the app
     const pty = await import('node-pty')
     // Watchdog wrapper: claude runs exec'd in the pty foreground (same pid
@@ -404,7 +440,7 @@ async function spawnSession(
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
       cwd: dir,
-      env: sessionEnv(cfg.env)
+      env
     })
     // publish BEFORE wiring the handlers: data emitted between spawn and the
     // assignment would otherwise be dropped by the identity guard below
@@ -463,12 +499,13 @@ function openSession(
   win: BrowserWindow,
   cols: number,
   rows: number,
-  cwd: string | null
+  cwd: string | null,
+  provider: AiProvider
 ): Promise<{ ok: boolean; port?: number; error?: string }> {
   const gen = ++sessionGen
   const job = sessionChain.then(() =>
     gen === sessionGen
-      ? spawnSession(win, cols, rows, cwd)
+      ? spawnSession(win, cols, rows, cwd, provider)
       : { ok: false, error: 'superseded' }
   )
   sessionChain = job.catch(() => undefined)
@@ -514,10 +551,11 @@ export function registerClaudeIpc(getWin: () => BrowserWindow | null) {
   void sweepStaleSessions() // leftovers from a hard-killed previous run
   void syncSkill()
   registerCriticIpc(getWin)
-  ipcMain.handle('claude:open', (_e, cols: number, rows: number, cwd: string | null) => {
+  ipcMain.handle('claude:open', (_e, cols: number, rows: number, cwd: string | null, provider: AiProvider = 'claude') => {
+    if (provider !== 'claude' && provider !== 'codex') return { ok: false, error: 'unknown AI provider' }
     const win = getWin()
     if (!win) return { ok: false, error: 'no window' }
-    return openSession(win, cols, rows, cwd)
+    return openSession(win, cols, rows, cwd, provider)
   })
   ipcMain.on('claude:input', (_e, data: string) => session?.pty.write(data))
   ipcMain.on('claude:resize', (_e, cols: number, rows: number) => {

@@ -248,7 +248,7 @@ const api: KadrApi = {
   writeTextFile: (path, content) => ipcRenderer.invoke('file:write-text', path, content),
   statFile: (path) => ipcRenderer.invoke('file:stat', path),
 
-  claudeOpen: (cols, rows, cwd) => ipcRenderer.invoke('claude:open', cols, rows, cwd),
+  claudeOpen: (cols, rows, cwd, provider) => ipcRenderer.invoke('claude:open', cols, rows, cwd, provider),
   claudeInput: (data) => ipcRenderer.send('claude:input', data),
   claudeResize: (cols, rows) => ipcRenderer.send('claude:resize', cols, rows),
   claudeClose: () => ipcRenderer.invoke('claude:close'),

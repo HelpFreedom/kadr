@@ -129,9 +129,9 @@ try {
   check('no claude session before the panel is opened', liveSessions(PID) === 0, `pids=${liveSessions(PID)}`)
 
   const opened = await evalJs(`(async () => {
-    const b = [...document.querySelectorAll('button')].find((x) => x.textContent.includes('Claude'))
-    if (!b) throw new Error('no Claude button')
-    b.click()
+    document.querySelector('[data-act="ai-settings"]').click()
+    await new Promise(r => setTimeout(r, 0))
+    document.querySelector('[data-provider="claude"]').click()
     await new Promise((r) => setTimeout(r, 4000))
     return !!document.querySelector('.claude-panel')
   })()`)

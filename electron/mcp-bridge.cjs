@@ -12,7 +12,7 @@ const PORT = Number(process.argv[2])
 // Per-session secret for /eval. The editor generates it and passes it here
 // through the generated --mcp-config, so it never touches disk in a
 // world-readable place beyond that file; without it the bridge answers 403.
-const TOKEN = process.argv[3] || ''
+const TOKEN = process.argv[3] || process.env.KADR_MCP_TOKEN || ''
 if (!PORT) {
   console.error('usage: mcp-bridge.cjs <editor-bridge-port> <token>')
   process.exit(1)
@@ -89,7 +89,10 @@ const asText = (v) => {
 }
 const asError = (e) => ({ content: [{ type: 'text', text: `Error: ${e.message || e}` }], isError: true })
 
-const server = new McpServer({ name: 'kadr', version: '1.0.0' })
+const server = new McpServer({ name: 'kadr', version: '1.0.0' }, {
+  instructions: 'This server controls the live Kadr video editor. Use kadr_state to inspect the open project. ' +
+    'Export only when requested. Kadr editing guidance is in ' + require('path').join(__dirname, 'skills', 'kadr-editor', 'SKILL.md')
+})
 
 server.registerTool('kadr_state', {
   description:

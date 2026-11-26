@@ -1,6 +1,6 @@
 # Kadr
 
-**AI-native, GPU-accelerated video editor — with Claude Code built into the timeline.**
+**AI-native, GPU-accelerated video editor — with Codex or Claude Code built into the timeline.**
 
 [Русская версия →](README.md) · [Full feature guide (RU) →](FEATURES.md) · [Video →](https://www.youtube.com/watch?v=1RKRtRgzE24)
 
@@ -10,7 +10,7 @@
 
 Kadr is a multi-track video editor (Electron + React + TypeScript) built
 around one idea: *an AI agent should be able to edit video next to you, on
-the same timeline, with the same tools.* Press “Claude”, type “add animated
+the same timeline, with the same tools.* Press “AI”, choose an assistant, type “add animated
 captions to this part”, watch it happen live in the preview.
 
 ## Highlights
@@ -165,7 +165,7 @@ captions to this part”, watch it happen live in the preview.
 - 🪟 **Alpha video** — transparent WebM (VP8/VP9+alpha), MOV (ProRes 4444)
   and HEVC with alpha keep their transparency in both preview and export:
   lower tracks show through, masks and effects behave as usual.
-- 🤖 **Embedded Claude Code** — a real interactive Claude session in a
+- 🤖 **Codex and Claude Code** — an interactive session with your chosen assistant in a
   terminal panel, wired to the live project over MCP: it reads the
   timeline, edits clips, transcribes, creates and iterates Remotion
   fragments while you watch the preview update. The panel is draggable,
@@ -226,7 +226,8 @@ captions to this part”, watch it happen live in the preview.
 | Node.js ≥ 20 | everything | |
 | ffmpeg + ffprobe | import, audio mix, export | in PATH; the filter-graph-from-file syntax is picked per version (before 7.0 and from 7.0, 9.x included) |
 | python3 + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | speech-to-text, auto-captions | `pip install faster-whisper "av<19"` (faster-whisper 1.2.1 does not work with PyAV 19); models download on first use |
-| [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | the “Claude” panel | optional; uses your existing login |
+| [Codex CLI](https://github.com/openai/codex) | the “AI” panel | optional, uses your existing login |
+| [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | the “AI” panel | optional; uses your existing login |
 | network (one-time) | Remotion fragments workspace | `~/kadr-fragments`, ~150 MB |
 | an [ElevenLabs](https://elevenlabs.io) key | voice-over | optional; entered in the voice-over settings and kept outside the project |
 | python ≥ 3.11 with torch | voice-over defect detection | optional; the interpreter is a setting, and without it the module degrades to plain voice-over instead of breaking |
@@ -239,9 +240,13 @@ npm install        # postinstall rebuilds node-pty for Electron
 npm run dev
 ```
 
-Import media, edit, press Export. For the AI assistant press “Claude”
-in the topbar (the `claude` CLI must be installed and logged in). If your network needs a
-proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
+## Choosing an AI assistant
+
+Install and sign in to the CLI you want to use. Click **AI** in the toolbar and choose **Claude Code** or **Codex**. Select **Use as default** to open that terminal directly next time. The gear beside AI lets you change the default or restore **Ask every time**. The setting takes effect the next time you open the panel.
+
+![Kadr AI settings with Codex selected as the default assistant](docs/ai-settings.png)
+
+Both CLIs inherit the editor’s proxy settings. An existing proxy override in `~/.config/kadr/claude-env.json` applies to both.
 
 ```json
 { "env": { "HTTPS_PROXY": "http://127.0.0.1:1080", "NO_PROXY": "127.0.0.1,localhost" } }
@@ -249,7 +254,7 @@ proxy for Claude/npm, create `~/.config/kadr/claude-env.json`:
 
 ## How the AI integration works
 
-Kadr starts a local HTTP bridge into the renderer and hands Claude an MCP
+Kadr starts a local HTTP bridge into the renderer and gives the selected assistant an MCP
 server with its own set of tools:
 
 | Tool | What it does |
@@ -341,8 +346,7 @@ it acts.
 
 - **Black Triangle** — repository owner: direction, acceptance, and all of
   the editing and audio expertise behind the features.
-- **Claude** (Anthropic) — pair development: implementation, measurements,
-  tests, and this documentation.
+- **Codex** (OpenAI) — assistant selection, proxy verification, and documentation for this release.
 
 ## License
 

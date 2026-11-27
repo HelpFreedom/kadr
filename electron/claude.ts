@@ -7,7 +7,7 @@ import { createServer, type Server } from 'http'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
-import { join } from 'path'
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'path'
 import type { AiProvider } from '@shared/types'
 import type { IPty } from 'node-pty'
 import { criticOp, criticTurn, criticNewSession, registerCriticIpc } from './critic'
@@ -212,6 +212,47 @@ function which(cmd: string): Promise<string | null> {
   })
 }
 
+interface CliCommand {
+  file: string
+  args: string[]
+}
+
+async function findWindowsFile(dirs: string[], name: string): Promise<string | null> {
+  for (const dir of dirs) {
+    const file = join(dir, name)
+    try {
+      if ((await fs.stat(file)).isFile()) return file
+    } catch { /* try the next directory */ }
+  }
+  return null
+}
+
+async function windowsCli(cmd: string, cwd: string, env: Record<string, string>): Promise<CliCommand> {
+  const pathEntry = Object.entries(env).reverse().find(([key]) => key.toUpperCase() === 'PATH')
+  const dirs = (pathEntry?.[1] ?? '').split(delimiter)
+    .map((dir) => dir.trim().replace(/^"(.*)"$/, '$1'))
+    .filter(isAbsolute)
+  const name = /\.exe$/i.test(cmd) ? cmd : cmd + '.exe'
+  const executable = /[\\/]/.test(name)
+    ? await findWindowsFile([dirname(resolve(cwd, name))], basename(name))
+    : await findWindowsFile(dirs, name)
+  if (executable) return { file: executable, args: [] }
+
+  if (cmd === 'codex') {
+    // Invoke the npm shim's JS entry directly so ConPTY can pass argv
+    // without cmd.exe reinterpreting the quoted MCP configuration.
+    const shim = await findWindowsFile(dirs, 'codex.cmd')
+    if (shim) {
+      const shimDir = dirname(shim)
+      const modules = [join(shimDir, 'node_modules'), dirname(shimDir)]
+      const entry = await findWindowsFile(modules, join('@openai', 'codex', 'bin', 'codex.js'))
+      const node = await findWindowsFile([shimDir, ...dirs], 'node.exe')
+      if (entry && node) return { file: node, args: [entry] }
+    }
+  }
+  throw new Error(cmd + ' executable was not found')
+}
+
 /**
  * Markers a Claude Code session puts in the environment of everything it
  * spawns. They have to go before the panel's own session starts.
@@ -373,11 +414,11 @@ async function claudeArgs(cfg: ClaudeConfig, port: number, token: string): Promi
   ]
 }
 
-async function codexArgs(bin: string, port: number, env: Record<string, string>): Promise<string[]> {
+async function codexArgs(command: CliCommand, port: number, env: Record<string, string>): Promise<string[]> {
   // A shared Codex daemon may have been started with a different proxy.
   // Older standalone CLIs have no daemon and do not accept this switch.
   const standalone = await new Promise<boolean>((resolve) => {
-    execFile(bin, ['--help'], { env, timeout: 3000 }, (err, help) =>
+    execFile(command.file, [...command.args, '--help'], { env, timeout: 3000, windowsHide: true }, (err, help) =>
       resolve(!err && help.includes('--no-daemon')))
   })
   const args = [join(app.getAppPath(), 'electron', 'mcp-bridge.cjs'), String(port)]
@@ -404,7 +445,6 @@ async function spawnSession(
   const overrides = provider === 'codex'
     ? Object.fromEntries(Object.entries(cfg.env ?? {}).filter(([k]) => /^(http|https|all|no)_proxy$/i.test(k)))
     : cfg.env
-  const bin = (await which(cmdName)) ?? cmdName
 
   let bridge: { server: Server; port: number; token: string }
   try {
@@ -419,8 +459,13 @@ async function spawnSession(
   try {
     criticNewSession()
     const env = sessionEnv(overrides)
+    const terminalName = 'xterm-256color'
+    if (process.platform === 'win32') env.TERM = terminalName
+    const command = process.platform === 'win32'
+      ? await windowsCli(cmdName, dir, env)
+      : { file: (await which(cmdName)) ?? cmdName, args: [] }
     const args = provider === 'codex'
-      ? await codexArgs(bin, bridge.port, env)
+      ? await codexArgs(command, bridge.port, env)
       : await claudeArgs(cfg, bridge.port, bridge.token)
     if (provider === 'codex') env.KADR_MCP_TOKEN = bridge.token
     // lazy import: node-pty is native — a load failure must not break the app
@@ -435,13 +480,17 @@ async function spawnSession(
     const wrapper =
       `(while kill -0 ${process.pid} 2>/dev/null; do sleep 3; done; ` +
       `kill -HUP -$$ 2>/dev/null; sleep 2; kill -9 -$$ 2>/dev/null) & exec "$0" "$@"`
-    const p = pty.spawn('/bin/sh', ['-c', wrapper, bin, ...args], {
-      name: 'xterm-256color',
+    const options = {
+      name: terminalName,
       cols: Math.max(20, cols),
       rows: Math.max(5, rows),
       cwd: dir,
       env
-    })
+    }
+    const argv = [...command.args, ...args]
+    const p = process.platform === 'win32'
+      ? pty.spawn(command.file, argv, { ...options, useConptyDll: true })
+      : pty.spawn('/bin/sh', ['-c', wrapper, command.file, ...argv], options)
     // publish BEFORE wiring the handlers: data emitted between spawn and the
     // assignment would otherwise be dropped by the identity guard below
     const mine: Session = { pty: p, server: bridge.server, port: bridge.port }
@@ -471,13 +520,16 @@ function killSession() {
   if (!session) return
   const s = session
   session = null
-  // HUP the whole process group (claude + its MCP server children), then
-  // escalate: a busy tree that shrugs off SIGHUP must not outlive the panel
-  const pid = s.pty.pid
-  try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
-  setTimeout(() => {
-    try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
-  }, 1500)
+  if (process.platform === 'win32') {
+    try { s.pty.kill() } catch { /* dead */ }
+  } else {
+    // Close the POSIX process group, including the assistant's MCP children.
+    const pid = s.pty.pid
+    try { process.kill(-pid, 'SIGHUP') } catch { try { s.pty.kill() } catch { /* dead */ } }
+    setTimeout(() => {
+      try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
+    }, 1500)
+  }
   s.server.close()
 }
 

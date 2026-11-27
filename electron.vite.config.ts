@@ -1,7 +1,7 @@
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, realpathSync } from 'fs'
 import { waylandWindow } from './shared/ozone'
 
 // Electron's GPU process is forked from a zygote that starts BEFORE main.ts
@@ -18,6 +18,20 @@ if (process.platform === 'linux' && existsSync(NV_EGL) && !process.env.__EGL_VEN
   process.env.__EGL_VENDOR_LIBRARY_FILENAMES = NV_EGL
 }
 
+function preserveWindowsPaths(): boolean {
+  if (process.platform !== 'win32') return false
+  try {
+    realpathSync.native(__dirname)
+    return false
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+    // Some Windows sandboxes allow file reads but deny native path canonicalization.
+    return true
+  }
+}
+
+const preserveSymlinks = preserveWindowsPaths()
+
 export default defineConfig({
   main: {
     build: {
@@ -28,6 +42,7 @@ export default defineConfig({
       rollupOptions: { external: ['electron', 'node-pty', 'occt-import-js', 'meshoptimizer'] }
     },
     resolve: {
+      preserveSymlinks,
       alias: { '@shared': resolve(__dirname, 'shared') }
     }
   },
@@ -38,16 +53,22 @@ export default defineConfig({
       rollupOptions: { external: ['electron'] }
     },
     resolve: {
+      preserveSymlinks,
       alias: { '@shared': resolve(__dirname, 'shared') }
     }
   },
   renderer: {
     root: '.',
+    server: {
+      // Use the same IPv4 loopback address in the Vite listener and Electron URL on Windows.
+      host: process.platform === 'win32' ? '127.0.0.1' : undefined
+    },
     build: {
       outDir: 'out/renderer',
       rollupOptions: { input: resolve(__dirname, 'index.html') }
     },
     resolve: {
+      preserveSymlinks,
       alias: {
         '@': resolve(__dirname, 'src'),
         '@shared': resolve(__dirname, 'shared')

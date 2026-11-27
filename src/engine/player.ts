@@ -641,7 +641,9 @@ export class Player {
   }
 
   attach(canvas: HTMLCanvasElement) {
-    this.comp = new Compositor(canvas)
+    // Buffer the preview on Windows so the clear and draw reach the display together.
+    const previewContext = { desynchronized: !navigator.userAgent.includes('Windows NT') }
+    this.comp = new Compositor(canvas, previewContext)
     // A GPU reset (driver hiccup, another app eating VRAM, Chromium force-losing
     // the oldest context once a renderer holds 16) turns every GL call into a
     // no-op. Left alone the preview simply goes black and STAYS black with
@@ -669,7 +671,7 @@ export class Player {
       // and texture in it is gone — a fresh Compositor rebuilds them, and its
       // texture cache starts empty so sources re-upload on the next draw
       try {
-        this.comp = new Compositor(canvas)
+        this.comp = new Compositor(canvas, previewContext)
         this.hooks.setGpuLost(false)
       } catch (err) {
         logError('превью', 'контекст GPU вернулся, но композитор не пересобрался', err)

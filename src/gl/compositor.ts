@@ -308,13 +308,13 @@ export class Compositor {
   width = 0
   height = 0
 
-  constructor(canvas: HTMLCanvasElement | OffscreenCanvas) {
+  constructor(canvas: HTMLCanvasElement | OffscreenCanvas, { desynchronized = true }: { desynchronized?: boolean } = {}) {
     this.canvas = canvas
     const gl = canvas.getContext('webgl2', {
       alpha: false,
       antialias: false,
       preserveDrawingBuffer: true,
-      desynchronized: true
+      desynchronized
     }) as WebGL2RenderingContext | null
     if (!gl) throw new Error('WebGL2 is not available')
     this.gl = gl
